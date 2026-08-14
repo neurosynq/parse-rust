@@ -1,7 +1,7 @@
 [package]
 name = "parse-rust-cli"
 version.workspace = true
-description = "Installs the parse-rust executable: a Rust-native implementation of the Parse Server API."
+description = "Installs the parse-rust executable: parse-rust-server as a standalone binary."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

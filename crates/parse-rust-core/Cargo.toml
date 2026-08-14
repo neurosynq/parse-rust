@@ -1,7 +1,7 @@
 [package]
 name = "parse-rust-core"
 version.workspace = true
-description = "Parse type system, JSON encoding and error codes. The no-I/O core of parse-rust."
+description = "Parse type system, JSON encoding and error codes. The no-I/O core of parse-rust-server."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

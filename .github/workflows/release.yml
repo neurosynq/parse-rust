@@ -24,35 +24,33 @@ env:
 permissions:
   contents: read
 
-# Authentication note, and the intended end state.
+# Authentication: trusted publishing. **No API token is stored anywhere.**
 #
-# This uses a long-lived API token held in `secrets.CARGO_REGISTRY_TOKEN`, because that is the
-# only thing that works before the crates exist. crates.io also supports **trusted publishing**:
-# GitHub Actions proves its identity over OIDC and exchanges it for a token valid about 30
-# minutes, so no secret is stored anywhere. It cannot be configured for a crate that has not been
-# published yet, since you have to own the crate to name its trusted publisher.
+# GitHub proves this workflow's identity over OIDC and crates.io exchanges that proof for a token
+# valid about 30 minutes, scoped to this run. The action's post step revokes it when the job ends.
+# A leaked build log is therefore worth nothing, and there is no secret to rotate.
 #
-# So the sequence is: publish once by hand to claim the names, configure a trusted publisher for
-# each crate on crates.io (repository, this workflow filename, and the `crates-io` environment),
-# then replace the token step below with:
+# This requires a trusted publisher configured on crates.io **for each of the eight crates**,
+# naming the repository `neurosynq/parse-rust`, the workflow file `release.yml`, and the
+# environment `crates-io`. All three must match what this file declares, so renaming the file or
+# the environment silently breaks publishing until the crates.io side is updated to match.
 #
-#     permissions:
-#       id-token: write        # at the job level
-#     - uses: rust-lang/crates-io-auth-action@v1
-#       id: auth
-#     - run: cargo publish --workspace
-#       env:
-#         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-#
-# and delete the repository secret.
+# 0.1.0 was published by hand, because a trusted publisher cannot be configured for a crate that
+# does not exist yet: you have to own the crate before you can name who may publish it.
 
 jobs:
   publish:
     name: publish to crates.io
     runs-on: ubuntu-latest
-    # A token with publish rights lives in this environment. Requiring it means the publish step
-    # can be gated on a reviewer in repository settings without touching this file.
+    # Named in each crate's trusted publisher on crates.io, so the OIDC claim only validates for
+    # runs in this environment. It also gives you a place to require a reviewer before publishing,
+    # in repository settings, without touching this file.
     environment: crates-io
+    permissions:
+      contents: read
+      # Required for the OIDC exchange. Without it the auth step fails with a missing-token error
+      # rather than an authorization one, which is a confusing way to learn this is absent.
+      id-token: write
     services:
       # `cargo test --workspace` includes integration tests that boot the server against a real
       # database. Publishing from an untested commit is how a broken version becomes permanent.
@@ -123,12 +121,22 @@ jobs:
       - name: dry run
         run: cargo publish --workspace --dry-run
 
+      # Exchanges the OIDC identity for a short-lived crates.io token. Deliberately placed after
+      # the dry run and immediately before the upload, so the token's life covers the shortest
+      # possible window and a failure in any earlier step never mints one.
+      - name: authenticate to crates.io
+        id: auth
+        if: >-
+          github.event_name == 'release' ||
+          github.event.inputs.confirm_publish == 'publish'
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: publish
         if: >-
           github.event_name == 'release' ||
           github.event.inputs.confirm_publish == 'publish'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         # crates.io rate-limits new crate names. If this stops partway, the crates that already
         # uploaded are published for good: do not re-run the whole job, publish the remainder
         # individually with `cargo publish -p <name>` in dependency order.
