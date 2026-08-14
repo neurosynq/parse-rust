@@ -1,0 +1,141 @@
+name: release
+
+# Publishes the workspace to crates.io when a GitHub release is published.
+#
+# **Publishing is irreversible.** A version can be yanked but never deleted or replaced, and a
+# crate name is claimed permanently. That shapes this workflow: it refuses to run unless the tag
+# and the workspace version agree, it runs the test suite first, and `workflow_dispatch` performs
+# a dry run rather than a publish so the whole path can be rehearsed without spending a version
+# number.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      confirm_publish:
+        description: 'Type "publish" to upload for real. Anything else is a dry run.'
+        required: false
+        default: 'dry-run'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+# Authentication note, and the intended end state.
+#
+# This uses a long-lived API token held in `secrets.CARGO_REGISTRY_TOKEN`, because that is the
+# only thing that works before the crates exist. crates.io also supports **trusted publishing**:
+# GitHub Actions proves its identity over OIDC and exchanges it for a token valid about 30
+# minutes, so no secret is stored anywhere. It cannot be configured for a crate that has not been
+# published yet, since you have to own the crate to name its trusted publisher.
+#
+# So the sequence is: publish once by hand to claim the names, configure a trusted publisher for
+# each crate on crates.io (repository, this workflow filename, and the `crates-io` environment),
+# then replace the token step below with:
+#
+#     permissions:
+#       id-token: write        # at the job level
+#     - uses: rust-lang/crates-io-auth-action@v1
+#       id: auth
+#     - run: cargo publish --workspace
+#       env:
+#         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+#
+# and delete the repository secret.
+
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    # A token with publish rights lives in this environment. Requiring it means the publish step
+    # can be gated on a reviewer in repository settings without touching this file.
+    environment: crates-io
+    services:
+      # `cargo test --workspace` includes integration tests that boot the server against a real
+      # database. Publishing from an untested commit is how a broken version becomes permanent.
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the main-branch check below needs the commit graph, and a shallow
+          # clone cannot answer "is this commit an ancestor of main".
+          fetch-depth: 0
+
+      # **Publish only from main.** A GitHub release can be cut from a tag pointing at any
+      # commit, including one on a branch that was never reviewed or merged. Checking
+      # `target_commitish` is not enough: it holds whatever was selected in the UI and is the tag
+      # name itself when the tag already existed. Asking the commit graph is the reliable form,
+      # and it is worth doing because the upload it guards cannot be undone.
+      - name: refuse to publish from anything but main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main. Releases publish from main only."
+            exit 1
+          fi
+          echo "$GITHUB_SHA is on main"
+
+      - name: install toolchain
+        # `cargo publish --workspace` needs 1.90 or later. Older cargo publishes one crate at a
+        # time and cannot resolve the sibling path dependencies during verification.
+        run: |
+          rustup update stable
+          rustup default stable
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag is the thing a human typed; the workspace version is the thing that gets
+      # published. When they disagree the tag is a lie, and it is a lie that cannot be corrected
+      # afterwards, so stop here rather than at the registry.
+      - name: tag and workspace version must agree
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
+          echo "tag=$TAG workspace=$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $VERSION"
+            exit 1
+          fi
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: adapter integration (needs MongoDB)
+        run: cargo test -p parse-rust-mongo --test adapter_integration -- --ignored
+
+      # Always runs. Verifies every package builds from its own archive, in dependency order,
+      # with the sibling paths stripped the way the registry will see them.
+      - name: dry run
+        run: cargo publish --workspace --dry-run
+
+      - name: publish
+        if: >-
+          github.event_name == 'release' ||
+          github.event.inputs.confirm_publish == 'publish'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # crates.io rate-limits new crate names. If this stops partway, the crates that already
+        # uploaded are published for good: do not re-run the whole job, publish the remainder
+        # individually with `cargo publish -p <name>` in dependency order.
+        run: cargo publish --workspace
+
+      - name: not published
+        if: >-
+          github.event_name != 'release' &&
+          github.event.inputs.confirm_publish != 'publish'
+        run: echo "Dry run only. Re-run with confirm_publish=publish, or publish a release."

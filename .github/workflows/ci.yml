@@ -1,8 +1,13 @@
 name: ci
 
-# Every step here also runs locally via `tools/test.sh`. The workflow deliberately calls the
-# same steps rather than reimplementing them, so a green CI run means the same thing as a green
-# local run. Duplicating the commands is how the two drift.
+# Every step here also runs locally via `tools/test.sh`, and deliberately as the same commands
+# rather than reimplemented ones, because duplicating them is how the two drift.
+#
+# **CI runs a subset, not the same set.** There is no upstream parse-server checkout here, so
+# Gate B and the differentials that compare against upstream's own modules (bcrypt interop, the
+# MongoTransform oracle, the `_SCHEMA` format oracle) cannot run. Each is named below where it
+# would have run, so its absence is visible rather than assumed. A green run here therefore means
+# less than a green `tools/test.sh`.
 
 on:
   push:
@@ -26,7 +31,7 @@ jobs:
         ports:
           - 27017:27017
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: install toolchain
         run: rustup component add rustfmt clippy
@@ -101,7 +106,7 @@ jobs:
     name: citations resolve at pin
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The design documents cite parse-server by file and line, and a citation that stops
       # resolving reads as verified when it is not. This checks the mechanical half.

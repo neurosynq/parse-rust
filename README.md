@@ -123,6 +123,25 @@ It listens on loopback unless told otherwise. `PARSE_SERVER_HOST` is upstream's 
 honored, but the default here is `127.0.0.1` rather than upstream's `0.0.0.0`, so a half-built
 server cannot end up on a network by accident. Set it to `0.0.0.0` in a container.
 
+### Configuration
+
+Environment variables only for now. Upstream has roughly 292 options and this is the slice that
+has behavior behind it; the names are upstream's, so they carry over.
+
+| Variable | Default | |
+|---|---|---|
+| `PARSE_SERVER_APPLICATION_ID` | none | **required** |
+| `PARSE_SERVER_MASTER_KEY` | none | **required** |
+| `PARSE_SERVER_DATABASE_URI` | `mongodb://127.0.0.1:27017/parse` | |
+| `PORT` | `27800` | `0` binds an ephemeral port and prints it |
+| `PARSE_SERVER_HOST` | `127.0.0.1` | upstream defaults to `0.0.0.0`; set that in a container |
+| `PARSE_SERVER_MOUNT_PATH` | `/parse` | |
+| `PARSE_SERVER_JAVASCRIPT_KEY` | unset | if set, non-master requests must present a client key |
+| `PARSE_SERVER_REST_API_KEY` | unset | same |
+
+The client keys are all-or-nothing, as upstream: configure none and none is required; configure
+any one and every non-master request must present a matching key.
+
 ```
 curl -s http://127.0.0.1:27800/parse/health
 {"status":"ok"}
