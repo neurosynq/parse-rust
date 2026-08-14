@@ -1,0 +1,21 @@
+[package]
+name = "parse-rust-rest"
+version.workspace = true
+description = "The read and write pipelines. The behavioral heart."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+publish.workspace = true
+
+[dependencies]
+parse-rust-core.workspace = true
+parse-rust-schema.workspace = true
+parse-rust-storage.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,24 @@
+# The upstream reference pin. Single source of truth.
+#
+# Every `File.js:LINE` citation in this repository is written against this commit. Read cited
+# content at the pin, never at whatever `../parse-server` happens to have checked out:
+#
+#     git -C ../parse-server show $(grep '^parse-server ' PIN | cut -d' ' -f3):src/RestWrite.js
+#
+# Do not restate these values in prose anywhere else. Reference this file. Four copies of one
+# pin means three stale copies, which is how a verified-looking citation stops resolving.
+#
+# The commit is written in full. An abbreviated SHA cannot be fetched: `git fetch origin ca75b1fe`
+# fails with "couldn't find remote ref", so CI could not reconstruct the checkout from it. Prose
+# elsewhere may say `ca75b1fe`; tooling reads this line.
+#
+# format: <name> <version> <commit>
+
+parse-server 9.10.1-alpha.6 ca75b1fed69921f7843dc20b921d9b02dc352626
+
+# Recorded but not yet pinned. Citations into these are not mechanically checkable until a
+# commit is recorded here.
+#
+# parse-server-s3-adapter    5.3.1     <unpinned>
+# parse-server-push-adapter  <unknown> <unpinned>
+# Parse-SDK-JS               <unknown> <unpinned>

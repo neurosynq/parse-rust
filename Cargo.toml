@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/parse-rust-core",
+  "crates/parse-rust-auth",
+  "crates/parse-rust-rest",
+  "crates/parse-rust-schema",
+  "crates/parse-rust-storage",
+  "crates/parse-rust-mongo",
+  "crates/parse-rust-server",
+  "crates/parse-rust-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Raised from 1.75 to match what the dependency graph actually requires: mongodb 3.8 and its
+# transitive dependencies do not build on anything older. A declared floor nobody can build at is
+# worse than no floor.
+rust-version = "1.88"
+license = "Apache-2.0"
+# Each crate directory carries `LICENSE` and `NOTICE` as symlinks to the ones at the workspace
+# root, because `cargo package` copies only files inside the package directory and a published
+# archive has to stand alone. Symlinks rather than copies so there is one source of truth; cargo
+# resolves them and writes real files into the archive, verified per crate. On a Windows checkout
+# without symlink support these can materialize as text files holding a path, so publish from
+# Linux or macOS, which is also where CI runs.
+readme = "README.md"
+repository = "https://github.com/neurosynq/parse-rust"
+homepage = "https://github.com/neurosynq/parse-rust"
+# `parse-server` and `parse-platform` are exact, uncontested keyword facets on crates.io: zero
+# crates claim either. The bare token `parse` is the opposite, 407 crates deep in string parsers,
+# so declaring it buys nothing and buries the crate. Keyword facets, not the crate name, are what
+# a search for Parse in Rust can actually land on.
+keywords = ["parse-server", "parse-platform", "backend", "mongodb", "baas"]
+categories = ["web-programming::http-server", "database", "api-bindings"]
+# Upstream parse-server writes its log directory into whatever cwd the differential oracles
+# start it from, which is a crate directory. Those logs are gitignored, but `cargo package`
+# on an untracked tree walks the filesystem rather than the index, so without this they end
+# up inside published archives. Excluding them makes the archive contents deterministic
+# instead of dependent on whether the tree happens to be committed.
+exclude = ["logs/"]
+
+# Publishing is *enabled*, which is not the same as published. `cargo publish` uploads a version
+# permanently: it can be yanked but never deleted or replaced, and the crate name is claimed for
+# good. Nothing is on crates.io yet, and nothing goes there until the crate boundaries stop moving.
+# Until then this flag only means `cargo publish` will not refuse before it starts.
+#
+# When it is time, `cargo publish --workspace` (cargo 1.90 or later) uploads all eight in
+# dependency order in one command. Every internal dependency below therefore carries a `version`
+# next to its `path`: cargo strips the path on upload, so a published crate resolves its siblings
+# from the registry. Those versions have to move with `version` above, which is the one piece of
+# duplication the workspace cannot inherit away.
+publish = true
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+thiserror = "2"
+rand = "0.8"
+ryu = "1"
+bcrypt = "0.15"
+bson = "2"
+mongodb = "3"
+futures = "0.3"
+parse-rust-storage = { path = "crates/parse-rust-storage", version = "0.1.0" }
+parse-rust-schema = { path = "crates/parse-rust-schema", version = "0.1.0" }
+parse-rust-rest = { path = "crates/parse-rust-rest", version = "0.1.0" }
+parse-rust-mongo = { path = "crates/parse-rust-mongo", version = "0.1.0" }
+parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.1.0" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = "0.5"
+http = "1"
+form_urlencoded = "1"
+parse-rust-core = { path = "crates/parse-rust-core", version = "0.1.0" }
+parse-rust-server = { path = "crates/parse-rust-server", version = "0.1.0" }

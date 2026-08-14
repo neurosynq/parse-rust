@@ -1,0 +1,18 @@
+[package]
+name = "parse-rust-storage"
+version.workspace = true
+description = "StorageAdapter trait and the query/update AST adapters lower."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+publish.workspace = true
+
+[dependencies]
+parse-rust-core.workspace = true
+indexmap.workspace = true

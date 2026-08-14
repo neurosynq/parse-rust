@@ -1,0 +1,27 @@
+[package]
+name = "parse-rust-cli"
+version.workspace = true
+description = "Installs the parse-rust executable: a Rust-native implementation of the Parse Server API."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+publish.workspace = true
+
+# The binary is `parse-rust`, not the package name. `parse-server` is what the upstream
+# npm package installs, and this must be able to run beside it on one machine, so the two
+# commands cannot share a name. Binary names are not subject to crates.io collisions, so
+# `parse-rust` is available here even though the crate name is not.
+[[bin]]
+name = "parse-rust"
+path = "src/main.rs"
+
+[dependencies]
+parse-rust-server.workspace = true
+parse-rust-mongo.workspace = true
+tokio.workspace = true

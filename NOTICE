@@ -1,0 +1,46 @@
+parse-rust
+Copyright 2026 Adrian Curtin
+
+This product includes software derived from Parse Server
+(https://github.com/parse-community/parse-server), licensed under the Apache
+License, Version 2.0.
+
+Apache License 2.0 section 4(d) requires a derivative work to carry the
+attribution notices from the NOTICE file of the work it derives from. Parse
+Server's NOTICE reads, in full:
+
+    Parse Server
+
+    Copyright 2015-present Parse Platform
+
+    This product includes software developed at Parse Platform.
+    www.parseplatform.org
+
+    ---
+
+    As of April 5, 2017, Parse, LLC has transferred this code to the Parse
+    Platform organization, and will no longer be contributing to or
+    distributing this code.
+
+parse-rust is a reimplementation of Parse Server in Rust. Its behavior, wire
+protocol, error codes, configuration surface and internal logic are derived from
+the Parse Server source, and its documentation cites that source directly by file
+and line. It is therefore a derivative work rather than an independent
+clean-room implementation, and this notice records that plainly.
+
+The Parse Server test suite (`spec/`) is used as a conformance oracle. Any portion
+of that suite redistributed with or adapted by this project remains under the
+Apache License, Version 2.0.
+
+parse-rust is itself distributed under the Apache License, Version 2.0. You may
+obtain a copy at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+Parse and Parse Server are trademarks of their respective owners. This project is
+not affiliated with, endorsed by, or sponsored by Parse Community.

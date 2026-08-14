@@ -1,0 +1,29 @@
+[package]
+name = "parse-rust-mongo"
+version.workspace = true
+description = "MongoDB storage adapter and the Parse/BSON transform."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+publish.workspace = true
+
+[dependencies]
+parse-rust-core.workspace = true
+parse-rust-storage.workspace = true
+bson.workspace = true
+mongodb.workspace = true
+futures.workspace = true
+parse-rust-schema.workspace = true
+indexmap.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+parse-rust-storage.workspace = true
+parse-rust-schema.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,25 @@
+# Markdown is not committed by default.
+#
+# This repository is the public face of a project whose design notes, audit trail and security
+# research live in a separate private repository. Ignoring markdown wholesale means none of that
+# can be published by an absent-minded `git add .`; publishing a document becomes a deliberate act
+# with a visible negation below it.
+#
+# CLAUDE.md is deliberately NOT negated. It is working instructions, not documentation.
+*.md
+!README.md
+!CONTRIBUTING.md
+!CHANGELOG.md
+
+# Agent instructions, same reasoning as CLAUDE.md above. Ignored here rather than relying on a
+# global ignore, which is not present in someone else's checkout.
+.claude/
+
+/target/
+**/target/
+node_modules/
+.env
+logs/
+
+# Scratch directories used by the test harness when comparing against upstream.
+/tmp/

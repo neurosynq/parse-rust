@@ -1,0 +1,18 @@
+[package]
+name = "parse-rust-auth"
+version.workspace = true
+description = "Parse Server compatible bcrypt password hashing."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+publish.workspace = true
+
+[dependencies]
+parse-rust-core.workspace = true
+bcrypt.workspace = true

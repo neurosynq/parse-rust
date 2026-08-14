@@ -1,0 +1,123 @@
+name: ci
+
+# Every step here also runs locally via `tools/test.sh`. The workflow deliberately calls the
+# same steps rather than reimplementing them, so a green CI run means the same thing as a green
+# local run. Duplicating the commands is how the two drift.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    # The adapter tests, the schema-format oracle and both acceptance gates all need a real
+    # MongoDB. Mocking it would test that the mock behaves like the mock.
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      # The number formatter is checked against Node rather than against expectations someone
+      # typed in. This is the step that caught the ECMAScript tie-break rule, so it is not
+      # optional here even though it is #[ignore]d in a plain `cargo test`.
+      # `--skip` matches test *names*, not target file names, so the previous form here excluded
+      # nothing and those tests ran (and would have failed) regardless. Select the targets
+      # explicitly instead, which cannot silently do the wrong thing.
+      #
+      # Three `#[ignore]`d suites need the upstream checkout's `node_modules` to compare against
+      # the real parse-server implementation: bcrypt interop, the MongoTransform oracle and the
+      # `_SCHEMA` format oracle. Provisioning that is the next CI step; until then they are named
+      # here as not-run rather than silently absent.
+      - name: adapter integration (needs MongoDB)
+        run: cargo test -p parse-rust-mongo --test adapter_integration -- --ignored
+
+      - name: js_number differential (needs node only)
+        run: cargo test -p parse-rust-core --test js_number_differential -- --ignored
+
+      # Boots parse-rust on an ephemeral port and replays a spec file's assertions over HTTP.
+      # Every assertion in these runners holds against real parse-server too, so a failure here
+      # means parse-rust diverged rather than that the expectation was invented. Checks that
+      # would NOT hold upstream, such as the `/serverInfo` capability values parse-rust
+      # deliberately reports differently, live in the Rust tests instead.
+      # The gates drive parse-rust through the unmodified `parse` npm SDK.
+      # These are the exact versions carried by the pinned upstream checkout. A range here would
+      # make CI's compatibility evidence change without a source change.
+      - name: install the Parse SDK for the gates
+        run: npm install --no-save parse@8.6.0 mongodb@7.1.0
+
+      - name: conformance and acceptance gates
+        env:
+          # The gate scripts resolve the SDK from a parse-server checkout by default. On CI there
+          # is none, so point them at the copy installed above.
+          PARSE_SERVER_ROOT: ${{ github.workspace }}
+        run: |
+          cargo build --workspace
+          MONGO_URI="mongodb://127.0.0.1:27017/ci_$GITHUB_RUN_ID"
+          PARSE_SERVER_APPLICATION_ID=test PARSE_SERVER_MASTER_KEY=test \
+            PARSE_SERVER_MOUNT_PATH=/parse PORT=0 PARSE_SERVER_DATABASE_URI="$MONGO_URI" \
+            ./target/debug/parse-rust > server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            BASE=$(sed -n 's|^parse-rust listening on \(http://[^ ]*\)$|\1|p' server.log | head -1)
+            [ -n "$BASE" ] && break
+            sleep 0.5
+          done
+          test -n "$BASE" || { cat server.log; exit 1; }
+          for _ in $(seq 1 60); do
+            curl -fsS "$BASE/parse/health" >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          node tools/spec/features.spec.mjs "$BASE/parse"
+          node tools/spec/poc-flow.mjs "$BASE/parse" test - test "$MONGO_URI"
+          # Gate B boots a real parse-server, which needs the upstream checkout. Not runnable on
+          # CI yet; named here so its absence is visible rather than assumed.
+          echo "gate B (data fidelity) requires a parse-server checkout; run it locally"
+
+  citations:
+    name: citations resolve at pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The design documents cite parse-server by file and line, and a citation that stops
+      # resolving reads as verified when it is not. This checks the mechanical half.
+      #
+      # parse-server is public, so a shallow fetch of the pinned commit is enough. It is cloned
+      # to ../parse-server because that is where the checker and every document expect it.
+      - name: read pin
+        id: pin
+        run: echo "commit=$(awk '/^parse-server /{print $3}' PIN)" >> "$GITHUB_OUTPUT"
+
+      - name: fetch parse-server at the pin
+        run: |
+          git init ../parse-server
+          git -C ../parse-server remote add origin https://github.com/parse-community/parse-server.git
+          git -C ../parse-server fetch --depth 1 origin ${{ steps.pin.outputs.commit }}
+          git -C ../parse-server checkout FETCH_HEAD
+
+      - name: check citations
+        run: python3 tools/check-citations.py
