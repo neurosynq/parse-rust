@@ -95,15 +95,31 @@ parse-server.
 Requires a stable Rust toolchain and a MongoDB you can write to. Anything 7.0 or later; a single
 node is fine, no replica set needed.
 
-```
-cargo build --release
+Install the server:
 
+```
+cargo install parse-rust-cli      # installs a binary named `parse-rust`
+```
+
+Or embed it, which is the primary way this is meant to be used, since native Rust triggers and
+adapter registration both require the deployment to compile its own binary:
+
+```
+cargo add parse-rust-server parse-rust-mongo
+```
+
+Either way it is configured the same:
+
+```
 PARSE_SERVER_APPLICATION_ID=your-app-id \
 PARSE_SERVER_MASTER_KEY=a-long-random-secret \
 PARSE_SERVER_DATABASE_URI=mongodb://127.0.0.1:27017/parse_rust_demo \
 PORT=27800 \
-./target/release/parse-rust
+parse-rust
 ```
+
+From a clone rather than the registry, `cargo build --release` puts the same binary at
+`./target/release/parse-rust`.
 
 The application id and master key are **required and have no defaults**. The master key bypasses
 every access control, so a server that starts without one configured would answer to whatever
@@ -214,22 +230,22 @@ That message is byte-for-byte upstream's. Error codes and messages are API here,
 A Cargo workspace whose crate boundaries mirror upstream subsystem boundaries, so a change
 upstream maps to an obvious place here.
 
-```
-parse-rust-core      Parse types, error codes, JSON encoding. No I/O.
-parse-rust-schema    Field types, inference, validation, the _SCHEMA storage format.
-parse-rust-storage   StorageAdapter trait and the query AST adapters lower.
-parse-rust-mongo     MongoDB adapter and the Parse/BSON transform.
-parse-rust-rest      The read and write pipelines.
-parse-rust-auth      Password hashing; sessions and roles to follow.
-parse-rust-server    Library. Router, middleware, config. What you depend on.
-parse-rust-cli       Installs the `parse-rust` executable, and nothing else.
-```
+| Crate | | |
+|---|---|---|
+| [`parse-rust-server`](https://crates.io/crates/parse-rust-server) | [docs](https://docs.rs/parse-rust-server) | Library. Router, middleware, config. **What you depend on.** |
+| [`parse-rust-cli`](https://crates.io/crates/parse-rust-cli) | [docs](https://docs.rs/parse-rust-cli) | Installs the `parse-rust` executable, and nothing else. |
+| [`parse-rust-core`](https://crates.io/crates/parse-rust-core) | [docs](https://docs.rs/parse-rust-core) | Parse types, error codes, JSON encoding. No I/O. |
+| [`parse-rust-schema`](https://crates.io/crates/parse-rust-schema) | [docs](https://docs.rs/parse-rust-schema) | Field types, inference, validation, the `_SCHEMA` storage format. |
+| [`parse-rust-storage`](https://crates.io/crates/parse-rust-storage) | [docs](https://docs.rs/parse-rust-storage) | `StorageAdapter` trait and the query AST adapters lower. |
+| [`parse-rust-mongo`](https://crates.io/crates/parse-rust-mongo) | [docs](https://docs.rs/parse-rust-mongo) | MongoDB adapter and the Parse/BSON transform. |
+| [`parse-rust-rest`](https://crates.io/crates/parse-rust-rest) | [docs](https://docs.rs/parse-rust-rest) | The read and write pipelines. |
+| [`parse-rust-auth`](https://crates.io/crates/parse-rust-auth) | [docs](https://docs.rs/parse-rust-auth) | Password hashing. Sessions and roles to follow. |
 
 The project, the repository, this README and the executable are all **parse-rust**. Only the
 Cargo package names carry a qualifier, because the normalized registry name `parse-rust` is
 already occupied on crates.io by [an unrelated string-parsing
 crate](https://crates.io/crates/parse_rust), and crates.io treats `parse-rust` and `parse_rust` as
-one name. Nothing is published yet.
+one name.
 
 **A library first, with a thin binary on top.** Native Rust triggers will require a deployment to
 compile its own binary, and adapters are registered through a builder rather than resolved from a

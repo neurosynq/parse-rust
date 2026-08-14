@@ -41,16 +41,21 @@ categories = ["web-programming::http-server", "database", "api-bindings"]
 # instead of dependent on whether the tree happens to be committed.
 exclude = ["logs/"]
 
-# Publishing is *enabled*, which is not the same as published. `cargo publish` uploads a version
-# permanently: it can be yanked but never deleted or replaced, and the crate name is claimed for
-# good. Nothing is on crates.io yet, and nothing goes there until the crate boundaries stop moving.
-# Until then this flag only means `cargo publish` will not refuse before it starts.
+# All eight crates are published on crates.io as of 0.1.0, which changes what the version above
+# means. It is no longer a private label: a version can be yanked but never deleted, replaced or
+# reused, so every bump is a one-way door and the API these crates expose has to keep meaning
+# something across it. The crate boundaries are still expected to move as Postgres, triggers and
+# LiveQuery land; that is what minor versions below 1.0 are for, but it is a reason to bump
+# deliberately rather than often.
 #
-# When it is time, `cargo publish --workspace` (cargo 1.90 or later) uploads all eight in
-# dependency order in one command. Every internal dependency below therefore carries a `version`
-# next to its `path`: cargo strips the path on upload, so a published crate resolves its siblings
-# from the registry. Those versions have to move with `version` above, which is the one piece of
-# duplication the workspace cannot inherit away.
+# `cargo publish --workspace` (cargo 1.90 or later) uploads all eight in dependency order in one
+# command. Every internal dependency below therefore carries a `version` next to its `path`:
+# cargo strips the path on upload, so a published crate resolves its siblings from the registry.
+# Those versions have to move with `version` above, and they cannot inherit it, which makes them
+# the one place a stale version can hide.
+#
+# crates.io rate-limits *new* crate names, not new versions of existing ones. Publishing 0.1.0
+# hit that limit on the eighth crate; later releases will not.
 publish = true
 
 [workspace.dependencies]

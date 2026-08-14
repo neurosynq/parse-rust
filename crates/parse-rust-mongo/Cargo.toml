@@ -1,7 +1,7 @@
 [package]
 name = "parse-rust-mongo"
 version.workspace = true
-description = "MongoDB storage adapter and the Parse/BSON transform."
+description = "MongoDB storage adapter and the Parse/BSON transform for parse-rust."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

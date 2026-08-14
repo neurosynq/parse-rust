@@ -1,7 +1,7 @@
 [package]
 name = "parse-rust-storage"
 version.workspace = true
-description = "StorageAdapter trait and the query/update AST adapters lower."
+description = "Storage adapter trait and query AST for parse-rust. Backend-agnostic; no backend included."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
