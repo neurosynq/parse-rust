@@ -23,8 +23,15 @@ const require = createRequire(import.meta.url);
 // Resolve the parse-server checkout relative to this repository rather than to a home directory,
 // so the default works for anyone with the two repos side by side. Override with
 // PARSE_SERVER_ROOT when it lives elsewhere.
-const PS_ROOT = process.env.PARSE_SERVER_ROOT
-  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'parse-server');
+// **Resolved to an absolute path, including the override.** `require` resolves a relative
+// specifier against *this file's* directory, not the working directory, so a relative
+// `PARSE_SERVER_ROOT` such as `../parse-server-pinned` was looked for under `tools/spec/` and
+// failed with a module-not-found naming a path nobody wrote. That matters now that a pinned
+// worktree is the way to run these against the declared release target.
+const PS_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), '..', '..',
+  process.env.PARSE_SERVER_ROOT || '../parse-server',
+);
 const Parse = require(`${PS_ROOT}/node_modules/parse/node`);
 
 const [, , SERVER_URL, APP_ID = 'test', JS_KEY = '-', MASTER_KEY = 'test', MONGO_URI] = process.argv;
@@ -32,6 +39,13 @@ if (!SERVER_URL) {
   console.error('usage: node tools/spec/poc-flow.mjs <server-url> [appId] [jsKey|-] [masterKey]');
   process.exit(2);
 }
+
+// A floor, because a check that can pass by finding nothing will. If a block throws early, or one
+// is dropped in a refactor, the run lands below this and fails rather than reporting a green suite
+// that exercised a fraction of the flow. Raise it when assertions are added; never lower it to
+// make a run pass. The Mongo-backed at-rest checks are conditional, so the floor is the count
+// without them.
+const ASSERTION_FLOOR = 40;
 
 let passed = 0;
 const failures = [];
@@ -83,7 +97,23 @@ async function main() {
   check('a wrong password does not log in', wrongPasswordFailed);
 
   // Log back in for the rest of the flow.
-  await Parse.User.logIn(USERNAME, PASSWORD);
+  const self = await Parse.User.logIn(USERNAME, PASSWORD);
+
+  // --- user.save() on an existing user ------------------------------------
+  // The SDK sends this as `PUT /classes/_User/:objectId`, not `/users/:objectId`, which is why a
+  // blanket refusal of non-master `_User` writes broke an ordinary profile edit. Driven through
+  // the unmodified SDK because the route it picks is the whole point.
+  //
+  // `Parse.User.current()` is null here: the Node SDK has no storage controller in this harness,
+  // so the object returned by `logIn` is the session-bearing one, and its token has to be passed
+  // explicitly. With a real current user the SDK attaches it and `save()` takes no arguments.
+  self.set('nickname', 'Sav');
+  await self.save(null, { sessionToken: self.getSessionToken() });
+  eq('user.save() persists a field', self.get('nickname'), 'Sav');
+
+  const refetched = await Parse.User.logIn(USERNAME, PASSWORD);
+  eq('the saved field survives a re-login', refetched.get('nickname'), 'Sav');
+  check('a save response carries no password hash', refetched.get('_hashed_password') === undefined);
 
   // --- create -------------------------------------------------------------
   const Note = Parse.Object.extend('PocNote');
@@ -140,6 +170,7 @@ async function main() {
 
   // --- a duplicate username is USERNAME_TAKEN, not a raw duplicate-key -----
   let dupCode = null;
+  let dupMessage = null;
   try {
     const dup = new Parse.User();
     dup.set('username', USERNAME);
@@ -147,8 +178,14 @@ async function main() {
     await dup.signUp();
   } catch (e) {
     dupCode = e.code;
+    dupMessage = e.message;
   }
   eq('a duplicate username is USERNAME_TAKEN', dupCode, Parse.Error.USERNAME_TAKEN);
+  // The fixed message, which is also the assertion that no driver text reached the client: the
+  // MongoDB `E11000` string names the database and quotes the colliding username.
+  eq('the duplicate message is upstream’s',
+    dupMessage,
+    'Account already exists for this username.');
 
   // --- security assertions ------------------------------------------------
   //
@@ -262,6 +299,10 @@ async function main() {
   if (failures.length) {
     console.error(`FAIL  ${failures.length} assertion(s) against ${SERVER_URL}:`);
     for (const f of failures) { console.error(`  - ${f}`); }
+    process.exit(1);
+  }
+  if (passed < ASSERTION_FLOOR) {
+    console.error(`FAIL  poc-flow ran ${passed} assertions, floor is ${ASSERTION_FLOOR}`);
     process.exit(1);
   }
   console.log(`OK  poc-flow: ${passed} assertions pass against ${SERVER_URL}`);

@@ -65,11 +65,19 @@ Several suites compare against a real parse-server checkout, expected as a sibli
 is absent rather than silently passing.
 
 Run `tools/test.sh` before opening a pull request. **It is a superset of what CI runs**, not the
-same set. CI has no upstream parse-server checkout, so it cannot run Gate B or the differentials
-that compare against upstream's own modules: bcrypt interop, the `MongoTransform` oracle and the
-`_SCHEMA` format oracle. Those run only locally, and CI names each one it skips rather than
-passing quietly. A green CI run therefore means less than a green local run, which is worth
-knowing before you rely on it.
+same set. CI has only the `parse` npm SDK, not an upstream parse-server checkout, so it cannot boot
+a real parse-server and cannot run:
+
+- Gate B, data fidelity, which boots one on the same database.
+- Gate D, shared auth state, likewise.
+- The upstream half of Gate C, which is the half that makes it a comparison rather than a
+  self-check. CI runs the parse-rust half only.
+- The differentials that compare against upstream's own modules: bcrypt interop, the
+  `MongoTransform` oracle and the `_SCHEMA` format oracle.
+
+Those run only locally, and CI names each one it skips rather than passing quietly. A green CI run
+therefore means less than a green local run, and in particular says nothing about whether
+parse-rust and parse-server agree.
 
 ### Tests
 
@@ -79,9 +87,16 @@ bcrypt interop, the Parse/BSON transform and the `_SCHEMA` type strings are all 
 actual parse-server behavior rather than against expectations someone typed in. More than one bug
 in this codebase was found that way and would not have been found otherwise.
 
-The two acceptance gates drive the whole flow through the unmodified Parse SDK and compare stored
-BSON types against a real parse-server on the same database. If you change behavior a client can
-observe, a gate should notice.
+The four acceptance gates drive the whole flow through the unmodified Parse SDK. Gate A is the
+signup-to-logout flow; Gate B compares stored BSON types against a real parse-server on the same
+database; Gate C replays the authorization model against both servers and requires them to agree
+assertion for assertion; Gate D puts both servers on one database and checks that sessions, roles
+and `_SCHEMA` documents cross. If you change behavior a client can observe, a gate should notice.
+
+Two rules they live by, both of them scars. **Assert that a caller can see its own data before
+asserting it cannot see anyone else's**, or a server that hides everything passes. And **each gate
+carries a floor on how many assertions it executed**, because a runner that finds nothing exits
+zero. Raise a floor when you add assertions; never lower one to make a run pass.
 
 **Never bind a fixed port in a test.** Bind `0` and read back the address. Test batteries get run
 in parallel, so a fixed port collides with another copy of itself, and the failure looks like

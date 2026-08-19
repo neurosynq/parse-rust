@@ -1,357 +1,355 @@
-//! The five `/classes` verbs.
+//! The five `/classes` verbs, and the cores every other class-shaped route reuses.
 //!
 //! Upstream: `src/Routers/ClassesRouter.js`. Response shapes are wire contract and narrower than
 //! they look: a create returns `{objectId, createdAt}`, an update returns `{updatedAt}`, and a
 //! delete returns `{}`. Returning the whole object would be more helpful and would not match.
+//!
+//! `RolesRouter` and `SessionsRouter` are `ClassesRouter` with `className()` pinned
+//! (`RolesRouter.js:4-6`, `SessionsRouter.js:8-10`), so they call the cores below with a fixed
+//! class name rather than reimplementing them. `/batch` dispatches into the same cores, which is
+//! what makes a sub-request and a top-level request the same code path rather than two that drift.
 
-use axum::extract::{Path, Query, State};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use parse_rust_core::{ErrorCode, ParseError, ParseMap, ParseValue};
-use parse_rust_rest::AclScope;
-use parse_rust_storage::QueryOptions;
-use serde_json::{json, Value as Json_};
-use std::collections::HashMap;
+use parse_rust_rest::{FindOptions, ParsedClause, ParsedWhere};
+use parse_rust_storage::{Constraint, StorageAdapter};
+use serde_json::{json, Value as Json};
 
 use crate::auth::Authority;
-use crate::response::ParseErrorResponse;
+use crate::params::Params;
+use crate::request::RequestContext;
 use crate::state::AppState;
 
-/// Map request authority onto an ACL scope.
+/// The class sessions live in.
 ///
-/// Master and maintenance are unrestricted. A session token would produce
-/// `AclScope::User`, but session resolution lands with `_User`; until then a client-key request
-/// is anonymous, which is the fail-closed direction.
-fn scope_for(authority: &Authority, state: &AppState) -> Result<AclScope, ParseError> {
-    Ok(match authority {
-        Authority::Master | Authority::Maintenance => AclScope::Unrestricted,
-        Authority::Client { session_token } => match session_token {
-            // A token that does not resolve is an error, not anonymity. See `AppState`.
-            Some(token) => state.scope_for_session(token)?,
-            None => AclScope::Anonymous,
-        },
-    })
-}
+/// A non-master read of it is narrowed to the caller's own sessions, but that happens in
+/// `parse_rust_rest`'s read pipeline rather than here. See `pipeline::narrow_sessions` for why the
+/// layer matters.
+pub const SESSION_CLASS: &str = "_Session";
 
 /// Convert a Parse-format map into a JSON response body.
 ///
-/// Strips every `_`-prefixed key first. This is the single audit point for "nothing internal
-/// reaches a client", and it runs on every response body this router produces.
-fn body_of(row: &ParseMap) -> Json_ {
+/// Strips every `_`-prefixed key and flattens the top-level timestamps. This is the single audit
+/// point for "nothing internal reaches a client", and it runs on every response body this module
+/// produces.
+pub fn body_of(row: &ParseMap) -> Json {
     let row = parse_rust_rest::to_response_body(row);
-    serde_json::from_str(&ParseValue::Object(row).to_json()).unwrap_or(Json_::Null)
+    serde_json::from_str(&ParseValue::Object(row).to_json()).unwrap_or(Json::Null)
 }
 
-fn err(e: ParseError) -> Response {
-    ParseErrorResponse(e).into_response()
-}
-
-/// Decode a JSON request body into Parse values.
-fn decode_body(value: Json_) -> Result<ParseMap, ParseError> {
-    let map = match parse_rust_core::classify(value)? {
-        ParseValue::Object(map) => map,
-        _ => return Err(ParseError::invalid_json("body must be an object")),
-    };
+/// Decode a JSON request body into a write body.
+fn decode_body(
+    value: &Json,
+    path: parse_rust_core::op::OpPath,
+) -> Result<parse_rust_rest::WriteBody, ParseError> {
+    let body = parse_rust_rest::decode_write_body(value, path)?;
     // A client must not supply a server-internal column. Without this, a caller could write its
     // own `_rperm` and grant itself read access to a row.
-    parse_rust_rest::reject_reserved_keys(&map)?;
-    Ok(map)
+    parse_rust_rest::reject_reserved_keys_in(body.keys().map(String::as_str))?;
+    Ok(body)
 }
 
-pub async fn create(
-    State(state): State<AppState>,
-    authority: Authority,
-    Path(class_name): Path<String>,
-    Json(body): Json<Json_>,
-) -> Response {
-    if let Err(e) = enforce_class_security(&class_name, &authority, "create") {
-        return err(e);
-    }
-    let scope = match scope_for(&authority, &state) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
-    let mut body = match decode_body(body) {
-        Ok(b) => b,
-        Err(e) => return err(e),
-    };
-    if class_name == "_User" {
-        if let Err(e) = super::users::hash_user_password(&mut body) {
-            return err(e);
-        }
-        super::users::ensure_user_identity_and_acl(&mut body);
-    }
-    match parse_rust_rest::create(state.storage(), &class_name, body, &scope).await {
-        Ok(res) => (
-            axum::http::StatusCode::CREATED,
-            Json(json!({
-                "objectId": res.object_id,
-                "createdAt": res.created_at.to_iso(),
-            })),
-        )
-            .into_response(),
-        Err(e) => err(e),
-    }
-}
+// -------------------------------------------------------------------------------------------
+// Cores
+// -------------------------------------------------------------------------------------------
 
-pub async fn find(
-    State(state): State<AppState>,
-    authority: Authority,
-    Path(class_name): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    if let Err(e) = enforce_class_security(&class_name, &authority, "find") {
-        return err(e);
-    }
-    let scope = match scope_for(&authority, &state) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
+pub async fn find_core(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    class_name: &str,
+    params: &Params,
+) -> Result<Json, ParseError> {
+    parse_rust_rest::enforce_class_security(
+        class_name,
+        authority.is_privileged(),
+        "find",
+        rc.options.error_detail,
+    )?;
+    params.reject_unknown_find_keys()?;
 
-    let constraints = match params.get("where") {
-        Some(raw) => match serde_json::from_str::<Json_>(raw) {
-            Ok(v) => match parse_rust_rest::parse_where(&v) {
-                Ok(c) => c,
-                Err(e) => return err(e),
-            },
-            Err(_) => {
-                return err(ParseError::invalid_query(
-                    "where must be valid JSON".to_string(),
-                ))
-            }
-        },
-        None => Vec::new(),
-    };
+    let where_ = params.parse_where()?;
+    let options = params.find_options()?;
+    let wants_count = params.wants_count();
 
-    // `count=1` asks for the count instead of, or alongside, the results.
-    let wants_count = params.get("count").map(|c| c == "1").unwrap_or(false);
-
-    let options = QueryOptions {
-        // An absent or unparsable `limit` falls back to Parse's default of 100 rather than to
-        // "no limit". `limit=0` is a legitimate request for zero rows, usually paired with
-        // `count=1`, and must not be read as unlimited either.
-        limit: Some(
-            params
-                .get("limit")
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(parse_rust_storage::query::DEFAULT_LIMIT),
-        ),
-        skip: params.get("skip").and_then(|v| v.parse().ok()),
-        order: params
-            .get("order")
-            .map(|o| QueryOptions::parse_order(o))
-            .unwrap_or_default(),
-        keys: params
-            .get("keys")
-            .map(|k| k.split(',').map(str::trim).map(str::to_string).collect()),
-    };
-
-    let results = match parse_rust_rest::find(
-        state.storage(),
-        &class_name,
-        constraints.clone(),
-        options,
-        &scope,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => return err(e),
-    };
+    let ctx = rc.ctx(state.storage());
+    let results = parse_rust_rest::find(&ctx, class_name, where_.clone(), options).await?;
 
     let mut body = json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() });
     if wants_count {
-        match parse_rust_rest::count(state.storage(), &class_name, constraints, &scope).await {
-            Ok(n) => {
-                body["count"] = json!(n);
-            }
-            Err(e) => return err(e),
-        }
+        let n = parse_rust_rest::count(&ctx, class_name, where_).await?;
+        body["count"] = json!(n);
     }
-    Json(body).into_response()
+    Ok(body)
 }
 
-pub async fn get(
-    State(state): State<AppState>,
-    authority: Authority,
-    Path((class_name, object_id)): Path<(String, String)>,
-) -> Response {
-    if let Err(e) = enforce_class_security(&class_name, &authority, "get") {
-        return err(e);
-    }
-    let scope = match scope_for(&authority, &state) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
-    match parse_rust_rest::get(state.storage(), &class_name, &object_id, &scope).await {
-        Ok(row) => Json(body_of(&row)).into_response(),
-        Err(e) => err(e),
-    }
-}
-
-pub async fn update(
-    State(state): State<AppState>,
-    authority: Authority,
-    Path((class_name, object_id)): Path<(String, String)>,
-    Json(body): Json<Json_>,
-) -> Response {
-    if let Err(e) = enforce_class_security(&class_name, &authority, "update") {
-        return err(e);
-    }
-    let scope = match scope_for(&authority, &state) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
-    let mut body = match decode_body(body) {
-        Ok(b) => b,
-        Err(e) => return err(e),
-    };
-    if class_name == "_User" {
-        if let Err(e) = super::users::hash_user_password(&mut body) {
-            return err(e);
-        }
-    }
-    match parse_rust_rest::update(state.storage(), &class_name, &object_id, body, &scope).await {
-        Ok(res) => Json(json!({ "updatedAt": res.updated_at.to_iso() })).into_response(),
-        Err(e) => err(e),
-    }
-}
-
-pub async fn delete(
-    State(state): State<AppState>,
-    authority: Authority,
-    Path((class_name, object_id)): Path<(String, String)>,
-) -> Response {
-    if let Err(e) = enforce_class_security(&class_name, &authority, "delete") {
-        return err(e);
-    }
-    let scope = match scope_for(&authority, &state) {
-        Ok(s) => s,
-        Err(e) => return err(e),
-    };
-    match parse_rust_rest::delete(state.storage(), &class_name, &object_id, &scope).await {
-        // Upstream answers an empty object, not 204.
-        Ok(()) => Json(json!({})).into_response(),
-        Err(e) => err(e),
-    }
-}
-
-/// Classes a client may not address through `/classes`.
-///
-/// `_User` has its own router upstream. A non-master write through `/classes` skips signup and
-/// session creation, so it is refused here. Master and maintenance writes are legitimate, but the
-/// handlers still run their password and ACL data through the shared user preparation path.
-///
-/// The master key is exempt, matching upstream: `enforceRoleSecurity` gates non-master callers
-/// only, and the dashboard legitimately reads `_User` through the class routes.
-fn enforce_class_security(
-    class_name: &str,
+pub async fn get_core(
+    state: &AppState,
+    rc: &RequestContext,
     authority: &Authority,
-    operation: &str,
-) -> Result<(), ParseError> {
-    if matches!(authority, Authority::Master | Authority::Maintenance) {
-        return Ok(());
-    }
-    // **`_User` writes are refused. This is a deliberate difference from upstream.**
+    class_name: &str,
+    object_id: &str,
+    params: &Params,
+) -> Result<Json, ParseError> {
+    parse_rust_rest::enforce_class_security(
+        class_name,
+        authority.is_privileged(),
+        "get",
+        rc.options.error_detail,
+    )?;
+    params.reject_unknown_get_keys()?;
+
+    // `handleGet` is `rest.get`, which pins the query to an objectId **and carries the `get`
+    // method** (`rest.js:150`, `:183`). Routing it through `find` instead would re-derive the
+    // method as `find` inside the pipeline, and `enforceRoleSecurity` distinguishes the two: a
+    // client may `get` an installation and may not `find` one.
     //
-    // Upstream permits `POST /classes/_User` and makes it safe in `RestWrite`, which special-cases
-    // `className === "_User"` regardless of route. The allowed master path above mirrors that by
-    // sharing password and ACL preparation with signup.
-    //
-    // Refusing is the fail-closed choice and costs a client only the ability to create a user
-    // without a session token. Reads are *not* refused: upstream allows them, they are ACL
-    // filtered, and blocking them would break legitimate user queries.
-    let write_only_forbidden =
-        class_name == "_User" && matches!(operation, "create" | "update" | "delete");
-
-    let forbidden = write_only_forbidden
-        || class_name.starts_with("_Join:")
-        || matches!(
-            class_name,
-            "_Session"
-                | "_Role"
-                | "_Installation"
-                | "_JobStatus"
-                | "_PushStatus"
-                | "_Hooks"
-                | "_GlobalConfig"
-                | "_GraphQLConfig"
-                | "_JobSchedule"
-                | "_Audience"
-                | "_Idempotency"
-        );
-    if forbidden {
-        return Err(ParseError::new(
-            ErrorCode::OperationForbidden,
-            format!(
-                "Clients aren't allowed to perform the {operation} operation on the {class_name} collection."
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// `POST` dispatcher for the collection route.
-///
-/// The JavaScript SDK sends every request as a `POST` and puts the real method in `_method`.
-/// axum matches on the transport method before middleware can rewrite it, so the dispatch happens
-/// here, where it is explicit and testable. See `body_credentials`.
-pub async fn dispatch_collection(
-    state: State<AppState>,
-    authority: Authority,
-    path: Path<String>,
-    query: Query<HashMap<String, String>>,
-    method: Option<axum::Extension<crate::body_credentials::MethodOverride>>,
-    body: Option<Json<Json_>>,
-) -> Response {
-    match method.map(|m| m.0 .0) {
-        Some(m) if m == axum::http::Method::GET => find(state, authority, path, query).await,
-        // No override at all: a genuine POST, which on the collection route is a create.
-        None => match body {
-            Some(b) => create(state, authority, path, b).await,
-            // A body that failed to parse must not become an empty create. `Option<Json<_>>` is
-            // `None` for a malformed or oversized body as well as an absent one, so treating that
-            // as `{}` turned a rejection into a write.
-            None => err(ParseError::invalid_json("body must be a JSON object")),
-        },
-        // An override we do not implement is an error, not a silent fallthrough to create.
-        Some(other) => err(ParseError::new(
-            ErrorCode::CommandUnavailable,
-            format!("unsupported method override: {other}"),
-        )),
-    }
-}
-
-/// `POST` dispatcher for the object route.
-pub async fn dispatch_object(
-    state: State<AppState>,
-    authority: Authority,
-    path: Path<(String, String)>,
-    method: Option<axum::Extension<crate::body_credentials::MethodOverride>>,
-    body: Option<Json<Json_>>,
-) -> Response {
-    // There is no POST verb on an object route. A bare POST with no override used to fall through
-    // to `update`, so an unrelated request could mutate a row.
-    let Some(m) = method.map(|m| m.0 .0) else {
-        return err(ParseError::new(
-            ErrorCode::CommandUnavailable,
-            "POST is not supported on an object route; use PUT, DELETE, or _method",
-        ));
+    // The `_Session` narrowing this needs is applied by the pipeline, because upstream applies it
+    // in the query constructor (`RestQuery.js:116-134`) rather than at a route handler.
+    let options = FindOptions {
+        limit: Some(1),
+        ..params.get_options()?
     };
-    if m == axum::http::Method::GET {
-        return get(state, authority, path).await;
+    let ctx = rc.ctx(state.storage());
+    let row = parse_rust_rest::get(&ctx, class_name, object_id, options).await?;
+    Ok(body_of(&row))
+}
+
+pub async fn create_core(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    class_name: &str,
+    body: &Json,
+) -> Result<Json, ParseError> {
+    parse_rust_rest::enforce_class_security(
+        class_name,
+        authority.is_privileged(),
+        "create",
+        rc.options.error_detail,
+    )?;
+    let mut body = decode_body(body, parse_rust_core::op::OpPath::Create)?;
+    // The `RestWrite` constructor's first check, and it runs on the client's body before any
+    // server-side identity is folded in (`RestWrite.js:50-65`).
+    parse_rust_rest::enforce_object_id_policy(&body, state.config().allow_custom_object_id)?;
+    if class_name == crate::routes::users::USER_CLASS {
+        // `handleCreate`'s guard, which lives on `ClassesRouter` and therefore covers this route
+        // as well as signup (`ClassesRouter.js:105-112`).
+        crate::routes::users::reject_role_prefixed_object_id(&body, rc)?;
+        // Upstream's `!this.query && !hasAuthData` guard is not gated on the caller
+        // (`RestWrite.js:468-473`), so the master key does not buy an exemption from it. Before
+        // the uniqueness query and the hash, as upstream orders those stages.
+        crate::routes::users::require_create_credentials(&body)?;
+        // **`transformUser` is not gated on the caller**, so a master create through this route
+        // gets the same username and email validation a signup does (`RestWrite.js:803-807`).
+        // Without it, `POST /classes/_User` with the master key admitted case-only duplicate
+        // usernames and malformed email addresses that `POST /users` refuses. The dashboard
+        // creates users through this route. There is no self to exclude on a create, which is
+        // what the empty objectId means here.
+        crate::routes::users::validate_user_identity(state, rc, &body, "").await?;
+        crate::routes::users::prepare_user_write(&mut body, true).await?;
     }
-    if m == axum::http::Method::DELETE {
-        return delete(state, authority, path).await;
+    let ctx = rc.ctx(state.storage());
+    let res = parse_rust_rest::create(&ctx, class_name, body)
+        .await
+        // Same relabelling the update path does, and `_User` only: a collision on the unique index
+        // is 202 or 203 to a client, not a bare 137.
+        .map_err(|e| {
+            if class_name == crate::routes::users::USER_CLASS {
+                crate::routes::users::map_duplicate(e)
+            } else {
+                e
+            }
+        })?;
+
+    let mut out = json!({
+        "objectId": res.object_id,
+        "createdAt": res.created_at.to_iso(),
+    });
+    merge_echo(&mut out, res.echoed, rc, class_name);
+    Ok(out)
+}
+
+pub async fn update_core(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    class_name: &str,
+    object_id: &str,
+    body: &Json,
+) -> Result<Json, ParseError> {
+    parse_rust_rest::enforce_class_security(
+        class_name,
+        authority.is_privileged(),
+        "update",
+        rc.options.error_detail,
+    )?;
+    let mut body = decode_body(body, parse_rust_core::op::OpPath::Update)?;
+    let is_user = class_name == crate::routes::users::USER_CLASS;
+
+    // Whether this write changes the password, decided before `prepare_user_write` replaces the
+    // key with its hash. **Only a string counts**, because only a string is a password: a
+    // `{"password": null}` body previously read as "no password" to the hasher and as "a password
+    // change" to the followup below, so it revoked every session and issued a replacement while
+    // leaving the old password working. The policy check refuses that body outright now, and this
+    // stays narrow so the two cannot disagree again.
+    let changes_password = is_user
+        && matches!(
+            body.get("password"),
+            Some(parse_rust_core::FieldWrite::Value(ParseValue::String(_)))
+        );
+
+    if is_user {
+        crate::routes::users::enforce_user_update_policy(&body, rc, authority, object_id)?;
+        crate::routes::users::validate_user_identity(state, rc, &body, object_id).await?;
+        crate::routes::users::force_owner_into_acl(&mut body, object_id, authority.is_privileged());
+        crate::routes::users::prepare_user_write(&mut body, false).await?;
     }
-    if m != axum::http::Method::PUT {
-        return err(ParseError::new(
-            ErrorCode::CommandUnavailable,
-            format!("unsupported method override: {m}"),
+    let ctx = rc.ctx(state.storage());
+    let res = parse_rust_rest::update(&ctx, class_name, object_id, body)
+        .await
+        // **`_User` only.** The relabelling turns a duplicate-key error into 202 or 203 by reading
+        // the index name, and an ordinary class is free to carry its own unique index called
+        // `username_1`. Applying it everywhere reported somebody else's collision as
+        // `Account already exists for this username.`, where upstream leaves a non-`_User`
+        // collision as 137.
+        .map_err(|e| {
+            if is_user {
+                crate::routes::users::map_duplicate(e)
+            } else {
+                e
+            }
+        })?;
+
+    let mut out = json!({ "updatedAt": res.updated_at.to_iso() });
+    merge_echo(&mut out, res.echoed, rc, class_name);
+
+    // **A password change revokes every session and, for a non-master caller, mints a replacement**
+    // (`RestWrite.js:1192-1211`). Both halves matter and they are not symmetric: revoking is what
+    // makes a password change mean anything, and the new token is what stops the caller logging
+    // themselves out by changing their own password. Master gets the revocation and no new token,
+    // because upstream gates `generateNewSession` on the caller not being master.
+    //
+    // Runs after the write, as upstream's `handleFollowup` does. A failure here leaves the password
+    // changed and the old sessions alive, which is the safe direction to fail in only because the
+    // caller can retry; it is not silent, because the error reaches the client.
+    if changes_password {
+        parse_rust_auth::revoke_all_for_user(state.storage(), object_id).await?;
+        if !authority.is_privileged() {
+            let session = parse_rust_auth::create_session(
+                state.storage(),
+                &state.config().session,
+                parse_rust_auth::NewSession {
+                    user_object_id: object_id,
+                    // **No `createdWith`.** `setCreatedWith` computes `login` only when an auth
+                    // provider is in storage and `signup` only on a create; a password update is
+                    // neither, so it returns before setting anything and upstream's replacement
+                    // session carries no such column (`RestWrite.js:860-870`). Writing
+                    // `{"action":"login"}` here would be visible through `/sessions/me` and would
+                    // describe a login that did not happen.
+                    created_with: None,
+                    installation_id: rc.installation_id.as_deref(),
+                },
+            )
+            .await?;
+            out["sessionToken"] = json!(session.session_token);
+        }
+    }
+    Ok(out)
+}
+
+pub async fn delete_core(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    class_name: &str,
+    object_id: &str,
+) -> Result<Json, ParseError> {
+    parse_rust_rest::enforce_class_security(
+        class_name,
+        authority.is_privileged(),
+        "delete",
+        rc.options.error_detail,
+    )?;
+    let ctx = rc.ctx(state.storage());
+    parse_rust_rest::delete(&ctx, class_name, object_id).await?;
+    // Upstream answers an empty object, not 204.
+    Ok(json!({}))
+}
+
+/// Fold the post-write value of any operation the request carried into the response.
+///
+/// `protectedFieldsSaveResponseExempt` decides whether a protected field survives that fold. It
+/// defaults to `true` (`Options/Definitions.js:507-512`), which is the pass-through case; set to
+/// `false` the echo is stripped the same way a query result is.
+fn merge_echo(out: &mut Json, echoed: ParseMap, rc: &RequestContext, class_name: &str) {
+    if echoed.is_empty() {
+        return;
+    }
+    let mut echoed = echoed;
+    if !rc.save_response_exempt && !rc.is_master() {
+        if let Some(plan) = parse_rust_rest::clp::plan_protected_fields(
+            class_name,
+            rc.snapshot.clp(class_name),
+            &rc.scope,
+            None,
+            &rc.options,
+        ) {
+            for field in plan.strip {
+                echoed.shift_remove(&field);
+            }
+        }
+    }
+    let Json::Object(map) = out else { return };
+    if let Json::Object(rendered) = body_of(&echoed) {
+        for (key, value) in rendered {
+            map.insert(key, value);
+        }
+    }
+}
+
+/// `DELETE /sessions/:objectId`, which is narrower than an ordinary class delete.
+///
+/// `rest.del` reads the row first for `_Session` and then re-checks the owner explicitly
+/// (`rest.js:181-197`), because `_Session` rows carry no ACL and the ordinary write constraint
+/// therefore excludes nothing. A miss is `Object not found for delete.`, which is that path's
+/// message rather than the class router's `Object not found.`
+pub async fn delete_session_core(
+    state: &AppState,
+    rc: &RequestContext,
+    object_id: &str,
+) -> Result<Json, ParseError> {
+    let mut where_ = ParsedWhere::default();
+    where_.push(ParsedClause::Field(Constraint::equal(
+        "objectId",
+        ParseValue::String(object_id.to_string()),
+    )));
+
+    let ctx = rc.ctx(state.storage());
+    let rows = parse_rust_rest::find(
+        &ctx,
+        SESSION_CLASS,
+        where_,
+        FindOptions {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .await?;
+    if rows.is_empty() {
+        return Err(ParseError::new(
+            ErrorCode::ObjectNotFound,
+            "Object not found for delete.",
         ));
     }
-    match body {
-        Some(b) => update(state, authority, path, b).await,
-        None => err(ParseError::invalid_json("body must be a JSON object")),
-    }
+
+    // The delete itself is master-scoped, because the narrowing above has already established
+    // that this row belongs to the caller and `_Session` carries no `_wperm` for the ordinary
+    // write constraint to match.
+    let schema = rc.snapshot.get_or_default(SESSION_CLASS);
+    let query = parse_rust_storage::Query::from_constraints(vec![Constraint::equal(
+        "objectId",
+        ParseValue::String(object_id.to_string()),
+    )]);
+    state.storage().delete(&schema, &query).await?;
+    Ok(json!({}))
 }

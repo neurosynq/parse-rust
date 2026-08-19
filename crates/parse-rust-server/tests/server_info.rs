@@ -10,6 +10,18 @@ use parse_rust_server::{AppState, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Boot on an ephemeral port and return `host:port`.
+///
+/// **Binds the router directly instead of calling [`parse_rust_server::serve`], and that is the
+/// point of this file rather than an optimization.** Every route exercised here answers from
+/// config alone: `/serverInfo` and `/health` never read the database. These are the only tests in
+/// the workspace that hold that property, so they are the only ones not marked `#[ignore]`, which
+/// is what lets `cargo test --workspace` mean something on a machine with no MongoDB.
+///
+/// `serve` calls `ensure_indexes` before binding, which is correct for a real server and is a
+/// round trip. Going through it made this file need a database in order to test routes that do
+/// not use one, and the failure read as "MongoDB must be running" rather than as a lost guarantee.
+/// `MongoAdapter::connect` stays because `AppState` needs a storage value; it builds a lazy client
+/// and does not contact the server, so no connection is opened unless a route asks for one.
 async fn boot() -> String {
     let config = ServerConfig::new("test", "test")
         .rest_api_key("rest")
@@ -18,12 +30,12 @@ async fn boot() -> String {
     let db = format!("parse_rust_srv_{}", std::process::id());
     let storage = MongoAdapter::connect("mongodb://127.0.0.1:27017", &db)
         .await
-        .expect("MongoDB must be running on 27017");
+        .expect("building a lazy Mongo client cannot fail for a valid URI");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-    let (bound, server) = parse_rust_server::serve(AppState::new(config, storage), addr)
-        .await
-        .expect("bind failed");
-    tokio::spawn(server);
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
+    let bound = listener.local_addr().expect("local_addr");
+    let app = parse_rust_server::router(AppState::new(config, storage));
+    tokio::spawn(async move { axum::serve(listener, app).await });
     bound.to_string()
 }
 
@@ -112,8 +124,6 @@ async fn unimplemented_capabilities_are_not_advertised() {
     let v = json(&body);
 
     for (subsystem, path) in [
-        ("the schema API", ["schemas", "addClass"]),
-        ("the schema API", ["schemas", "editClassLevelPermissions"]),
         ("hooks", ["hooks", "create"]),
         ("global config", ["globalConfig", "read"]),
         ("the log API", ["logs", "level"]),
@@ -129,6 +139,25 @@ async fn unimplemented_capabilities_are_not_advertised() {
             path[0],
             path[1],
             subsystem,
+        );
+    }
+
+    // The other half of the same rule: a capability that *is* advertised must have a route behind
+    // it. Each of these is exercised over HTTP by `tests/schemas.rs`, so flipping one on without a
+    // working route turns that file red rather than shipping a button that 404s.
+    for capability in [
+        "addField",
+        "removeField",
+        "addClass",
+        "removeClass",
+        "clearAllDataFromClass",
+        "editClassLevelPermissions",
+        "editPointerPermissions",
+    ] {
+        assert_eq!(
+            v["features"]["schemas"][capability],
+            serde_json::json!(true),
+            "the schema API landed in 0.2.0, so features.schemas.{capability} is advertised"
         );
     }
 }

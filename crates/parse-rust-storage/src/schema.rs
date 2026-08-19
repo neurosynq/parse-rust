@@ -6,6 +6,8 @@
 
 use indexmap::IndexMap;
 
+use parse_rust_core::{ClassLevelPermissions, ParseMap};
+
 /// A Parse field type.
 ///
 /// `Pointer` and `Relation` carry their target class because the wire form does
@@ -62,6 +64,40 @@ impl FieldType {
     pub fn is_pointer(&self) -> bool {
         matches!(self, FieldType::Pointer { .. })
     }
+
+    pub fn is_relation(&self) -> bool {
+        matches!(self, FieldType::Relation { .. })
+    }
+
+    /// The class a parametric type points at.
+    pub fn target_class(&self) -> Option<&str> {
+        match self {
+            FieldType::Pointer { target_class } | FieldType::Relation { target_class } => {
+                Some(target_class)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The join collection backing one `Relation` field.
+///
+/// `_Join:<key>:<className>` (`DatabaseController.js:319-321`). Note the argument order: the key
+/// comes first and the *owning* class second, so `_Role.users` is `_Join:users:_Role`. Getting it
+/// backwards produces a collection parse-server will never read.
+pub fn join_table_name(class_name: &str, key: &str) -> String {
+    format!("_Join:{key}:{class_name}")
+}
+
+/// The fixed schema every join collection has.
+///
+/// Two string columns and nothing else (`DatabaseController.js:418-420`). Deliberately built
+/// here rather than fetched: join collections have **no `_SCHEMA` row at all** upstream, and
+/// writing one would add a class every parse-server node reading the database would then see.
+pub fn join_schema(class_name: &str, key: &str) -> ClassSchema {
+    ClassSchema::new(join_table_name(class_name, key))
+        .with_field("relatedId", FieldType::String)
+        .with_field("owningId", FieldType::String)
 }
 
 /// The shape of one class: what a transform needs to lower or raise a document.
@@ -72,6 +108,21 @@ impl FieldType {
 pub struct ClassSchema {
     pub class_name: String,
     pub fields: IndexMap<String, FieldType>,
+    /// `_metadata.class_permissions`, parsed.
+    ///
+    /// **`None` is not "public".** It is "the key is absent", which reads back as `defaultCLPS`,
+    /// a fully public block *including* an `ACL` key that the present-but-partial case never
+    /// carries (`MongoSchemaCollection.js:67-112`). The distinction is preserved rather than
+    /// normalized, because normalizing either way rewrites a block parse-server reads.
+    pub clp: Option<ClassLevelPermissions>,
+    /// `_metadata.indexes`, round-tripped verbatim and never interpreted.
+    pub indexes: Option<ParseMap>,
+    /// `_metadata.fields_options`, round-tripped **as sent**. A schema body is decoded without
+    /// interpreting a `__type` envelope, so an offset instant, unpadded base64 and any key the
+    /// envelope does not declare all survive, which is what a parse-server node reading the same
+    /// row expects. 0.2.0 stores `required` and `defaultValue` for fleet safety and does not
+    /// enforce them.
+    pub field_options: Option<ParseMap>,
 }
 
 impl ClassSchema {
@@ -79,7 +130,23 @@ impl ClassSchema {
         Self {
             class_name: class_name.into(),
             fields: IndexMap::new(),
+            clp: None,
+            indexes: None,
+            field_options: None,
         }
+    }
+
+    pub fn with_clp(mut self, clp: ClassLevelPermissions) -> Self {
+        self.clp = Some(clp);
+        self
+    }
+
+    /// Every `Relation` field, with its target class.
+    pub fn relation_fields(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.fields.iter().filter_map(|(name, ty)| match ty {
+            FieldType::Relation { target_class } => Some((name.as_str(), target_class.as_str())),
+            _ => None,
+        })
     }
 
     pub fn with_field(mut self, name: impl Into<String>, ty: FieldType) -> Self {

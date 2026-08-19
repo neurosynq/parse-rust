@@ -19,8 +19,11 @@
 // Resolve the parse-server checkout relative to this repository rather than to a home directory,
 // so the default works for anyone with the two repos side by side. Override with
 // PARSE_SERVER_ROOT when it lives elsewhere.
-const PS_ROOT = process.env.PARSE_SERVER_ROOT
-  || require('path').resolve(__dirname, '..', '..', 'parse-server');
+// Resolved absolutely, override included: `require` reads a relative specifier against this
+// file's directory, so `../parse-server-pinned` was looked for inside `tools/`.
+const PS_ROOT = require('path').resolve(
+  __dirname, '..', process.env.PARSE_SERVER_ROOT || '../parse-server',
+);
 
 const MongoTransform = require(`${PS_ROOT}/lib/Adapters/Storage/Mongo/MongoTransform.js`);
 const BSON = require(`${PS_ROOT}/node_modules/bson`);

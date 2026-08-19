@@ -23,6 +23,7 @@
 )]
 
 pub mod acl;
+pub mod clp;
 pub mod date;
 pub mod decode;
 pub mod error;
@@ -32,9 +33,17 @@ pub mod op;
 pub mod value;
 
 pub use acl::{Acl, Permissions, Principal};
+pub use clp::{
+    is_js_truthy, ClassLevelPermissions, OpEntity, OpPerm, Operation, PfEntity, UserFieldsKey,
+};
 pub use date::ParseDate;
-pub use decode::classify;
-pub use error::{ErrorCode, ParseError};
+pub use decode::{classify, classify_raw, recognize_atom, AtomPosition};
+pub use error::{
+    ErrorCode, ErrorDetail, ErrorOrigin, ParseError, ParseErrorInfo, DUPLICATE_VALUE_MESSAGE,
+    PERMISSION_DENIED,
+};
 pub use object_id::new_object_id;
-pub use op::Op;
-pub use value::{deep_strict_eq, ParseMap, ParseValue};
+pub use op::{classify_field, FieldWrite, Op};
+pub use value::{
+    base64_decode, base64_encode, deep_strict_eq, is_base64_value, ParseMap, ParseValue,
+};

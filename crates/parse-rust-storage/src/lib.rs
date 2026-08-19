@@ -6,8 +6,10 @@
 //! catalogued divergences. The rule: if a method can only be implemented sensibly for one
 //! backend, the trait is wrong.
 //!
-//! Only the pieces the 0.1.0 proof of concept needs exist so far: schemas, a small constraint
-//! vocabulary, and the CRUD verbs. Aggregation, relations and transactions are absent.
+//! 0.2.0 added the query tree (`$or`/`$and`/`$nor`), the update op AST, atomic field reservation,
+//! join-table primitives and schema mutation. Aggregation, distinct and transactions are still
+//! absent, and a batch that asks for a transaction is refused rather than silently run without
+//! one.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -19,6 +21,9 @@ pub mod adapter;
 pub mod query;
 pub mod schema;
 
-pub use adapter::{Row, StorageAdapter, WriteResult};
-pub use query::{Comparison, Constraint, QueryOptions, SortDirection};
-pub use schema::{ClassSchema, FieldType};
+pub use adapter::{AddFieldOutcome, Row, SchemaIndex, StorageAdapter, WriteResult};
+pub use query::{
+    Clause, Comparison, Constraint, Query, QueryOptions, SortDirection, Update, UpdateValue,
+    DEFAULT_LIMIT,
+};
+pub use schema::{join_schema, join_table_name, ClassSchema, FieldType};

@@ -25,3 +25,4 @@ path = "src/main.rs"
 parse-rust-server.workspace = true
 parse-rust-mongo.workspace = true
 tokio.workspace = true
+serde_json.workspace = true

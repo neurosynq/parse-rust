@@ -1,7 +1,7 @@
 [package]
 name = "parse-rust-auth"
 version.workspace = true
-description = "Parse Server compatible bcrypt password hashing for parse-rust-server."
+description = "Parse Server compatible sessions, role graph expansion and bcrypt password hashing for parse-rust-server."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,4 +15,29 @@ publish.workspace = true
 
 [dependencies]
 parse-rust-core.workspace = true
+parse-rust-schema.workspace = true
+parse-rust-storage.workspace = true
 bcrypt.workspace = true
+# For session expiry arithmetic only. `ParseDate` is millisecond-based and has no constructor from
+# a millisecond count, so `now + sessionLength` needs the underlying type. Already in the graph
+# through `parse-rust-core`, so this costs no compile time.
+chrono.workspace = true
+indexmap.workspace = true
+rand.workspace = true
+# Needed for `spawn_blocking`: bcrypt is tens of milliseconds of pure CPU and must not run on a
+# runtime worker. See the module comment in `password.rs` for why that is a correctness matter
+# rather than a tuning one.
+#
+# `rt` is what this crate actually uses. Note that naming it here **adds** to the workspace
+# dependency's feature list rather than narrowing it, so the resolved set is the workspace's plus
+# `rt`, and this crate ends up with `net` and `signal` it does not use. Narrowing would mean
+# splitting the workspace dependency, which costs every other crate a manifest entry to save this
+# one a few features it does not compile against anyway.
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+parse-rust-mongo.workspace = true
+bson.workspace = true
+futures.workspace = true
+mongodb.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

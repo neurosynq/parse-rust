@@ -13,10 +13,23 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod clp_validate;
 pub mod controller;
 pub mod infer;
+pub mod schema_api;
 pub mod storage_format;
 
-pub use controller::{apply, default_schema, validate_write, SchemaDelta};
-pub use infer::{class_name_is_valid, field_name_is_valid, infer_type};
+pub use clp_validate::{validate_clp, ClpValidation, ObjectIdForm, Unenforceable};
+pub use controller::{
+    apply, default_schema, validate_required_columns, validate_write, validate_write_fields,
+    SchemaDelta,
+};
+pub use infer::{
+    class_name_is_valid, field_name_is_valid, infer_op_type, infer_type, SYSTEM_CLASSES,
+    VOLATILE_CLASSES,
+};
 pub use parse_rust_storage::{ClassSchema, FieldType};
+pub use schema_api::{
+    check_default_value_type, plan_update, validate_new_class, FieldChange, SchemaMutation,
+    SetField,
+};

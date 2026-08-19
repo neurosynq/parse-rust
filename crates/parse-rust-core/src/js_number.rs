@@ -145,12 +145,62 @@ fn render(digits: &str, k: i32, n: i32) -> String {
     s
 }
 
+/// `String(value)`, the coercion a JavaScript template literal or `+` performs.
+///
+/// Upstream builds several client-visible error messages by concatenating a value into a string,
+/// so the rendering is part of the wire contract rather than a debugging convenience:
+/// `You cannot use ${value} as a query parameter.` (`MongoTransform.js:352`) and
+/// `'This is not a valid ' + obj.__type` (`SchemaController.js`) both reach a client.
+///
+/// The two cases worth naming: an array joins its elements on commas **after** coercing each one,
+/// so nesting flattens and `null` renders as the empty string; and every other object is the
+/// literal `[object Object]`, which is why a malformed operand's message says nothing about it.
+pub fn to_ecma_display(value: &crate::value::ParseValue) -> String {
+    use crate::value::ParseValue;
+    match value {
+        ParseValue::String(s) => s.clone(),
+        ParseValue::Number(n) => to_ecma_string(*n),
+        ParseValue::Bool(b) => b.to_string(),
+        ParseValue::Null => "null".to_string(),
+        ParseValue::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                // `Array.prototype.join` renders null and undefined as empty, which is not what
+                // `String(null)` does. The difference is only visible inside an array.
+                ParseValue::Null => String::new(),
+                other => to_ecma_display(other),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => "[object Object]".to_string(),
+    }
+}
+
+/// JavaScript truthiness.
+///
+/// Upstream guards several schema decisions with a bare `if (obj.key)`, which is **not** a presence
+/// test: `""`, `0`, `false` and `NaN` are all present and all falsy, and an empty array or object
+/// is falsy in neither JavaScript nor here. Reading those guards as "is the key set" accepts
+/// metadata upstream refuses, and reading them as "is the key a string" refuses metadata upstream
+/// accepts.
+pub fn is_truthy(value: &crate::value::ParseValue) -> bool {
+    use crate::value::ParseValue;
+    match value {
+        ParseValue::Null => false,
+        ParseValue::Bool(b) => *b,
+        ParseValue::Number(n) => *n != 0.0 && !n.is_nan(),
+        ParseValue::String(s) => !s.is_empty(),
+        // Every object is truthy in JavaScript, an empty array and an empty object included.
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Every expectation here was produced by running the value through Node and pasting the
-    /// output, not by reasoning about the spec. `tools/js-number-differential.js` re-derives
+    /// output, not by reasoning about the spec. `tests/js_number_differential.rs`, driving `tools/js-number-oracle.js`, re-derives
     /// them at scale against a live Node.
     #[test]
     fn matches_node_on_the_known_divergences() {

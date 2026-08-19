@@ -193,7 +193,11 @@ impl ParseValue {
 /// Standard base64 with padding, matching what `BytesCoder` accepts
 /// (`MongoTransform.js:1306`). Hand-rolled to keep `parse-rust-core` dependency-light; it is 20 lines
 /// and the alphabet is fixed by the wire format.
-pub(crate) fn base64_encode(data: &[u8]) -> String {
+/// Base64, as the `{"__type":"Bytes","base64":...}` envelope spells it.
+///
+/// Public because the Mongo adapter needs the same spelling when it stores a value verbatim: schema
+/// metadata and query atoms both keep a `Bytes` in envelope form rather than as BSON Binary.
+pub fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -221,7 +225,35 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 
 /// The inverse. Rejects any character outside the alphabet rather than skipping it, because a
 /// lenient decoder would silently accept a corrupted payload from an untrusted client.
-pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
+/// Does this string match `BytesCoder.base64Pattern`?
+///
+/// ```text
+/// ^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$
+/// ```
+///
+/// Written out rather than pulled in as a regex because the shape is simple and the rule is exact:
+/// the total length is always a multiple of four, since the optional trailing group is four
+/// characters either way, and padding may only be the final one or two characters. The empty string
+/// matches, which upstream's pattern also allows.
+///
+/// **This decides whether a plain string stored in a `Bytes` column is a legacy Bytes value.**
+/// `isValidDatabaseObject` is `object instanceof mongodb.Binary || this.isBase64Value(object)`, so
+/// a column written by an older parse-server holds the string form and still has to raise to the
+/// envelope.
+pub fn is_base64_value(s: &str) -> bool {
+    if !s.len().is_multiple_of(4) {
+        return false;
+    }
+    let padding = s.bytes().rev().take_while(|b| *b == b'=').count();
+    if padding > 2 {
+        return false;
+    }
+    s.as_bytes()[..s.len() - padding]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/')
+}
+
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let mut acc: u32 = 0;
     let mut bits = 0u32;
     let mut out = Vec::with_capacity(s.len() / 4 * 3);

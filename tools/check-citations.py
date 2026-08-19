@@ -88,15 +88,34 @@ def tree_index(pin):
     return set(paths), by_base
 
 
-def line_counts(pin, paths):
-    counts = {}
+def file_lines(pin, paths):
+    """Every cited file at the pin, as a list of lines.
+
+    Returns the content rather than just the count, because the count answers a weaker question
+    than it looks like it answers. See `trivial_line`.
+    """
+    files = {}
     for p in sorted(paths):
         out = subprocess.run(
             ["git", "-C", UPSTREAM, "show", f"{pin}:{p}"],
             capture_output=True, text=True,
         )
-        counts[p] = 0 if out.returncode != 0 else out.stdout.count("\n") + 1
-    return counts
+        files[p] = [] if out.returncode != 0 else out.stdout.split("\n")
+    return files
+
+
+# Lines that carry no information, so a citation landing on one is almost certainly off by a
+# little. Deliberately a small list of exact matches rather than a heuristic: the point is to be
+# certain about the ones it flags, because a check that fires on legitimate citations is a check
+# people stop reading.
+TRIVIAL_LINES = {
+    "", "}", "};", "},", "});", "})", ")", ");", "{", "]", "];", "},{",
+    "} else {", "else {", "*/", "/*", "//", "return;", "break;", "continue;",
+}
+
+
+def trivial_line(text):
+    return text.strip() in TRIVIAL_LINES
 
 
 def main():
@@ -125,11 +144,16 @@ def main():
                 for i, text in enumerate(fh, start=1):
                     for m in CITATION.finditer(text):
                         cited, start, end = m.group(1), int(m.group(2)), m.group(3)
-                        found.append((rel, i, cited, max(start, int(end or start))))
+                        # Two line numbers, deliberately. The **last** line of a range is what the
+                        # past-EOF check needs; the **first** is what the citation actually points
+                        # at, and the only one whose content is meaningful. A range covers a block,
+                        # so its last line is usually a closing brace: checking that one flagged
+                        # half of every citation in the repository the first time this was written.
+                        found.append((rel, i, cited, max(start, int(end or start)), start))
 
     # Resolve each cited name to a path at the pin.
     wanted, unresolved, skipped, ambiguous = {}, [], [], []
-    for rel, docline, cited, lineno in found:
+    for rel, docline, cited, lineno, startline in found:
         if any(h in cited for h in UNPINNED_HINTS) or os.path.basename(cited) in FOREIGN_BASENAMES:
             skipped.append((rel, docline, cited))
             continue
@@ -147,7 +171,7 @@ def main():
                 break
 
         if probe in all_paths:
-            wanted.setdefault(probe, []).append((rel, docline, lineno))
+            wanted.setdefault(probe, []).append((rel, docline, lineno, startline))
             continue
 
         cands = [p for p in by_base.get(os.path.basename(probe), []) if p.endswith("/" + probe)]
@@ -158,25 +182,42 @@ def main():
         pool = [c for c in cands if c.startswith("src/")] or cands
 
         if len(pool) == 1:
-            wanted.setdefault(pool[0], []).append((rel, docline, lineno))
+            wanted.setdefault(pool[0], []).append((rel, docline, lineno, startline))
         elif not pool:
             unresolved.append((rel, docline, cited))
         else:
             ambiguous.append((rel, docline, cited, pool))
 
-    counts = line_counts(pin, wanted.keys())
+    files = file_lines(pin, wanted.keys())
+    counts = {p: len(l) for p, l in files.items()}
 
-    overruns = []
+    # **A resolved citation is not a correct one, and until this check the difference was
+    # invisible.** Everything above asks whether the file and the line exist at the pin. It does
+    # not read the line, so a citation off by one resolves cleanly forever: three in `cors.rs`
+    # pointed at `Access-Control-Allow-Headers`, a blank line and a `} else {` while every run
+    # reported them resolved.
+    #
+    # Reading the line and judging whether it *supports the claim* needs to know what the claim is,
+    # which is not something this can do. What it can do is catch the case where the line says
+    # nothing at all: a closing brace or a blank line is never what a citation means, so landing on
+    # one is a mistake regardless of what the surrounding comment asserts. That is a floor, not a
+    # guarantee, and it is worth having precisely because two of those three were exactly this.
+    overruns, trivial = [], []
     for path, uses in wanted.items():
-        for rel, docline, lineno in uses:
+        for rel, docline, lineno, startline in uses:
             if lineno > counts.get(path, 0):
                 overruns.append((rel, docline, path, lineno, counts.get(path, 0)))
+            elif 1 <= startline <= counts.get(path, 0) and trivial_line(files[path][startline - 1]):
+                trivial.append(
+                    (rel, docline, path, startline, files[path][startline - 1].strip())
+                )
 
     total = len(found)
-    ok = total - len(unresolved) - len(overruns) - len(skipped) - len(ambiguous)
+    ok = total - len(unresolved) - len(overruns) - len(skipped) - len(ambiguous) - len(trivial)
     print(f"pin {pin}")
     print(f"citations: {total}  resolved: {ok}  unresolved: {len(unresolved)}  "
-          f"past-eof: {len(overruns)}  ambiguous: {len(ambiguous)}  skipped(unpinned): {len(skipped)}")
+          f"past-eof: {len(overruns)}  ambiguous: {len(ambiguous)}  "
+          f"blank-or-brace: {len(trivial)}  skipped(unpinned): {len(skipped)}")
 
     if show_all:
         for path, uses in sorted(wanted.items()):
@@ -212,7 +253,15 @@ def main():
         print(f"  scanned: {', '.join(scan_roots) or '(nothing)'}")
         return 1
 
-    return 1 if (unresolved or overruns or ambiguous) else 0
+    if trivial:
+        print()
+        print("citations landing on a blank line or a bare brace. The line exists, so every other")
+        print("check passes; it just does not say anything, which means the number is off:")
+        for rel, docline, path, lineno, text in sorted(set(trivial)):
+            shown = text if text else "(blank)"
+            print(f"  {rel}:{docline} -> {path}:{lineno} is {shown}")
+
+    return 1 if (unresolved or overruns or ambiguous or trivial) else 0
 
 
 if __name__ == "__main__":

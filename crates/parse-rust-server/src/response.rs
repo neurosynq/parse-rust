@@ -1,20 +1,30 @@
 //! Error response envelopes.
 //!
-//! Parse has **two different error bodies**, and they are not interchangeable. Getting this
+//! Parse has **three different error bodies**, and they are not interchangeable. Getting this
 //! wrong is invisible in a browser and breaks SDKs, because clients branch on the presence of
-//! `code`.
+//! `code` and read `error` rather than `message`.
 //!
 //! | Source | Status | Body |
 //! |---|---|---|
 //! | A `Parse.Error` | 400, or 404 for `OBJECT_NOT_FOUND`, or 500 for `INTERNAL_SERVER_ERROR` | `{"code":N,"error":"..."}` |
 //! | An HTTP-level rejection | as given, e.g. 403 | `{"error":"..."}` with **no `code`** |
+//! | Anything else thrown | 500 | `{"code":1,"message":"Internal server error."}`, key `message` |
 //!
-//! Upstream: `handleParseErrors` (`middlewares.js:596-645`). The `code`-less shape comes from
-//! the `err.status && err.message` branch at `:629-631`.
+//! Upstream: `handleParseErrors` (`middlewares.js:596-646`), which branches on the type of the
+//! thrown value in that order. The `code`-less shape comes from the `err.status && err.message`
+//! branch at `:629-631`; the third from the `else` at `:635-644`.
+//!
+//! The third row is the reason [`parse_rust_core::ErrorOrigin`] exists. It is not "code 1": a
+//! `Parse.Error` deliberately carrying `INTERNAL_SERVER_ERROR` is row one and keeps its message,
+//! and there are several of those upstream. Branching on the code instead of on the origin would
+//! blank out those messages, which is a worse defect than the disclosure it would be fixing.
 
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
-use parse_rust_core::{ErrorCode, ParseError};
+use parse_rust_core::{ErrorCode, ErrorDetail, ErrorOrigin, ParseError, PERMISSION_DENIED};
+
+/// The whole of the generic 500 body's message (`middlewares.js:640`). Note the trailing period.
+pub const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error.";
 
 /// An HTTP-level rejection: a status and a message, with no Parse error code.
 ///
@@ -36,13 +46,12 @@ impl HttpError {
     /// The detailed message is `unauthorized: master key is required`; the client sees
     /// `Permission denied`. Both strings are asserted by `spec/features.spec.js`, the first via
     /// a logger spy and the second in the response body.
-    pub fn master_key_required(sanitized: bool) -> Self {
+    pub fn master_key_required(detail: ErrorDetail) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            message: if sanitized {
-                "Permission denied".to_string()
-            } else {
-                "unauthorized: master key is required".to_string()
+            message: match detail {
+                ErrorDetail::Withheld => PERMISSION_DENIED.to_string(),
+                ErrorDetail::Disclosed => "unauthorized: master key is required".to_string(),
             },
         }
     }
@@ -74,24 +83,41 @@ impl IntoResponse for HttpError {
     }
 }
 
-/// A `Parse.Error`, with upstream's status mapping.
+/// A failure raised by a route, rendered as whichever of the two `code`-carrying bodies it is.
 pub struct ParseErrorResponse(pub ParseError);
 
 impl IntoResponse for ParseErrorResponse {
     fn into_response(self) -> Response {
-        // `handleParseErrors` maps exactly two codes and defaults everything else to 400.
-        // The upstream comment on that switch is a literal "TODO: fill out this mapping", so
-        // the sparseness is the contract rather than an oversight to improve on.
-        let status = match self.0.code {
-            ErrorCode::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::ObjectNotFound => StatusCode::NOT_FOUND,
-            _ => StatusCode::BAD_REQUEST,
+        let (status, body) = match self.0.origin {
+            // Anything that was not a `Parse.Error` upstream. The detail was logged where it was
+            // built; here it is dropped, because this is the byte stream a client reads.
+            ErrorOrigin::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "{{\"code\":{},\"message\":{}}}",
+                    ErrorCode::InternalServerError.as_i32(),
+                    json_string(INTERNAL_SERVER_ERROR_MESSAGE)
+                ),
+            ),
+            // `handleParseErrors` maps exactly two codes and defaults everything else to 400.
+            // The upstream comment on that switch is a literal "TODO: fill out this mapping", so
+            // the sparseness is the contract rather than an oversight to improve on.
+            ErrorOrigin::Parse => {
+                let status = match self.0.code {
+                    ErrorCode::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::ObjectNotFound => StatusCode::NOT_FOUND,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                (
+                    status,
+                    format!(
+                        "{{\"code\":{},\"error\":{}}}",
+                        self.0.code.as_i32(),
+                        json_string(&self.0.message)
+                    ),
+                )
+            }
         };
-        let body = format!(
-            "{{\"code\":{},\"error\":{}}}",
-            self.0.code.as_i32(),
-            json_string(&self.0.message)
-        );
         (
             status,
             [(
@@ -128,7 +154,7 @@ mod tests {
     #[test]
     fn the_two_envelopes_are_distinguishable() {
         // An HTTP rejection has no `code` key at all. A client branching on it must not find one.
-        let http = HttpError::master_key_required(true);
+        let http = HttpError::master_key_required(ErrorDetail::Withheld);
         assert_eq!(http.message, "Permission denied");
         assert_eq!(http.status, StatusCode::FORBIDDEN);
 
@@ -139,11 +165,61 @@ mod tests {
     #[test]
     fn sanitization_toggles_only_the_master_key_message() {
         assert_eq!(
-            HttpError::master_key_required(false).message,
+            HttpError::master_key_required(ErrorDetail::Disclosed).message,
             "unauthorized: master key is required"
         );
         // The header rejection does not participate in sanitization.
         assert_eq!(HttpError::unauthorized().message, "unauthorized");
+    }
+
+    /// Read the body back off a rendered response.
+    async fn rendered(e: ParseError) -> (StatusCode, String) {
+        let response = ParseErrorResponse(e).into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        (status, String::from_utf8(bytes.to_vec()).expect("utf-8"))
+    }
+
+    /// The third branch: key `message`, fixed text, nothing of the detail.
+    #[tokio::test]
+    async fn a_non_parse_error_renders_the_generic_five_hundred() {
+        let (status, body) = rendered(ParseError::internal(
+            "pointer permissions: Invoice ownerRef",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, r#"{"code":1,"message":"Internal server error."}"#);
+        assert!(!body.contains("Invoice"));
+        assert!(!body.contains("ownerRef"));
+        // The key is `message`, and `error` must not appear. An SDK reading `error` is meant to
+        // find nothing here.
+        assert!(!body.contains("\"error\""));
+    }
+
+    /// The trap: a `Parse.Error` that carries code 1 keeps its own message and its own key.
+    /// Blanking these out would be a worse bug than the disclosure the branch above prevents.
+    #[tokio::test]
+    async fn a_parse_error_carrying_code_one_keeps_its_message() {
+        let (status, body) = rendered(ParseError::new(
+            ErrorCode::InternalServerError,
+            "Invalid object ID.",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, r#"{"code":1,"error":"Invalid object ID."}"#);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_parse_error_is_unchanged() {
+        let (status, body) = rendered(ParseError::new(
+            ErrorCode::ObjectNotFound,
+            "Object not found.",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"code":101,"error":"Object not found."}"#);
     }
 
     #[test]

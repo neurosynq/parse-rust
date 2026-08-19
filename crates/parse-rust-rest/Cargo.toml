@@ -19,3 +19,8 @@ parse-rust-schema.workspace = true
 parse-rust-storage.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
+
+[dev-dependencies]
+# The pipeline is async, so its tests need a runtime. `rt` and `macros` only: the fake adapter in
+# `crate::testing` never touches the network, so a multi-threaded runtime would buy nothing.
+tokio = { workspace = true, features = ["rt", "macros"] }

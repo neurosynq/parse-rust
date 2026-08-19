@@ -16,8 +16,16 @@ use std::process::Command;
 /// anyone; override with `PARSE_SERVER_ROOT`. A home-directory path here worked only on one
 /// machine, which is a poor property for a test that exists to prove interoperability.
 fn ps_root() -> String {
-    std::env::var("PARSE_SERVER_ROOT")
-        .unwrap_or_else(|_| format!("{}/../../../parse-server", env!("CARGO_MANIFEST_DIR")))
+    // **Resolved against the workspace root, including the override.** A relative
+    // `PARSE_SERVER_ROOT` such as `../parse-server-pinned` is relative to the repository, not to
+    // this crate, and using it raw looked for it beside `crates/parse-rust-auth/`. That path is
+    // how a pinned worktree is selected, so it has to work.
+    let root = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    match std::env::var("PARSE_SERVER_ROOT") {
+        Ok(p) if std::path::Path::new(&p).is_absolute() => p,
+        Ok(p) => format!("{root}/{p}"),
+        Err(_) => format!("{root}/../parse-server"),
+    }
 }
 
 fn node(script: &str) -> String {
@@ -45,10 +53,12 @@ fn bcryptjs() -> String {
     )
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires node and the upstream checkout; run via tools/test.sh"]
-fn rust_hash_verifies_in_parse_servers_bcrypt() {
-    let h = parse_rust_auth::password::hash("hunter2").expect("hash");
+async fn rust_hash_verifies_in_parse_servers_bcrypt() {
+    let h = parse_rust_auth::password::hash("hunter2".into())
+        .await
+        .expect("hash");
     let script = format!(
         "{} console.log(bcrypt.compareSync('hunter2', {:?}) && !bcrypt.compareSync('wrong', {:?}));",
         bcryptjs(),
@@ -62,29 +72,31 @@ fn rust_hash_verifies_in_parse_servers_bcrypt() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires node and the upstream checkout; run via tools/test.sh"]
-fn parse_servers_hash_verifies_in_rust() {
+async fn parse_servers_hash_verifies_in_rust() {
     // Cost 10, as `password.js` uses.
     let h = node(&format!(
         "{} console.log(bcrypt.hashSync('hunter2', 10));",
         bcryptjs()
     ));
     assert!(
-        parse_rust_auth::password::verify("hunter2", &h),
+        parse_rust_auth::password::verify("hunter2".into(), h.clone()).await,
         "parse-rust could not verify a parse-server hash: {h}"
     );
-    assert!(!parse_rust_auth::password::verify("wrong", &h));
+    assert!(!parse_rust_auth::password::verify("wrong".into(), h).await);
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires node and the upstream checkout; run via tools/test.sh"]
-fn the_prefix_question_is_answered_rather_than_assumed() {
+async fn the_prefix_question_is_answered_rather_than_assumed() {
     // Measured, not assumed, and the guess going in was wrong: bcryptjs and the Rust `bcrypt`
     // crate BOTH emit `$2b$` at cost 10, so there is no prefix mismatch to accommodate. Recorded
     // here rather than deleted, because "they happen to agree today" is a fact a future
     // dependency bump can invalidate, and this is what would catch it.
-    let rust = parse_rust_auth::password::hash("x").expect("hash");
+    let rust = parse_rust_auth::password::hash("x".into())
+        .await
+        .expect("hash");
     let js = node(&format!(
         "{} console.log(bcrypt.hashSync('x', 10));",
         bcryptjs()

@@ -35,6 +35,10 @@ const APP_ID = 'test';
 const MASTER_KEY = 'test';
 const REST_KEY = 'rest';
 
+// A floor, because a check that can pass by finding nothing will. A block that throws early, or
+// one dropped in a refactor, lands below this and fails rather than reporting a green run.
+const ASSERTION_FLOOR = 17;
+
 let passed = 0;
 const failures = [];
 
@@ -160,6 +164,10 @@ async function main() {
     for (const f of failures) {
       console.error(`  - ${f}`);
     }
+    process.exit(1);
+  }
+  if (passed < ASSERTION_FLOOR) {
+    console.error(`FAIL  features.spec.js ran ${passed} assertions, floor is ${ASSERTION_FLOOR}`);
     process.exit(1);
   }
   console.log(`OK  features.spec.js: ${passed} assertions pass against ${BASE}`);

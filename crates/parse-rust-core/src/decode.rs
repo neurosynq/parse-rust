@@ -10,7 +10,7 @@
 //! **Unknown `__type` is rejected at the top level and preserved when nested.**
 //! `validateObject` raises `INCORRECT_TYPE` for an unrecognized `__type`, but it does not
 //! recurse, so a nested one is stored verbatim as an ordinary object
-//! (`SchemaController.js:1303`), and it is reproduced deliberately. A recursive
+//! (`SchemaController.js:1304`), and it is reproduced deliberately. A recursive
 //! rejection would be tidier and would reject writes parse-server accepts.
 //!
 //! **A literal `null` is a value, not an absence.** It classifies as [`ParseValue::Null`] here.
@@ -37,6 +37,178 @@ pub fn classify(value: Json) -> Result<ParseValue, ParseError> {
 /// rather than rejected, which is what upstream does.
 pub fn classify_nested(value: Json) -> Result<ParseValue, ParseError> {
     classify_at(value, false)
+}
+
+/// Which of upstream's two atom transforms applies at a given position.
+///
+/// **The two recognize different tag lists, and which one applies is a property of the field, not
+/// of the value** (`MongoTransform.js:655-662`). That is why this is an argument to
+/// [`recognize_atom`] at lowering time rather than a choice made by the parser: the parser does not
+/// have the schema, and guessing is wrong in both directions. Guessing top-level makes a GeoPoint
+/// compared against an `Array` field match a row upstream does not return, because the extra key
+/// upstream would have compared is discarded; guessing interior makes a GeoPoint compared against a
+/// `GeoPoint` field fail to match a row upstream does return, for the mirror reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomPosition {
+    /// `transformInteriorAtom` (`MongoTransform.js:566-584`): **Pointer, Date and Bytes only.**
+    ///
+    /// GeoPoint, File, Polygon and Relation are deliberately absent. Upstream leaves them as plain
+    /// objects here, so they are compared whole, extra keys included. Its fourth arm is `$regex`,
+    /// which is not a `__type` and is handled by the lowering.
+    Interior,
+    /// `transformTopLevelAtom` (`MongoTransform.js:594-652`): **Pointer, Date, Bytes, GeoPoint,
+    /// Polygon and File.**
+    ///
+    /// Six, not seven. `Relation` has no arm and no coder, so at the top level it is not an atom at
+    /// all and the caller refuses it. "Every Parse type" is the summary that reads right and is
+    /// wrong by one, and the one it is wrong by is reachable: `{"field": {"__type": "Relation"}}`
+    /// answers 107 upstream.
+    TopLevel,
+}
+
+/// The tags each position recognizes, which is the whole of the difference between them.
+const INTERIOR_TAGS: [&str; 3] = ["Pointer", "Date", "Bytes"];
+const TOP_LEVEL_TAGS: [&str; 6] = ["Pointer", "Date", "Bytes", "GeoPoint", "Polygon", "File"];
+
+/// Rebuild a recognized `__type` envelope on an otherwise-raw value. Never recurses.
+///
+/// The asymmetry this preserves is upstream's, measured at the pin against an `$in` over an array
+/// field:
+///
+/// | operand | upstream |
+/// |---|---|
+/// | element **is** a Pointer | matches |
+/// | element **is** a Pointer plus an unknown key | still matches |
+/// | Pointer **nested** in a plain object | matches |
+/// | Pointer nested in a plain object, plus an unknown key | **does not match** |
+///
+/// Upstream *reconstructs* a recognized atom from its declared keys, so an extra key on the atom
+/// itself is discarded and cannot affect the comparison, while a plain object is returned untouched
+/// and is therefore compared whole. Decoding all the way down, which is what [`classify`] does,
+/// collapses those two rows into one: the nested extra key is dropped, the operand compares equal,
+/// and the query matches a row upstream does not return.
+///
+/// A value that is already a decoded atom is returned unchanged, so a constraint built in Rust
+/// rather than parsed from a request passes through untouched.
+///
+/// **Payload validation here is stricter than upstream's, deliberately.** Every coder's
+/// `isValidJSON` is the tag test and nothing else (`MongoTransform.js`, the five `*Coder` objects),
+/// so upstream converts a malformed envelope instead of declining it, and what it converts it to is
+/// not worth reproducing. Measured against a running server at the pin: `{"__type":"Date"}` becomes
+/// an Invalid Date and matches nothing, `{"__type":"GeoPoint"}` becomes `[null, null]` and matches
+/// nothing, `{"__type":"Pointer","className":"C"}` compares against the literal string
+/// `C$undefined`, `{"__type":"File"}` yields `undefined` and so compares as `null`, matching rows
+/// where the field is null or absent, and `{"__type":"Bytes"}` raises a Node `TypeError` rather
+/// than a Parse error, which is a 500. Every one of those is a comparison against a value the
+/// client never wrote, or a crash.
+///
+/// Declining to recognize a malformed envelope leaves it a plain object, which the caller then
+/// refuses with upstream's own 107 for a non-atom. **Narrowing in every case**, which is the safe
+/// direction: parse-rust refuses where upstream answers with a garbage match. Recorded as a Tier 2
+/// divergence.
+///
+/// An earlier version of this note called the File case a broadening bug that returned every row,
+/// and cited the security carve-out. That was wrong, and wrong in an instructive way: it read
+/// `JSON.stringify` dropping an `undefined` key as the key being absent from the query. The driver
+/// serializes it as `null`, so the constraint is applied and narrows. A rendering is not a
+/// behavior. Verified against a live server rather than against a transform's return value.
+pub fn recognize_atom(value: ParseValue, position: AtomPosition) -> ParseValue {
+    let recognized = match &value {
+        ParseValue::Object(map) => match map.get("__type") {
+            Some(ParseValue::String(tag)) => match position {
+                AtomPosition::Interior => INTERIOR_TAGS.contains(&tag.as_str()),
+                AtomPosition::TopLevel => TOP_LEVEL_TAGS.contains(&tag.as_str()),
+            },
+            _ => false,
+        },
+        _ => false,
+    };
+    if !recognized {
+        return value;
+    }
+    let Some(json) = to_json_value(&value) else {
+        return value;
+    };
+    match classify_at(json, false) {
+        // Only an actual atom counts. A malformed envelope is not one, and upstream's coders answer
+        // the same way: `DateCoder.isValidJSON` is a shape test, and a failed one falls to
+        // `return atom`. Listing the variants rather than excluding `Object` also keeps a decode
+        // that somehow produced a scalar from silently replacing the operand.
+        //
+        // **`Relation` is listed here even though no position admits the tag**, and that is
+        // deliberate rather than sloppy. This match asks "did the decode produce an atom", which is
+        // a different question from "is this tag recognized here", and the tag lists above are the
+        // single place the second question is answered. Leaving `Relation` out made the two guards
+        // redundant, so a mutation that put `Relation` back on the top-level list changed no
+        // observable behavior and the test written to catch it passed. One rule, one place.
+        Ok(
+            decoded @ (ParseValue::Date(_)
+            | ParseValue::Pointer { .. }
+            | ParseValue::GeoPoint { .. }
+            | ParseValue::Bytes(_)
+            | ParseValue::File { .. }
+            | ParseValue::Polygon(_)
+            | ParseValue::Relation { .. }),
+        ) => decoded,
+        _ => value,
+    }
+}
+
+/// The JSON a value encodes to.
+///
+/// Goes through [`ParseValue::to_json`] rather than restating every envelope form, so it cannot
+/// drift from the encoder: it *is* the encoder. Private because the only caller is
+/// [`recognize_atom`] and the failure case has no sensible general answer. `None` means
+/// `write_json` emitted something that is not JSON, which would be a bug in the encoder rather than
+/// in the input, and recognition answers it by declining to recognize.
+fn to_json_value(value: &ParseValue) -> Option<Json> {
+    serde_json::from_str(&value.to_json()).ok()
+}
+
+/// Decode without interpreting a single `__type` envelope, at any depth.
+///
+/// **For the two places that must keep what the client sent rather than what it meant.**
+/// [`classify`] and [`classify_nested`] both recognize `{"__type": "Date", ...}` and turn it into a
+/// `Date`, which is right for a column value and destructive everywhere else: the instant is
+/// re-rendered in UTC, base64 is re-padded, and any key beyond the ones the envelope declares is
+/// dropped, because a `ParseValue::Date` has nowhere to put it.
+///
+/// That loss is invisible locally, since parse-rust decodes its own storage the same way it encoded
+/// it. It is visible to the other node and to the database:
+///
+/// - **Schema metadata.** A `defaultValue` is stored, never enforced, and read back by whoever asks.
+///   Upstream stores the JSON it was sent, so a parse-server node reads back an offset instant, an
+///   unpadded base64 string and every extra key. Canonicalizing means it reads something the client
+///   never wrote.
+/// - **Query operands.** An operand is compared, not stored, and upstream compares it unconverted
+///   (`transformInteriorAtom` returns a generic object as-is). Decoding it first builds a *different
+///   predicate*: `$in` with a nested pointer carrying an extra key matches a row upstream does not
+///   return, because upstream is comparing three keys and parse-rust is comparing two.
+///
+/// Numbers still go through the same range check, so this is "no interpretation", not "no
+/// validation".
+pub fn classify_raw(value: Json) -> Result<ParseValue, ParseError> {
+    match value {
+        Json::Null => Ok(ParseValue::Null),
+        Json::Bool(b) => Ok(ParseValue::Bool(b)),
+        Json::Number(n) => n
+            .as_f64()
+            .map(ParseValue::Number)
+            .ok_or_else(|| ParseError::invalid_json(format!("number out of range: {n}"))),
+        Json::String(s) => Ok(ParseValue::String(s)),
+        Json::Array(items) => items
+            .into_iter()
+            .map(classify_raw)
+            .collect::<Result<Vec<_>, _>>()
+            .map(ParseValue::Array),
+        Json::Object(map) => {
+            let mut out = ParseMap::new();
+            for (k, v) in map {
+                out.insert(k, classify_raw(v)?);
+            }
+            Ok(ParseValue::Object(out))
+        }
+    }
 }
 
 fn classify_at(value: Json, top_level: bool) -> Result<ParseValue, ParseError> {

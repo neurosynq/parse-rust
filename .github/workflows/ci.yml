@@ -3,11 +3,13 @@ name: ci
 # Every step here also runs locally via `tools/test.sh`, and deliberately as the same commands
 # rather than reimplemented ones, because duplicating them is how the two drift.
 #
-# **CI runs a subset, not the same set.** There is no upstream parse-server checkout here, so
-# Gate B and the differentials that compare against upstream's own modules (bcrypt interop, the
-# MongoTransform oracle, the `_SCHEMA` format oracle) cannot run. Each is named below where it
-# would have run, so its absence is visible rather than assumed. A green run here therefore means
-# less than a green `tools/test.sh`.
+# **CI runs a subset, not the same set.** There is no upstream parse-server checkout here, only the
+# `parse` npm SDK, so anything that boots a real parse-server cannot run: Gate B, Gate D, the
+# upstream half of Gate C, and the differentials that compare against upstream's own modules
+# (bcrypt interop, the MongoTransform oracle, the `_SCHEMA` format oracle). Each is named below
+# where it would have run, so its absence is visible rather than assumed. A green run here
+# therefore means less than a green `tools/test.sh`, and in particular says nothing about whether
+# parse-rust and parse-server agree.
 
 on:
   push:
@@ -23,7 +25,7 @@ jobs:
   rust:
     name: rust
     runs-on: ubuntu-latest
-    # The adapter tests, the schema-format oracle and both acceptance gates all need a real
+    # The adapter tests, the schema-format oracle and the acceptance gates all need a real
     # MongoDB. Mocking it would test that the mock behaves like the mock.
     services:
       mongodb:
@@ -81,26 +83,66 @@ jobs:
           # is none, so point them at the copy installed above.
           PARSE_SERVER_ROOT: ${{ github.workspace }}
         run: |
+          # No `pipefail`. The address is read with `sed ... | head -1`, and `head` closing the pipe
+          # early makes `sed` die on SIGPIPE, which under `pipefail` would fail the assignment and
+          # take the step down on a successful boot.
+          set -eu
           cargo build --workspace
-          MONGO_URI="mongodb://127.0.0.1:27017/ci_$GITHUB_RUN_ID"
-          PARSE_SERVER_APPLICATION_ID=test PARSE_SERVER_MASTER_KEY=test \
-            PARSE_SERVER_MOUNT_PATH=/parse PORT=0 PARSE_SERVER_DATABASE_URI="$MONGO_URI" \
-            ./target/debug/parse-rust > server.log 2>&1 &
-          for _ in $(seq 1 60); do
-            BASE=$(sed -n 's|^parse-rust listening on \(http://[^ ]*\)$|\1|p' server.log | head -1)
-            [ -n "$BASE" ] && break
-            sleep 0.5
-          done
-          test -n "$BASE" || { cat server.log; exit 1; }
-          for _ in $(seq 1 60); do
-            curl -fsS "$BASE/parse/health" >/dev/null 2>&1 && break
-            sleep 0.5
-          done
+
+          # Two servers are booted here, so the launch is a function rather than copied twice.
+          # Each gets its own database and its own ephemeral port for the reason `tools/test.sh`
+          # gives: a fixed one collides with another copy of itself and the failure reads as flake.
+          # Sets BASE to the mount root. Any trailing NAME=VALUE arguments join the environment,
+          # which is how the second server gets a different option without a second function.
+          boot() {
+            local tag="$1"; shift
+            # `allowClientClassCreation` on, for the reason `tools/test.sh` gives: every gate script
+            # boots its parse-server with it, and a differential run needs both sides to agree. The
+            # shipped default is `false` and is asserted in the Rust tests, not here.
+            env "$@" \
+              PARSE_SERVER_APPLICATION_ID=test PARSE_SERVER_MASTER_KEY=test \
+              PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION=true \
+              PARSE_SERVER_MOUNT_PATH=/parse PORT=0 \
+              PARSE_SERVER_DATABASE_URI="mongodb://127.0.0.1:27017/ci_${GITHUB_RUN_ID}_${tag}" \
+              ./target/debug/parse-rust > "$tag.log" 2>&1 &
+            # `if ... then break; fi` rather than `cond && break`, so the last command of the loop
+            # body on a non-matching pass is the `sleep` rather than a failed test. Under `set -e`
+            # the second form takes the whole step down on the iteration before the server is up.
+            BASE=""
+            for _ in $(seq 1 60); do
+              BASE=$(sed -n 's|^parse-rust listening on \(http://[^ ]*\)$|\1|p' "$tag.log" | head -1)
+              if [ -n "$BASE" ]; then break; fi
+              sleep 0.5
+            done
+            test -n "$BASE" || { cat "$tag.log"; return 1; }
+            for _ in $(seq 1 60); do
+              if curl -fsS "$BASE/parse/health" >/dev/null 2>&1; then break; fi
+              sleep 0.5
+            done
+          }
+
+          MONGO_URI="mongodb://127.0.0.1:27017/ci_${GITHUB_RUN_ID}_default"
+          boot default
           node tools/spec/features.spec.mjs "$BASE/parse"
           node tools/spec/poc-flow.mjs "$BASE/parse" test - test "$MONGO_URI"
-          # Gate B boots a real parse-server, which needs the upstream checkout. Not runnable on
-          # CI yet; named here so its absence is visible rather than assumed.
-          echo "gate B (data fidelity) requires a parse-server checkout; run it locally"
+          # Gate C without `--upstream`: the parse-rust half runs on the SDK alone. The upstream
+          # half needs a checkout to boot a server out of, so it does not run here, and the whole
+          # point of the gate is the comparison. Locally it runs both.
+          node tools/spec/authorization.mjs "$BASE/parse" test test
+
+          # The second regime. `enableSanitizedErrorResponse` puts a different set of messages on
+          # the wire and both sets are contract, so running only the default here would leave half
+          # of Gate C's parse-rust coverage unrun while the log still said "gate C". It needs a
+          # second parse-rust with the option off and nothing else, so unlike the three below it
+          # has no reason to be skipped on CI.
+          boot detailed PARSE_SERVER_ENABLE_SANITIZED_ERROR_RESPONSE=false
+          node tools/spec/authorization.mjs "$BASE/parse" test test --detailed
+
+          # Named rather than dropped. All three need a parse-server checkout, which CI does not
+          # have, and each is a claim CI is therefore not making.
+          echo "not run here: gate B (data fidelity), it boots a parse-server"
+          echo "not run here: gate C upstream half, in both regimes, so nothing above compares the two servers"
+          echo "not run here: gate D (shared auth state), it boots a parse-server"
 
   citations:
     name: citations resolve at pin
@@ -108,11 +150,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The design documents cite parse-server by file and line, and a citation that stops
+      # The code comments cite parse-server by file and line, and a citation that stops
       # resolving reads as verified when it is not. This checks the mechanical half.
       #
       # parse-server is public, so a shallow fetch of the pinned commit is enough. It is cloned
-      # to ../parse-server because that is where the checker and every document expect it.
+      # to ../parse-server because that is where the checker and every citation expect it.
       - name: read pin
         id: pin
         run: echo "commit=$(awk '/^parse-server /{print $3}' PIN)" >> "$GITHUB_OUTPUT"

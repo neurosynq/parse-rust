@@ -18,26 +18,59 @@ pub mod headers {
     pub const INSTALLATION_ID: &str = "x-parse-installation-id";
 }
 
-/// What authority a request carries.
+/// How a request authenticated.
 ///
 /// An enum rather than a bag of booleans on purpose. Upstream threads `isMaster` as a boolean
 /// and `acl === undefined` as a master sentinel, and a missed check on either is a fail-open
 /// privilege bug. A caller here has to name the case it is handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Authority {
+pub enum Credentials {
     /// Master key presented and matched.
     Master,
     /// Maintenance key presented and matched.
     Maintenance,
-    /// A client key matched, or none was required. May carry a session token.
-    Client { session_token: Option<String> },
+    /// A client key matched, or none was required.
+    Client,
+}
+
+/// What authority a request carries, plus the two headers that are not credentials.
+///
+/// The split mirrors `handleParseHeaders`: `req.auth` decides privilege, while `req.info` carries
+/// the session token and installation id **regardless of how the request authenticated**. Keeping
+/// the token out of [`Credentials`] is what makes that true here: a master request still knows
+/// which token it presented, which is what `GET /sessions/me` reads, while
+/// [`crate::request::resolve`] never looks the token up for a master caller
+/// (`middlewares.js:249-251`).
+///
+/// `installationId` is not a credential and grants nothing. It is carried because exactly one
+/// behavior reads it: `destroyDuplicatedSessions` revokes a user's other sessions for the *same*
+/// installation when a new one is minted (`RestWrite.js:1153`), so a request that drops the
+/// header logs the user in twice on one device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authority {
+    pub credentials: Credentials,
+    pub session_token: Option<String>,
+    pub installation_id: Option<String>,
 }
 
 impl Authority {
     /// True only for the master key. **Not** true for maintenance, and deliberately not a field
     /// that can be set independently of how the request authenticated.
     pub fn is_master(&self) -> bool {
-        matches!(self, Authority::Master)
+        matches!(self.credentials, Credentials::Master)
+    }
+
+    /// True for master or maintenance, which is the gate every class-security check uses.
+    pub fn is_privileged(&self) -> bool {
+        matches!(
+            self.credentials,
+            Credentials::Master | Credentials::Maintenance
+        )
+    }
+
+    /// The session token this request presented, if any.
+    pub fn session_token(&self) -> Option<&str> {
+        self.session_token.as_deref()
     }
 }
 
@@ -66,6 +99,14 @@ pub fn resolve(
 ) -> Result<Authority, HeaderRejection> {
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
 
+    let installation_id = get(headers::INSTALLATION_ID).map(str::to_string);
+    let session_token = get(headers::SESSION_TOKEN).map(str::to_string);
+    let with = |credentials: Credentials| Authority {
+        credentials,
+        session_token: session_token.clone(),
+        installation_id: installation_id.clone(),
+    };
+
     match get(headers::APP_ID) {
         Some(id) if id == config.app_id => {}
         _ => return Err(HeaderRejection::Unauthorized),
@@ -73,12 +114,12 @@ pub fn resolve(
 
     if let Some(k) = get(headers::MASTER_KEY) {
         if k == config.master_key {
-            return Ok(Authority::Master);
+            return Ok(with(Credentials::Master));
         }
     }
     if let (Some(k), Some(expected)) = (get(headers::MAINTENANCE_KEY), &config.maintenance_key) {
         if k == expected {
-            return Ok(Authority::Maintenance);
+            return Ok(with(Credentials::Maintenance));
         }
     }
 
@@ -99,9 +140,7 @@ pub fn resolve(
         }
     }
 
-    Ok(Authority::Client {
-        session_token: get(headers::SESSION_TOKEN).map(str::to_string),
-    })
+    Ok(with(Credentials::Client))
 }
 
 #[cfg(test)]
@@ -123,17 +162,28 @@ mod tests {
         m
     }
 
+    fn credentials(
+        config: &ServerConfig,
+        pairs: &[(&str, &str)],
+    ) -> Result<Credentials, HeaderRejection> {
+        resolve(config, &hm(pairs)).map(|a| a.credentials)
+    }
+
+    fn anonymous() -> Credentials {
+        Credentials::Client
+    }
+
     #[test]
     fn master_key_wins_and_short_circuits_client_key_validation() {
         // A javascript key is configured, but a master request need not present one.
-        let a = resolve(
+        let a = credentials(
             &cfg(),
-            &hm(&[
+            &[
                 ("x-parse-application-id", "app"),
                 ("x-parse-master-key", "master"),
-            ]),
+            ],
         );
-        assert_eq!(a, Ok(Authority::Master));
+        assert_eq!(a, Ok(Credentials::Master));
     }
 
     #[test]
@@ -147,51 +197,47 @@ mod tests {
                 ("x-parse-master-key", "master"),
                 ("x-parse-session-token", "r:tok"),
             ]),
-        );
-        assert_eq!(a, Ok(Authority::Master));
-        assert!(a.unwrap().is_master());
+        )
+        .unwrap();
+        assert_eq!(a.credentials, Credentials::Master);
+        assert!(a.is_master());
+        // The token is still visible, because `req.info` carries it regardless of privilege.
+        // What master skips is resolving it into a user; see `crate::request::resolve`.
+        assert_eq!(a.session_token(), Some("r:tok"));
     }
 
     #[test]
     fn a_configured_client_key_becomes_mandatory() {
         // Easy to trip over: with a client key configured, omitting it fails with a bare 403
         // that reads like an authorization problem rather than a missing header.
-        let missing = resolve(&cfg(), &hm(&[("x-parse-application-id", "app")]));
+        let missing = credentials(&cfg(), &[("x-parse-application-id", "app")]);
         assert_eq!(missing, Err(HeaderRejection::Unauthorized));
 
-        let wrong = resolve(
+        let wrong = credentials(
             &cfg(),
-            &hm(&[
+            &[
                 ("x-parse-application-id", "app"),
                 ("x-parse-javascript-key", "nope"),
-            ]),
+            ],
         );
         assert_eq!(wrong, Err(HeaderRejection::Unauthorized));
 
-        let right = resolve(
+        let right = credentials(
             &cfg(),
-            &hm(&[
+            &[
                 ("x-parse-application-id", "app"),
                 ("x-parse-javascript-key", "js"),
-            ]),
+            ],
         );
-        assert_eq!(
-            right,
-            Ok(Authority::Client {
-                session_token: None
-            })
-        );
+        assert_eq!(right, Ok(anonymous()));
     }
 
     #[test]
     fn no_client_key_configured_means_none_required() {
         let c = ServerConfig::new("app", "master");
-        let a = resolve(&c, &hm(&[("x-parse-application-id", "app")]));
         assert_eq!(
-            a,
-            Ok(Authority::Client {
-                session_token: None
-            })
+            credentials(&c, &[("x-parse-application-id", "app")]),
+            Ok(anonymous())
         );
     }
 
@@ -204,18 +250,15 @@ mod tests {
             ("x-parse-javascript-key", "js"),
             ("x-parse-rest-api-key", "rest"),
         ] {
-            assert!(resolve(&c, &hm(&[("x-parse-application-id", "app"), (k, v)])).is_ok());
+            assert!(credentials(&c, &[("x-parse-application-id", "app"), (k, v)]).is_ok());
         }
     }
 
     #[test]
     fn wrong_or_missing_app_id_is_unauthorized() {
+        assert_eq!(credentials(&cfg(), &[]), Err(HeaderRejection::Unauthorized));
         assert_eq!(
-            resolve(&cfg(), &hm(&[])),
-            Err(HeaderRejection::Unauthorized)
-        );
-        assert_eq!(
-            resolve(&cfg(), &hm(&[("x-parse-application-id", "other")])),
+            credentials(&cfg(), &[("x-parse-application-id", "other")]),
             Err(HeaderRejection::Unauthorized)
         );
     }
@@ -223,12 +266,12 @@ mod tests {
     #[test]
     fn a_wrong_master_key_falls_through_rather_than_short_circuiting() {
         // It must not be treated as master, and it must not bypass client-key validation.
-        let a = resolve(
+        let a = credentials(
             &cfg(),
-            &hm(&[
+            &[
                 ("x-parse-application-id", "app"),
                 ("x-parse-master-key", "wrong"),
-            ]),
+            ],
         );
         assert_eq!(a, Err(HeaderRejection::Unauthorized));
     }
@@ -242,13 +285,9 @@ mod tests {
                 ("x-parse-javascript-key", "js"),
                 ("x-parse-session-token", "r:abc"),
             ]),
-        );
-        assert_eq!(
-            a,
-            Ok(Authority::Client {
-                session_token: Some("r:abc".into())
-            })
-        );
+        )
+        .unwrap();
+        assert_eq!(a.session_token(), Some("r:abc"));
     }
 
     #[test]
@@ -263,10 +302,35 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(a, Authority::Maintenance);
+        assert_eq!(a.credentials, Credentials::Maintenance);
         assert!(
             !a.is_master(),
             "maintenance must not satisfy a master-key gate"
         );
+        assert!(
+            a.is_privileged(),
+            "but it does satisfy the class-security gate"
+        );
+    }
+
+    /// The installation id travels on every authority, not just on a client request. A master-key
+    /// signup mints a session too, and that session's duplicate destruction reads it.
+    #[test]
+    fn the_installation_id_is_carried_regardless_of_how_the_request_authenticated() {
+        for extra in [
+            ("x-parse-master-key", "master"),
+            ("x-parse-javascript-key", "js"),
+        ] {
+            let a = resolve(
+                &cfg(),
+                &hm(&[
+                    ("x-parse-application-id", "app"),
+                    extra,
+                    ("x-parse-installation-id", "inst-1"),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(a.installation_id.as_deref(), Some("inst-1"));
+        }
     }
 }

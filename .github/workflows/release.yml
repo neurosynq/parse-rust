@@ -104,6 +104,41 @@ jobs:
             exit 1
           fi
 
+      # **Every internal dependency repeats the version next to its path, and those cannot
+      # inherit.** Bumping `[workspace.package]` without bumping the seven path dependencies
+      # publishes crates that depend on the *previous* release of their siblings, which resolves,
+      # compiles, and is wrong.
+      #
+      # The dry run below does not catch it. It strips the paths and resolves each sibling from the
+      # registry, where the previous version genuinely exists, so a stale `version = "0.1.0"` looks
+      # like a satisfiable dependency rather than a mistake.
+      #
+      # Parsed rather than counted. Counting occurrences of the version string passes when one
+      # dependency is stale and an unrelated dependency happens to sit at the same version, which
+      # is a plausible accident and exactly the case a guard is for. This checks each dependency
+      # that carries a `path` and names the ones that disagree.
+      - name: internal dependency versions must match the workspace
+        run: |
+          python3 - <<'CHECK'
+          import sys, tomllib
+          with open("Cargo.toml", "rb") as fh:
+              m = tomllib.load(fh)
+          want = m["workspace"]["package"]["version"]
+          bad = []
+          for name, spec in m["workspace"].get("dependencies", {}).items():
+              if not isinstance(spec, dict) or "path" not in spec:
+                  continue
+              got = spec.get("version")
+              if got != want:
+                  bad.append(f"{name}: path dependency declares {got!r}, workspace is {want!r}")
+          if bad:
+              for line in bad:
+                  print(f"::error::{line}")
+              print("::error::A published crate would depend on an older release of its sibling.")
+              sys.exit(1)
+          print(f"every path dependency matches the workspace version {want}")
+          CHECK
+
       - name: fmt
         run: cargo fmt --all -- --check
 

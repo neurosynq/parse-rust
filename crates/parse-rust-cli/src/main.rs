@@ -55,6 +55,74 @@ async fn run() -> std::io::Result<()> {
         config.mount_path = m;
     }
 
+    // Every option below carries upstream's env var name and upstream's default, read at the pin.
+    // A wrong default here is a security default, so each one is checked rather than guessed, and
+    // an unparsable value is a hard failure rather than a silent fallback to the default: a typo
+    // in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly produce sessions that never
+    // expire.
+    if let Some(v) = env("PARSE_SERVER_SESSION_LENGTH") {
+        config.session.session_length_secs = number(&v, "PARSE_SERVER_SESSION_LENGTH")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS") {
+        config.session.expire_inactive_sessions =
+            boolean(&v, "PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_PROTECTED_FIELDS_OWNER_EXEMPT") {
+        config.protected_fields_owner_exempt =
+            boolean(&v, "PARSE_SERVER_PROTECTED_FIELDS_OWNER_EXEMPT")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_PROTECTED_FIELDS_SAVE_RESPONSE_EXEMPT") {
+        config.protected_fields_save_response_exempt =
+            boolean(&v, "PARSE_SERVER_PROTECTED_FIELDS_SAVE_RESPONSE_EXEMPT")?;
+    }
+    // Default `true`, which withholds the reason from every denial. Setting it to `false` puts
+    // the detailed message back on the wire, which is a disclosure and is why it is opt-in.
+    if let Some(v) = env("PARSE_SERVER_ENABLE_SANITIZED_ERROR_RESPONSE") {
+        config.enable_sanitized_error_response =
+            boolean(&v, "PARSE_SERVER_ENABLE_SANITIZED_ERROR_RESPONSE")?;
+    }
+    // Upstream's env var name sits under the `DATABASE_` prefix because the option lives in the
+    // `databaseOptions` group, not because it is namespaced by subsystem elsewhere.
+    if let Some(v) = env("PARSE_SERVER_DATABASE_CREATE_INDEX_ROLE_NAME") {
+        config.create_index_role_name =
+            boolean(&v, "PARSE_SERVER_DATABASE_CREATE_INDEX_ROLE_NAME")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID") {
+        config.allow_custom_object_id = boolean(&v, "PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID")?;
+    }
+    // Comma-separated, because a list is not expressible in one environment variable otherwise.
+    // Upstream takes an array in the config file and a comma-separated string from the environment
+    // through the same parser, so the spelling matches.
+    if let Some(v) = env("PARSE_SERVER_ALLOW_ORIGIN") {
+        config.allow_origin = list(&v);
+    }
+    if let Some(v) = env("PARSE_SERVER_ALLOW_HEADERS") {
+        config.allow_headers = list(&v);
+    }
+    if let Some(v) = env("PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION") {
+        config.allow_client_class_creation =
+            boolean(&v, "PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_REQUEST_COMPLEXITY_BATCH_REQUEST_LIMIT") {
+        config.batch_request_limit =
+            number(&v, "PARSE_SERVER_REQUEST_COMPLEXITY_BATCH_REQUEST_LIMIT")?;
+    }
+    // `protectedFields` is stringified JSON upstream, `{"ClassName": {"entity": ["field"]}}`.
+    //
+    // **Setting it adds to the defaults rather than replacing them** (`ParseServer.ts:657-673`),
+    // so this parses into a fresh map and folds the defaults back in rather than assigning over
+    // `config.protected_fields`. Assigning is the obvious translation and it silently unprotects
+    // `_User.email` for any deployment whose configuration names only its own classes. Read after
+    // `PARSE_SERVER_PROTECTED_FIELDS_OWNER_EXEMPT` above, because that option changes the merge.
+    if let Some(v) = env("PARSE_SERVER_PROTECTED_FIELDS") {
+        let mut configured = protected_fields(&v)?;
+        parse_rust_server::config::merge_protected_fields_defaults(
+            &mut configured,
+            config.protected_fields_owner_exempt,
+        );
+        config.protected_fields = configured;
+    }
+
     let uri = env("PARSE_SERVER_DATABASE_URI")
         .unwrap_or_else(|| "mongodb://127.0.0.1:27017/parse".into());
     let database = database_from_uri(&uri).to_string();
@@ -87,6 +155,69 @@ async fn run() -> std::io::Result<()> {
     // Machine-readable on its own line, so a harness can bind port 0 and discover the result.
     println!("parse-rust listening on http://{bound}");
     server.await
+}
+
+/// `parsers.arrayParser`, which is a plain `split(',')` and nothing else
+/// (`Options/parsers.js:42-50`).
+///
+/// **No trimming and no dropping of empty entries, and the second part is load-bearing.**
+/// `PARSE_SERVER_ALLOW_ORIGIN=""` must parse to one empty origin, not to no origins. Both spellings
+/// are closed now, since `resolve_origin` stopped treating an empty list as unconfigured, but they
+/// are closed for different reasons and only one of them is upstream's: upstream's `?? ['*']` fires
+/// on an absent value, and a configured empty entry is what it actually carries. An empty string
+/// matches no browser origin, which is the intent, and it survives only if it survives here.
+fn list(value: &str) -> Vec<String> {
+    value.split(',').map(str::to_string).collect()
+}
+
+/// `parsers.booleanParser` (`Options/parsers.js:64-69`), **with one deliberate difference**.
+///
+/// Upstream is `opt == true || opt == 'true' || opt == '1'`, and **everything else returns false**.
+/// It never reports a bad value: `PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID=yes` is silently `false`
+/// there, and so is `treu`.
+///
+/// `true` and `1` are accepted here for the same reason upstream accepts them, because an operator
+/// who wrote `=1` meant it. An unrecognised value is a startup failure rather than a silent
+/// `false`, and that is the difference: every option this parses is a security default, so reading
+/// a typo as "off" is the failure mode worth refusing. A server that will not start is a mistake
+/// you fix in a minute; one that started with `expireInactiveSessions` quietly off is not.
+///
+/// Blast radius: a deployment relying on upstream's coercion of a junk value to `false` gets a
+/// startup failure instead.
+fn boolean(value: &str, name: &str) -> std::io::Result<bool> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(std::io::Error::other(format!(
+            "{name} must be `true` or `false`, got {other:?}"
+        ))),
+    }
+}
+
+/// `parsers.numberParser` (`Options/parsers.js:1-9`), **with one deliberate difference**.
+///
+/// Upstream is `parseInt`, which stops at the first non-digit: `parseInt("5abc")` is `5`, and only
+/// a value with no leading digits at all throws. This requires the whole string to be an integer.
+///
+/// Same reasoning as the boolean above. `PARSE_SERVER_SESSION_LENGTH=30d` meaning thirty seconds is
+/// a silent misconfiguration of a security default, and the shape of typo that produces it, a unit
+/// suffix, is the likely one. Blast radius: a value upstream would truncate is refused here.
+fn number(value: &str, name: &str) -> std::io::Result<i64> {
+    value
+        .parse()
+        .map_err(|_| std::io::Error::other(format!("{name} must be a number, got {value:?}")))
+}
+
+/// `parsers.objectParser`: stringified JSON, `{"ClassName": {"entity": ["field", ...]}}`.
+fn protected_fields(value: &str) -> std::io::Result<parse_rust_server::ProtectedFieldsConfig> {
+    let parsed: parse_rust_server::ProtectedFieldsConfig =
+        serde_json::from_str(value).map_err(|e| {
+            std::io::Error::other(format!(
+                "PARSE_SERVER_PROTECTED_FIELDS must be JSON of the form \
+                 {{\"ClassName\": {{\"entity\": [\"field\"]}}}}: {e}"
+            ))
+        })?;
+    Ok(parsed)
 }
 
 /// Default database name when the URI selects none. Upstream's own default is `parse`.

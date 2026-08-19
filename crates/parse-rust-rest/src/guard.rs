@@ -13,7 +13,15 @@ use parse_rust_core::{ParseError, ParseMap, ParseValue};
 /// Applied at the REST boundary rather than in the schema layer so that the server's own writes,
 /// which legitimately carry these keys, do not have to route around their own validation.
 pub fn reject_reserved_keys(body: &ParseMap) -> Result<(), ParseError> {
-    for key in body.keys() {
+    reject_reserved_keys_in(body.keys().map(String::as_str))
+}
+
+/// The same guard over any key sequence, for a body that has already been decoded into
+/// [`crate::WriteBody`] and no longer has a `ParseMap` to hand.
+pub fn reject_reserved_keys_in<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Result<(), ParseError> {
+    for key in keys {
         if key.starts_with('_') {
             return Err(ParseError::invalid_key_name(format!(
                 "Invalid field name: {key}."

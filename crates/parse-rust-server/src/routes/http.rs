@@ -1,0 +1,452 @@
+//! The axum layer: extractors in, [`dispatch`] out.
+//!
+//! No behavior lives here. Each handler resolves the request context once, names the route it
+//! matched, and dispatches. `/batch` reaches the same dispatcher with the same context, which is
+//! what keeps a sub-request and a top-level request from being two implementations.
+//!
+//! **The method override is dispatched explicitly rather than rewritten by middleware.** The
+//! JavaScript SDK sends every request as a `POST` with the real method in `_method`, and axum
+//! matches on the transport method before a `Router::layer` runs. Verified by observation: a POST
+//! carrying `_method: "PUT"` produced a 405 no matter where the layer was attached. So the
+//! intended method travels in an extension and is read here. See `body_credentials`.
+
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::Value as Json_;
+
+use crate::auth::Authority;
+use crate::body_credentials::MethodOverride;
+use crate::params::Params;
+use crate::response::{HttpError, ParseErrorResponse};
+use crate::routes::dispatch::{self, Incoming, Route, RouteError};
+use crate::state::AppState;
+
+/// Resolve the context and run one route.
+async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Response {
+    // **A session token attached to `/login` is discarded before it is resolved**
+    // (`middlewares.js:267-268`). Upstream deletes it in `handleParseHeaders`, after the client-key
+    // check and before any `Auth` is built, so the token is never looked up at all.
+    //
+    // Without this, a client holding an expired or revoked token cannot log back in: the generic
+    // resolver validates whatever token arrived and answers `Invalid session token` before the
+    // credentials in the body are ever read. That is the one situation where the client's only
+    // recovery is the route being refused. SDKs keep sending the stored token until a login
+    // succeeds, so the failure is self-sustaining rather than transient.
+    //
+    // Credentials are untouched: only the token is dropped. A master-key login is still a master
+    // request, and `/loginAs`, which requires master, is a different route and unaffected.
+    //
+    // Keyed on the route rather than the path string, and applied here rather than inside the
+    // login handler, so it holds for the SDK's `POST`-everything form as well. `/batch` is
+    // deliberately not covered: upstream's middleware runs once on the outer HTTP request, so a
+    // `/login` nested in a batch sees the outer request's token exactly as it does upstream.
+    let authority = &match incoming.route {
+        Route::Login => Authority {
+            session_token: None,
+            ..authority.clone()
+        },
+        _ => authority.clone(),
+    };
+
+    // One snapshot, one role expansion, per HTTP request.
+    let rc = match state.request_context(authority).await {
+        Ok(rc) => rc,
+        Err(e) => return ParseErrorResponse(e).into_response(),
+    };
+    let outcome = dispatch::dispatch(state, &rc, authority, &incoming).await;
+    match outcome {
+        Ok(response) => (response.status, Json(response.body)).into_response(),
+        Err(RouteError::Parse(e)) => ParseErrorResponse(e).into_response(),
+        Err(RouteError::Http(e)) => e.into_response(),
+        // Express answers a bare 404 for a path no router claims, with an HTML body no client
+        // parses. The status is what matters and is what a client branches on; the body is the
+        // `code`-less HTTP envelope, because inventing a Parse code for "this route does not
+        // exist" would make an absent feature look like a rejected request.
+        Err(RouteError::NotFound { method, path }) => HttpError {
+            status: http::StatusCode::NOT_FOUND,
+            message: format!("cannot route {method} {path}"),
+        }
+        .into_response(),
+    }
+}
+
+/// The method a request is really asking for.
+///
+/// An override that names a method axum would have routed differently is honoured; anything
+/// unparsable falls back to the transport method, which then fails to match a route arm and
+/// reports that rather than silently doing something else.
+fn effective_method(
+    transport: http::Method,
+    override_: Option<axum::Extension<MethodOverride>>,
+) -> http::Method {
+    match override_ {
+        Some(axum::Extension(MethodOverride(m))) => m,
+        None => transport,
+    }
+}
+
+fn params(query: HashMap<String, String>) -> Params {
+    Params::from_map(query)
+}
+
+// -------------------------------------------------------------------------------------------
+// Handlers
+// -------------------------------------------------------------------------------------------
+
+pub async fn health(State(state): State<AppState>) -> Response {
+    // Credential-free upstream, and the endpoint every bring-up script polls, so it does not go
+    // through the dispatcher's context resolution: a health check must answer while the database
+    // is unreachable, which is the state a caller most wants to distinguish.
+    let _ = state;
+    Json(crate::routes::health::body()).into_response()
+}
+
+pub async fn server_info(State(state): State<AppState>, authority: Authority) -> Response {
+    // The one route that needs no request context: it reads config and nothing else, so it stays
+    // answerable when the database is down.
+    if !authority.is_master() {
+        return HttpError::master_key_required(state.config().error_detail()).into_response();
+    }
+    Json(crate::routes::features::server_info_body(state.config())).into_response()
+}
+
+pub async fn users_collection(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(http::Method::POST, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Users,
+            params: Params::default(),
+            body: body.map(|b| b.0),
+            path: "/users".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn users_me(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    // The SDK reaches this as a POST carrying `_method: "GET"`.
+    let method = effective_method(transport, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::UsersMe,
+            params: Params::default(),
+            body: None,
+            path: "/users/me".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    authority: Authority,
+    body: Option<Json<Json_>>,
+) -> Response {
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method: http::Method::POST,
+            route: Route::Login,
+            params: Params::default(),
+            body: body.map(|b| b.0),
+            path: "/login".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn logout(State(state): State<AppState>, authority: Authority) -> Response {
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method: http::Method::POST,
+            route: Route::Logout,
+            params: Params::default(),
+            body: None,
+            path: "/logout".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn classes_collection(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(class_name): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/classes/{class_name}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Classes { class_name },
+            params: params(query),
+            body: body.map(|b| b.0),
+            path,
+        },
+    )
+    .await
+}
+
+pub async fn classes_object(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path((class_name, object_id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    // There is no POST verb on an object route. A bare POST with no override used to fall through
+    // to `update`, so an unrelated request could mutate a row; an override-free POST now reaches
+    // the dispatcher as POST and finds no arm.
+    let method = effective_method(transport, method);
+    let path = format!("/classes/{class_name}/{object_id}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::ClassObject {
+                class_name,
+                object_id,
+            },
+            params: params(query),
+            body: body.map(|b| b.0),
+            path,
+        },
+    )
+    .await
+}
+
+pub async fn roles_collection(
+    State(state): State<AppState>,
+    authority: Authority,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Roles,
+            params: params(query),
+            body: body.map(|b| b.0),
+            path: "/roles".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn roles_object(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(object_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/roles/{object_id}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::RoleObject { object_id },
+            params: params(query),
+            body: body.map(|b| b.0),
+            path,
+        },
+    )
+    .await
+}
+
+pub async fn sessions_collection(
+    State(state): State<AppState>,
+    authority: Authority,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    let method = effective_method(transport, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Sessions,
+            params: params(query),
+            body: None,
+            path: "/sessions".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn sessions_me(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    let method = effective_method(transport, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::SessionsMe,
+            params: Params::default(),
+            body: None,
+            path: "/sessions/me".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn sessions_object(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(object_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/sessions/{object_id}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::SessionObject { object_id },
+            params: params(query),
+            body: None,
+            path,
+        },
+    )
+    .await
+}
+
+pub async fn schemas_collection(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Schemas,
+            params: Params::default(),
+            body: body.map(|b| b.0),
+            path: "/schemas".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn schemas_class(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(class_name): Path<String>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/schemas/{class_name}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::SchemaClass { class_name },
+            params: Params::default(),
+            body: body.map(|b| b.0),
+            path,
+        },
+    )
+    .await
+}
+
+pub async fn purge(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(class_name): Path<String>,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/purge/{class_name}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::Purge { class_name },
+            params: Params::default(),
+            body: None,
+            path,
+        },
+    )
+    .await
+}
+
+/// `POST /batch`.
+///
+/// Not routed through [`dispatch`], because a batch is the thing that *calls* the dispatcher. The
+/// context is resolved here, once, and shared by every sub-request.
+pub async fn batch(
+    State(state): State<AppState>,
+    authority: Authority,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let rc = match state.request_context(&authority).await {
+        Ok(rc) => rc,
+        Err(e) => return ParseErrorResponse(e).into_response(),
+    };
+    let body = body.map(|b| b.0);
+    let mount_path = state.config().mount_path.clone();
+    match crate::routes::batch::handle(&state, &rc, &authority, &mount_path, body.as_ref()).await {
+        Ok(results) => Json(results).into_response(),
+        Err(e) => ParseErrorResponse(e).into_response(),
+    }
+}

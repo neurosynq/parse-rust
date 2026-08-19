@@ -10,11 +10,16 @@ Server are trademarks of their respective owners.
 
 ## Status: work in progress
 
-**This is an early proof of concept, and the intent is to finish it.** Parse Server is a large
-surface and parse-rust currently covers a thin slice of it: enough that an unmodified Parse SDK
-can sign up, log in, create an object, update a field, query it back and fetch it by id against
-MongoDB, and enough that the rows it writes are interchangeable with parse-server's on the same
-database. That is the whole of the 0.1.0 claim. Everything else is ahead of it, not behind it.
+**This is an early implementation, and the intent is to finish it.** Parse Server is a large
+surface and parse-rust covers a slice of it. 0.1.0 showed that an unmodified Parse SDK could sign
+up, log in, create an object, update a field, query it back and fetch it by id against MongoDB,
+and that the rows it wrote were interchangeable with parse-server's on the same database.
+
+0.2.0 is the authorization milestone, and it changes what the database can be. Roles resolve,
+class-level permissions are evaluated, pointer permissions narrow queries, protected fields are
+stripped, and the sessions, roles and join tables it writes are the rows parse-server reads from
+the same database. 0.1.0 could talk to a Parse client; 0.2.0 can be pointed at a Parse database.
+Everything else is ahead of that, not behind it.
 
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
@@ -26,49 +31,65 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 
 | Area | Endpoints and behavior |
 |---|---|
-| Objects | `POST`, `GET`, `PUT`, `DELETE` on `/classes/:class`, and `GET` with `where`, `limit`, `skip`, `order`, `keys`, `count` |
+| Objects | `POST`, `GET`, `PUT`, `DELETE` on `/classes/:class`, and `GET` with `where`, `limit`, `skip`, `order`, `keys`, `excludeKeys`, `count` |
+| Queries | `$or`, `$and`, `$nor`, `$regex` with `$options`, `$all`, `$relatedTo`, and `include` with dotted paths |
 | Users | `POST /users` (signup, bcrypt), `POST /login`, `GET /users/me`, `POST /logout` |
-| Sessions | Session tokens in upstream's `r:` format, resolved on every request |
-| Access control | Object ACLs enforced on read, write and delete, stored as `_rperm` and `_wperm` |
-| Schema | Classes and fields created by first write, types inferred, later writes checked against them |
+| Sessions | `_Session` rows in upstream's format, surviving a restart and readable by parse-server. `/sessions` with `me`, list, get and delete |
+| Roles | `_Role` with its `users` and `roles` relations, the five `/roles` verbs, and transitive role graph expansion |
+| Access control | Object ACLs, class-level permissions with pointer permissions, and `protectedFields` |
+| Schema | Classes and fields created by first write with types inferred, plus the full `/schemas` API and `/purge`, master-key only |
+| Relations | `_Join` tables, `AddRelation` and `RemoveRelation`, and constraints on a `Relation`-typed field |
+| Writes | The atomic update operations: `Increment`, `Add`, `AddUnique`, `Remove`, `Delete` |
+| Batch | `/batch` with per-operation results and upstream's error shape |
 | Types | Pointer, Date, Bytes, GeoPoint, File, Polygon, Relation and the update operations, encoded as upstream encodes them |
 | Errors | Upstream's numeric codes, messages and both error envelopes |
 | Transport | The JavaScript SDK's `POST`-everything form, normalized before routing |
-| Server | `GET /serverInfo`, `GET /health`, master and maintenance key gates, client-key validation |
+| Server | `GET /serverInfo`, `GET /health`, the master key gate, client-key validation |
+| Browsers | Upstream's CORS headers on every response including errors, and an `OPTIONS` preflight answered directly. `allowOrigin` and `allowHeaders` are configurable |
 
 ### What is not there yet
 
-LiveQuery, Cloud Code and triggers, files, push, aggregate, batch, GraphQL, `include`, relation
-queries, roles, password reset, email verification, auth adapters, MFA, rate limiting,
-idempotency, CLP, the schema API, and PostgreSQL.
+LiveQuery, Cloud Code and triggers, files, push, aggregate, GraphQL, `$inQuery`, `$notInQuery`,
+`$select`, `$dontSelect`, geo and `$text` queries, password reset, email verification, auth
+adapters, MFA, account lockout, password policy, rate limiting, idempotency, and PostgreSQL. Of
+the `_User` routes, `/users/:objectId` does not exist and `/classes/_User` refuses an ordinary
+client's create and delete, so `signUp`, `logIn` and `user.save()` on an existing user all work,
+while creating or deleting a user outside `POST /users` does not.
 
 Three of those absences are not inert, and matter before you try anything against real data:
 
-- **Roles are not implemented**, so a `role:` ACL entry never matches and therefore *denies*. That
-  is fail-closed and safe, but pointing this at a database with role-based ACLs will look like
-  data has gone missing.
-- **Sessions live in memory.** Restarting the server logs everyone out, and two processes do not
-  share sessions.
 - **Retried writes duplicate**, because idempotency is not implemented. This matches upstream's
   default configuration, where the feature is off unless paths are configured.
+- **Query constraints that are not implemented are refused, not ignored.** A request using
+  `$inQuery`, `$select`, geo or `$text` gets an error naming the operator. That is deliberate: a
+  silently dropped constraint broadens a result set, which is an authorization failure rather than
+  a missing feature. Code written against parse-server will fail loudly here rather than return
+  too much.
+- **Nothing is cached.** Every request reloads every schema and role expansion issues one query
+  per level of the graph. Correct and slow, deferred on purpose because a cache's staleness window
+  decides how long a revoked permission keeps working.
 
 `CHANGELOG.md` carries the full list, including the deliberate differences from upstream.
 
 ### Where this is going
 
-Roughly in order. Each step is gated on the upstream spec files for that subsystem passing, not on
-the code existing.
+Roughly in order. Each step should be gated on the upstream spec files for that subsystem passing,
+not on the code existing, which is why the first item is the instrument rather than a feature.
 
-1. **Core loop.** Finish what 0.1.0 started: CLP, the schema API, batch, `include`, relations,
-   persisted sessions, and the schema race that concurrent first writes can still lose.
-2. **Auth and users.** Roles, password reset, email verification, auth adapters, MFA, account
-   lockout.
+1. **The conformance harness.** Parse Server ships an executable specification, and nothing runs it
+   against parse-rust yet. Until that exists, every claim made here rests on hand-written
+   differential runners that check what someone thought to check. This is the largest gap in the
+   project and it is judged on its own, not bundled with a feature.
+2. **Auth and users.** Password reset, email verification, auth adapters, MFA, account lockout,
+   password policy.
 3. **Triggers.** A `TriggerHost` trait with native Rust triggers and a webhook host. Existing
    `main.js` cloud code runs in a Node sidecar reached over that same webhook protocol, so
    JavaScript is a compatibility path rather than a requirement.
 4. **Realtime and files.** LiveQuery and its pubsub, the files adapter, GridFS.
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
+
+0.1.0 and 0.2.0 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
@@ -80,8 +101,13 @@ The contract is **wire compatibility**, not source fidelity. An unmodified Parse
 parse-rust should behave exactly as it does against parse-server: same routes, same JSON shapes,
 same error codes, same header semantics.
 
-Where idiomatic Rust and a literal port disagree, idiomatic Rust wins, as long as the observable
-behavior over the wire is byte-identical. Internal structure is free. The external surface is not.
+The requirement is semantic identity, with exact values wherever a client depends on them. Error
+codes and messages, field names, field ordering within an object, date encoding, `objectId` shape
+and the `_SCHEMA` type strings are exact, because SDKs and mixed fleets read them. JSON
+whitespace, header ordering and transport framing are not, and no SDK can observe them.
+
+Where idiomatic Rust and a literal port disagree, idiomatic Rust wins, as long as nothing a client
+can observe changes. Internal structure is free. The external surface is not.
 
 That contract is why the tests look the way they do. Everything that touches upstream behavior is
 checked against upstream rather than against someone's reading of it: the ECMAScript number
@@ -154,9 +180,25 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_MOUNT_PATH` | `/parse` | |
 | `PARSE_SERVER_JAVASCRIPT_KEY` | unset | if set, non-master requests must present a client key |
 | `PARSE_SERVER_REST_API_KEY` | unset | same |
+| `PARSE_SERVER_SESSION_LENGTH` | `31536000` | seconds; one year, as upstream |
+| `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` | `true` | `false` issues sessions with no `expiresAt` |
+| `PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID` | `false` | lets a client choose its own `objectId` on create |
+| `PARSE_SERVER_ENABLE_SANITIZED_ERROR_RESPONSE` | `true` | whether a denial tells the client why |
+| `PARSE_SERVER_PROTECTED_FIELDS` | `{"_User":{"*":["email"]}}` | JSON, as upstream's option takes |
+| `PARSE_SERVER_PROTECTED_FIELDS_OWNER_EXEMPT` | `true` | an owner reads its own protected fields |
+| `PARSE_SERVER_PROTECTED_FIELDS_SAVE_RESPONSE_EXEMPT` | `true` | a save response is not filtered |
+| `PARSE_SERVER_REQUEST_COMPLEXITY_BATCH_REQUEST_LIMIT` | `-1` | unlimited; master and maintenance bypass it |
+| `PARSE_SERVER_DATABASE_CREATE_INDEX_ROLE_NAME` | `true` | the unique index on `_Role.name` |
+| `PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION` | `false` | whether a non-master caller may create a class |
+| `PARSE_SERVER_ALLOW_ORIGIN` | `*` | comma-separated; an explicitly empty value allows no origin |
+| `PARSE_SERVER_ALLOW_HEADERS` | unset | comma-separated, added to upstream's default list |
 
 The client keys are all-or-nothing, as upstream: configure none and none is required; configure
 any one and every non-master request must present a matching key.
+
+An unparsable value is a startup failure rather than a fallback to the default. Several of these
+are security defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly
+produce sessions that never expire.
 
 ```
 curl -s http://127.0.0.1:27800/parse/health
@@ -196,6 +238,11 @@ The SDK does not send the REST API the documentation describes. Every call is a 
 body so a browser never sends a CORS preflight. parse-rust normalizes that the way upstream does.
 You do not need to know this to use it, but it is why "point the SDK at it" is a stronger claim
 than "the endpoints exist".
+
+Avoiding the preflight is only half of what a browser checks, so parse-rust also sends upstream's
+CORS headers on every response, including error responses, and answers an `OPTIONS` preflight
+directly. `PARSE_SERVER_ALLOW_ORIGIN` and `PARSE_SERVER_ALLOW_HEADERS` take comma-separated lists;
+the defaults are `*` and the twelve headers a Parse SDK sends.
 
 ### With curl
 
@@ -239,7 +286,7 @@ upstream maps to an obvious place here.
 | [`parse-rust-storage`](https://crates.io/crates/parse-rust-storage) | [docs](https://docs.rs/parse-rust-storage) | `StorageAdapter` trait and the query AST adapters lower. |
 | [`parse-rust-mongo`](https://crates.io/crates/parse-rust-mongo) | [docs](https://docs.rs/parse-rust-mongo) | MongoDB adapter and the Parse/BSON transform. |
 | [`parse-rust-rest`](https://crates.io/crates/parse-rust-rest) | [docs](https://docs.rs/parse-rust-rest) | The read and write pipelines. |
-| [`parse-rust-auth`](https://crates.io/crates/parse-rust-auth) | [docs](https://docs.rs/parse-rust-auth) | Password hashing. Sessions and roles to follow. |
+| [`parse-rust-auth`](https://crates.io/crates/parse-rust-auth) | [docs](https://docs.rs/parse-rust-auth) | Password hashing, `_Session`-backed sessions, role graph expansion. |
 
 The project, the repository, this README and the executable are all **parse-rust**. Only the
 Cargo package names carry a qualifier, because the normalized registry name `parse-rust` is
@@ -256,6 +303,15 @@ query document, because handing a Mongo document to a SQL backend means writing 
 interpreter in SQL. The rule: if a method can only be implemented sensibly for one backend, the
 trait is wrong.
 
+**Atomicity is part of that trait's contract.** If correctness depends on a predicate and a
+mutation happening as one unit, that unit is one trait method. The method carries both the
+precondition and the complete delta, and callers must not reconstruct either from state they read
+earlier. No backend can restore atomicity after the interface has split it across calls. Most of
+the schema-write defects fixed during 0.2.0 were fixed by changing the trait rather than the call
+site, and the shape to watch for is a method that takes a whole schema and writes all of it: that
+signature cannot express "change only this", so every caller of it is one interleaving away from
+undoing another writer's change.
+
 ## Testing
 
 ```
@@ -266,7 +322,7 @@ tools/test.sh --quick    # skip steps needing node, MongoDB or an upstream check
 Steps that need more than a Rust toolchain skip with a stated reason rather than silently passing.
 
 Several suites compare against a real parse-server checkout. They expect it as a sibling directory
-(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points. The two acceptance gates are:
+(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points. The four acceptance gates are:
 
 - **Gate A** drives the whole flow through the unmodified `parse` npm SDK, including ACL round
   trips, cross-user read and write isolation, and rejection of invalid session tokens.
@@ -274,9 +330,25 @@ Several suites compare against a real parse-server checkout. They expect it as a
   reads with the other, and compares the stored BSON types rather than just the values. Values
   alone would not catch the Int32-versus-Double rule, since both read back as the same JavaScript
   number.
+- **Gate C** drives the authorization model through the same unmodified SDK against both servers
+  and compares the answers: roles, class-level permissions, pointer permissions and protected
+  fields.
+- **Gate D** points both servers at one database and checks that neither rewrites the other's
+  `_Session`, `_Role` or `_Join` schema, that a CLP block survives an ordinary write by either,
+  and that a failed write leaves the same `_SCHEMA` state behind under both.
 
-Both gates are also run against a real parse-server, so a failure means parse-rust diverged rather
-than that an expectation was invented.
+Each gate carries an assertion floor and fails if it runs fewer checks than it declares, so a gate
+cannot quietly stop testing anything while still reporting green.
+
+Gates B, C and D also run against a real parse-server, so a failure there means parse-rust diverged
+rather than that an expectation was invented. Gate A's assertions hold against parse-server too, but
+it is executed only against parse-rust.
+
+What the gates do not do is check combinations. They walk stories, and the defects found late in
+0.2.0 all came from composition: a server-imposed predicate meeting a client-supplied one, an
+authorization decision keyed on the wrong one of two similar values, metadata written without the
+state it describes. A hand-written runner does not think to write those, which is the argument for
+running the upstream spec suite rather than for adding more gates.
 
 ## Reference implementation
 

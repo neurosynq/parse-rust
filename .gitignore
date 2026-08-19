@@ -1,9 +1,8 @@
 # Markdown is not committed by default.
 #
-# This repository is the public face of a project whose design notes, audit trail and security
-# research live in a separate private repository. Ignoring markdown wholesale means none of that
-# can be published by an absent-minded `git add .`; publishing a document becomes a deliberate act
-# with a visible negation below it.
+# Markdown is ignored wholesale so that notes and scratch documents cannot be published by an
+# absent-minded `git add .`. Publishing a document is then a deliberate act with a visible
+# negation below it, which is a thing a reviewer can see.
 #
 # CLAUDE.md is deliberately NOT negated. It is working instructions, not documentation.
 *.md
@@ -14,6 +13,10 @@
 # Agent instructions, same reasoning as CLAUDE.md above. Ignored here rather than relying on a
 # global ignore, which is not present in someone else's checkout.
 .claude/
+
+# Private tooling lives in `bin/`; only `tools/` is shared. Ignored on this side as well, so a
+# stray copy cannot be committed from a checkout that has one.
+bin/
 
 /target/
 **/target/
