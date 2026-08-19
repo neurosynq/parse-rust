@@ -33,6 +33,7 @@ pub mod auth;
 pub mod body_credentials;
 pub mod config;
 pub mod cors;
+pub mod ip_allowlist;
 pub mod params;
 pub mod request;
 pub mod response;
@@ -46,16 +47,23 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 
-pub use auth::{Authority, Credentials, HeaderRejection};
+pub use auth::{Authority, Credentials, HeaderRejection, Peer};
 pub use config::{ProtectedFieldsConfig, ServerConfig};
+pub use ip_allowlist::{InvalidIpEntry, IpAllowlist};
 pub use request::RequestContext;
 pub use state::AppState;
 
-/// Extract [`Authority`] from request headers.
+/// Extract [`Authority`] from request headers and the connection's peer address.
 ///
 /// Implemented as an extractor so a route cannot forget it: a handler that wants to know who is
 /// calling has to name `Authority` in its signature, and one that does not name it cannot
 /// accidentally read a half-validated identity off the request.
+///
+/// The peer address comes from `ConnectInfo`, which [`serve`] installs. An embedder that builds
+/// the router itself and serves it without `into_make_service_with_connect_info` gets
+/// [`Peer::Unknown`], and every master-key and maintenance-key request is then refused. That is
+/// the intended direction: the alternative, treating an absent address as unfiltered, is the
+/// 0.2.0 behavior this release exists to remove.
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for Authority
 where
@@ -69,10 +77,24 @@ where
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let config = <Arc<ServerConfig> as axum::extract::FromRef<S>>::from_ref(state);
-        auth::resolve(&config, &parts.headers).map_err(|HeaderRejection::Unauthorized| {
-            response::HttpError::unauthorized().into_response()
-        })
+        auth::resolve_with_peer(&config, &parts.headers, peer_of(parts)).map_err(
+            |HeaderRejection::Unauthorized| response::HttpError::unauthorized().into_response(),
+        )
     }
+}
+
+/// The connection's peer address, read from the extension `ConnectInfo` inserts.
+///
+/// **Deliberately not a header.** `X-Forwarded-For` and `Forwarded` are written by the caller, and
+/// an allowlist that consults them admits anyone who can spell an address. Upstream is the same:
+/// `getClientIp` is `req.ip` (`middlewares.js:358-360`) and parse-server never enables Express's
+/// `trust proxy`.
+fn peer_of(parts: &http::request::Parts) -> Peer {
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| Peer::from(info.0))
+        .unwrap_or(Peer::Unknown)
 }
 
 /// Build the router.
@@ -188,6 +210,9 @@ pub fn router(state: AppState) -> Router {
 /// succeeded, no error reached the client, and the collision only surfaced later as two accounts
 /// answering to one name. Index creation is part of boot upstream too, so doing it here matches
 /// rather than extends. A failure is fatal for the same reason it is fatal upstream.
+///
+/// **Served with connect info**, because `masterKeyIps` filters on the connection's peer address
+/// and there is nowhere else to get it. Without it the two privileged keys are refused outright.
 pub async fn serve(
     state: AppState,
     addr: std::net::SocketAddr,
@@ -201,6 +226,6 @@ pub async fn serve(
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    let app = router(state);
+    let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     Ok((bound, async move { axum::serve(listener, app).await }))
 }

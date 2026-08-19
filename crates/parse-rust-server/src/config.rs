@@ -11,6 +11,8 @@ use parse_rust_core::ErrorDetail;
 use parse_rust_rest::PermissionOptions;
 use parse_rust_schema::{ClpValidation, ObjectIdForm, Unenforceable};
 
+use crate::ip_allowlist::IpAllowlist;
+
 /// The parse-server version parse-rust reports as its own.
 ///
 /// **This is a decision, not an oversight.** `/serverInfo` returns `parseServerVersion`, and
@@ -137,13 +139,51 @@ pub fn merge_protected_fields_defaults(configured: &mut ProtectedFieldsConfig, o
 }
 
 /// The keys and identity a request is checked against.
+///
+/// **`#[non_exhaustive]`, decided at 0.2.1 rather than inherited.** This release adds two public
+/// fields, which already breaks any `ServerConfig { .. }` literal outside this crate, and cargo
+/// resolves 0.2.1 as compatible with 0.2.0 and will upgrade into it unasked. Marking it here means
+/// the break happens once, in the release that was going to cause it anyway, instead of again
+/// every time an option is added. Construction is [`ServerConfig::new`] followed by field
+/// assignment, which is what every call site in this repository already does and what the
+/// attribute still permits.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ServerConfig {
     pub app_id: String,
     pub master_key: String,
-    /// The read-only master key sets `isMaster` upstream (`Auth.js:63`), with the restriction
-    /// enforced by scattered checks. Not implemented yet; recorded so the gap is visible.
+
+    /// `masterKeyIps`, default `['127.0.0.1', '::1']` (`Options/Definitions.js:396-399`), enforced
+    /// at `middlewares.js:452`.
+    ///
+    /// **The default is a control and 0.2.0 shipped without it**, so the master key was honoured
+    /// from any source address on a server nobody had configured. A master key presented from an
+    /// address outside this list is refused outright rather than downgraded to a client request:
+    /// upstream throws a bare 403 (`middlewares.js:453-462`) instead of falling through.
+    pub master_key_ips: IpAllowlist,
+
+    /// `maintenanceKey`. Grants the same ACL treatment as the master key and is **not** the same
+    /// authority: `validateClientClassCreation` exempts both on a write and master alone on a read
+    /// (`RestWrite.js:200-202`, `RestQuery.js:486-489`).
+    ///
+    /// **Reachable only from Rust, deliberately.** The binary exposes no variable for it, and the
+    /// reason changed in 0.2.1: it used to be that parse-rust had no IP filter, and now it has one.
+    /// What remains is that master and maintenance are one `AclScope` internally, so every decision
+    /// other than the one corrected above treats them alike. Shipping the key through the CLI would
+    /// advertise an authority this server only partly distinguishes.
+    ///
+    /// Not to be confused with the **read-only** master key, which is a third credential, sets
+    /// `isMaster` upstream (`Auth.js:63`), and is not modeled at all.
     pub maintenance_key: Option<String>,
+
+    /// `maintenanceKeyIps`, same default and same enforcement (`Options/Definitions.js:385-388`,
+    /// `middlewares.js:438`).
+    ///
+    /// Carried alongside `master_key_ips` rather than deferred. The two options are one mechanism
+    /// with two call sites, and filtering one key while leaving the other unfiltered would close a
+    /// hole and leave its twin open one header away. The exposure is narrower, because a
+    /// maintenance key has no default value and only exists once an operator sets one.
+    pub maintenance_key_ips: IpAllowlist,
     pub javascript_key: Option<String>,
     pub rest_api_key: Option<String>,
     pub client_key: Option<String>,
@@ -238,7 +278,9 @@ impl ServerConfig {
         Self {
             app_id: app_id.into(),
             master_key: master_key.into(),
+            master_key_ips: IpAllowlist::default(),
             maintenance_key: None,
+            maintenance_key_ips: IpAllowlist::default(),
             javascript_key: None,
             rest_api_key: None,
             client_key: None,

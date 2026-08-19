@@ -11,6 +11,205 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
+## 0.2.1
+
+A security patch. Three authorization decisions were broader in 0.2.0 than they are in
+parse-server, all at stock server configuration, meaning none needed an operator to change an
+option away from its default.
+
+**What a deployment running 0.2.0 is exposed to.** The master key is accepted from any source
+address, where a stock parse-server accepts it only from the machine it runs on; anyone who obtains
+the key can use it remotely. A user signed up with an `ACL` of `null`, `false`, `0`, `""` or
+`{"__op":"Delete"}` is created world-readable rather than private. And objects created in a class
+whose schema declares a `classLevelPermissions.ACL` are written with no ACL at all, so a class
+configured as private is world-readable.
+
+The second of those needs no configuration of any kind and applies to `_User`, so it is the one to
+weigh first if you are deciding how quickly to take this.
+
+**Two further `_User` failures are fixed here and are denial rather than disclosure**, so they do
+not change the urgency above but they do change what a running deployment may already have suffered:
+a `_User` update carrying an `ACL` that is an operation, an array or a tagged value cleared the
+owner's permissions, which locks the owner out of their own account and could be done by any
+principal permitted to write that row. And a create carrying a truthy non-string `objectId` with an
+inferable schema type was given a generated one instead of being refused. The remaining array and
+`Delete`-operation exceptions are named under "Known limitations" rather than hidden inside either
+claim.
+
+No new routes and no new vocabulary. There is one source-compatibility break for embedders, under
+"Changed". Take it.
+
+### Fixed
+
+- **`masterKeyIps` is enforced, at upstream's default of `['127.0.0.1', '::1']`**
+  (`Options/Definitions.js:396-399`, `middlewares.js:452`). The option was unimplemented, and its
+  default is a control rather than a convenience, so an absent implementation was an open one. A
+  master key presented from an address outside the list is refused with upstream's bare 403
+  `unauthorized` and is **not** demoted to an ordinary client request, matching upstream, which
+  throws rather than falling through. The empty list means the key cannot be used at all, including
+  from the server itself. `maintenanceKeyIps` is enforced the same way and carries the same default.
+  - **The address is the connection's, never a header's.** Upstream's `getClientIp` is `req.ip`
+    with Express's `trust proxy` left off, so `X-Forwarded-For` is ignored; an allowlist that reads
+    a client-supplied header is not an allowlist. A deployment behind a load balancer therefore
+    sees every request as coming from the balancer and has to widen the option. Trusted-proxy
+    configuration does not exist yet, and until it does that is the direction to fail in.
+  - **Address matching is two mechanisms.** Five entries are allow-all literals scoped to one
+    family: `::/0`, `::` and `::0` admit every IPv6 peer and no IPv4 peer, and `0.0.0.0/0` and
+    `0.0.0.0` do the reverse. An IPv4-mapped address such as `::ffff:127.0.0.1` counts as IPv6 for
+    those, so `0.0.0.0/0` does **not** admit it. Every other entry is matched in one 128-bit space
+    where a mapped address is its IPv4 form, so the ordinary rule `127.0.0.1` does admit
+    `::ffff:127.0.0.1`. Both halves are re-derived from upstream's `checkIp` at the pin on every
+    test run rather than transcribed, because the wrapper carries the first mechanism and the
+    block list underneath it carries only the second.
+  - **New:** `PARSE_SERVER_MASTER_KEY_IPS`, comma-separated, addresses or CIDR ranges, with
+    upstream's strictness: not trimmed, and an empty value is an error rather than a silent
+    deny-all, because upstream's `Config.validateIps` refuses both. The one place this is stricter
+    is an out-of-range prefix such as `127.0.0.1/999`, which upstream accepts at boot and then
+    throws on the first master-key request; here it stops the server and names the entry.
+  - **No `PARSE_SERVER_MAINTENANCE_KEY_IPS`, and that is a parse-rust CLI limitation rather than a
+    gap upstream.** The pin defines both `PARSE_SERVER_MAINTENANCE_KEY` and
+    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:381`, `:386`). This binary exposes
+    neither, because master and maintenance are still one scope internally, so shipping the key
+    through the CLI would advertise an authority the server only partly distinguishes. Both are
+    reachable through `ServerConfig`.
+  - **Maintenance is tested before master**, matching `resolveKeyAuth`. The order was reversed and
+    was unobservable until the two keys had separate allowlists: with both headers present and the
+    allowlists disagreeing, whichever key is tested first decides both the resulting authority and
+    whether the request is refused at all.
+- **A `_User` whose `ACL` is not a principal map is no longer created world-readable.** Upstream
+  runs two tests on it, `if (!ACL) { ACL = {}; }` and then `ACL[objectId] = {read, write}`
+  (`RestWrite.js:1676-1686`), and both were read as "is it an object" here:
+  - `null`, `false`, `0` and `""` are **falsy**, so they mean "no ACL" and get the owner-only ACL
+    an absent one gets.
+  - An op envelope, an array and a tagged value are all **JavaScript objects**, so they receive the
+    owner too. For an op envelope and a tagged value the owner is then the only entry carrying a
+    permission, so the row comes back owner-only. An array whose elements carry permissions is the
+    exception and is a recorded gap: `[{"read":true}]` grants principal `"0"` upstream, because an
+    index is a property name, and parse-rust collapses it to owner-only.
+
+  **Five of those seven produced a public row and two did not**, and the distinction is worth
+  stating rather than rounding off. The four falsy values and `{"__op":"Delete"}` left no permission
+  columns at all, which is public: an anonymous read of such a user answered 200 here and 404
+  upstream. The array and the tagged value left two **empty** columns, which is master-only, so both
+  servers answered 404 and the defect there was the missing owner rather than a disclosure. A
+  non-`Delete` operation behaved like the array. All seven representative shapes now preserve the
+  owner and match upstream's visibility. A permission-bearing array is the
+  narrower exception described above and under "Known limitations". A truthy **scalar** is still
+  left as sent and is master-only; upstream throws a `TypeError` and answers a bare 500 there, so
+  there is no answer worth reproducing.
+- **A `_User` update can no longer strip the owner's own access.** `force_owner_into_acl` re-adds
+  the owner entry for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1590-1599`)
+  and it handled a principal map and `{"__op":"Delete"}` and nothing else. Every other truthy shape
+  reached the lowering, which cleared both permission columns, and a `_User` with empty permissions
+  is a row its owner can no longer read, write or log in with. **Any principal permitted to write a
+  `_User` could disable that account.** Measured at the pin with `{"__op":"Increment","amount":1}`
+  on `PUT /classes/_User/:id`: both servers answer 200, upstream keeps the owner entry and the
+  caller's existing session still resolves, and parse-rust stored `{}` and the same session then
+  answered 209 `INVALID_SESSION_TOKEN`. A **falsy** `ACL` on an update is still left alone, which is
+  upstream's `this.data.ACL &&` guard and leaves the stored columns untouched. Permission-bearing
+  arrays keep the owner now but still lose their numeric-index principals, as recorded below.
+- **A truthy non-string `objectId` with an inferable schema type on a `_User` create is refused
+  rather than replaced.** Upstream's substitution test is `if (!this.data.objectId)`
+  (`RestWrite.js:429-431`), so a truthy id survives to the type check and, for numbers, booleans,
+  arrays, tagged values, ordinary objects and typed operations, answers `INCORRECT_TYPE`. Reading
+  "not a string" as "absent" generated one instead: measured at the pin with
+  `allowCustomObjectId` enabled and a body of `{"objectId": 123}`, upstream answered 400 code 111
+  and wrote no row through either `POST /users` or `POST /classes/_User`, and parse-rust answered
+  201 with an id the client never asked for, persisted the user and issued a session for it. The
+  same change fixes an **empty-string** `objectId`, which was previously taken as the id itself,
+  creating a `_User` whose objectId was `""` and whose every ACL entry named nothing. A `Delete`
+  operation has no inferred type upstream and is the recorded exception below.
+- **An `ACL` carrying an operation no longer produces a public row on any class.** The same root
+  cause, one layer down: `flatten_for_create` removes a `Delete` op from the body, so the `ACL` key
+  was gone before the permission columns were computed and none were written. Upstream keeps the op
+  object and writes two **empty** arrays, which is master-only. Measured at the pin on an ordinary
+  class: an anonymous read of the created object answered 200 here and 404 upstream.
+- **A CLP-declared default ACL is applied on create** (`RestWrite.js:378-395`). The setting was
+  accepted by `POST /schemas`, stored, and echoed back by `GET /schemas`, and nothing ever read it,
+  so every object in the class was created with no `_rperm` or `_wperm` columns and an absent
+  `_rperm` is public. The class said private and the data was world-readable, which is worse than
+  not supporting the feature. `currentUser` resolves to the caller's objectId and the literal key is
+  removed, so the stored ACL names a principal that exists. The default applies on **create and
+  never on update**, matching upstream's `!this.query` guard: stamping it on an update would revert
+  an ACL a client changed on purpose. A declaration of exactly `{"*": {"read": true, "write": true}}`
+  is skipped, by upstream's key-order-sensitive `JSON.stringify` comparison rather than a structural
+  one.
+- **The create response carries the ACL the server generated.** It is the only way a client learns
+  what permissions its object was given, and on a private class it cannot read the row back to find
+  out. Upstream marks the field server-changed and returns it (`RestWrite.js:394`), including the
+  empty `{}` an anonymous create produces once `currentUser` has nobody to resolve to.
+
+### Changed
+
+**This is a patch release with a source-compatibility break for embedders, decided rather than
+discovered.** Cargo resolves 0.2.1 as compatible with 0.2.0 and will upgrade into it unasked, so
+both of the following are stated here rather than left to a build failure.
+
+- **`parse_rust_server::auth::resolve` keeps its 0.2.0 signature and is deprecated.** The real
+  entry point is `resolve_with_peer`, which takes the connection's address. The two-argument form
+  still compiles and **fails closed**: with no address to check `masterKeyIps` against it refuses
+  every master and maintenance key, and leaves every other request alone. Preserving 0.2.0's
+  behavior instead was not an option, because 0.2.0's behavior here is the defect.
+- **`ServerConfig` is now `#[non_exhaustive]`.** This release adds two public fields, which already
+  breaks any `ServerConfig { .. }` literal outside the crate; the attribute makes that break happen
+  once rather than again on every future option. Construction is `ServerConfig::new` followed by
+  field assignment, which the attribute still permits.
+- **`parse_rust_server::serve` serves with connect info.** An embedder that mounts `router` into
+  its own axum app without `into_make_service_with_connect_info` has no peer address to filter on,
+  so the two privileged keys are refused there. Every other route is unaffected.
+
+### Known limitations
+
+- **A CLP-declared default ACL is not applied to `_User` creation.** Signup stamps the new user's
+  own owner ACL before the pipeline sees the body, so the class default is suppressed by it.
+  Upstream stamps the default first and then adds the owner, so its result is the class default
+  plus the owner and parse-rust's is the owner alone. **Narrower than upstream in every case, never
+  broader**: a role named in a `_User` default ACL does not gain read access here where it would
+  upstream. Blast radius: a `_User` class whose schema declares a `classLevelPermissions.ACL`
+  grants less here than upstream, and a mixed fleet writing `_User` rows through both servers gets
+  two different ACL shapes for the same signup.
+- **JavaScript's full ACL enumeration is not yet reproduced.** Upstream lowers an ACL with a
+  `for...in`, while parse-rust's lowering understands only a principal map.
+  - A permission-bearing array such as `[{"read":true}]` grants principal `"0"` upstream because
+    an array index is an enumerable property name. parse-rust drops that principal. On an ordinary
+    class or a CLP-declared default ACL the result is two empty permission columns; on `_User`
+    create and update the owner is retained but the numeric principal is still omitted. The result
+    is narrower than upstream, and a mixed fleet writes different ACL shapes.
+  - Integer-like keys have JavaScript's index ordering upstream rather than ordinary insertion
+    ordering. A principal map containing `"2"` before `"1"`, or `currentUser` resolving to a custom
+    objectId such as `"0"`, is enumerated with the integer keys first upstream and in input or
+    insertion order here. The permission set is the same, but generated ACL responses and the
+    order of `_rperm` and `_wperm` differ.
+- **`objectId: {"__op":"Delete"}` is refused where upstream accepts it when
+  `allowCustomObjectId` is enabled.** Upstream's type inference returns no type for `Delete` and
+  skips the field check, answering 201 with the operation object as `objectId`; parse-rust refuses
+  it with 400 code 107. Other truthy non-string shapes with an inferred type are covered by the
+  fix above. This malformed-but-observable case is scoped for 0.3.0 rather than included in the
+  blanket 0.2.1 claim.
+- **Two `ACL` shapes on `POST /users` are accepted where upstream refuses the request.** An
+  operation envelope such as `{"__op":"Increment","amount":1}`, and a truthy scalar such as
+  `"nonsense"`, `123` or `true`. Upstream answers 400 `ACL must be a Parse ACL.` for the first, and
+  for the second answers 400 with an `email` on the body and **500 without one**. parse-rust answers
+  201 for both.
+  - **The row is private either way**, which is what this release fixed: the operation case gets
+    the owner-only ACL, and the scalar case gets two empty permission columns. Nothing is disclosed.
+  - **The state is not, and upstream's own answer depends on the body.** With an `email` present
+    upstream validates before the database write, so no row exists and the username stays free,
+    while parse-rust persists the user and consumes the username, and a retry answers 202
+    `USERNAME_TAKEN` where upstream answers 201. **Without an `email` upstream inserts the row and
+    throws afterwards**, so both servers leave a row and both consume the username, and only the
+    status differs. In the scalar case the session parse-rust issues cannot read its own user,
+    because the row is master-only, so the account is created and unusable.
+  - Both are `_User` only; an ordinary class matches upstream. Both are scoped for 0.3.0, where
+    the scalar case additionally has to choose between reproducing upstream's email-dependent
+    400/500 split and refusing cleanly with a documented 4xx. Continuing to answer 201 is not one
+    of the options.
+- **No trusted-proxy configuration**, so `masterKeyIps` behind a load balancer sees the balancer.
+  Named above, and scoped out of this release deliberately.
+- Everything under 0.2.0's known limitations still applies, with one correction to that list: it
+  named `maintenanceKeyIps` as the reason the maintenance key was not exposed by the binary and did
+  not say that the **master** key was subject to no IP filter either. Both are filtered now.
+
 ## 0.2.0
 
 The authorization milestone. 0.1.0 could talk to a Parse client; 0.2.0 can be pointed at a Parse

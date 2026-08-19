@@ -189,6 +189,10 @@ pub struct As {
     /// Send no `X-Parse-*` headers at all, which is what the JavaScript SDK does: it puts the
     /// credentials in the body so a browser never sends a CORS preflight.
     pub no_headers: bool,
+    /// Anything else to put on the wire, for the tests that are about a header rather than about
+    /// a credential. `X-Forwarded-For` is the one that matters: an allowlist that reads it is not
+    /// an allowlist, and the only way to assert that it does not is to send it.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl As {
@@ -229,6 +233,12 @@ impl As {
             ..Self::default()
         }
     }
+
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers
+            .push((name.to_string(), value.to_string()));
+        self
+    }
 }
 
 pub async fn request(
@@ -258,6 +268,7 @@ pub async fn request(
     if let Some(token) = &who.session_token {
         headers.push(("X-Parse-Session-Token".to_string(), token.clone()));
     }
+    headers.extend(who.extra_headers.iter().cloned());
 
     let payload = body.map(|b| serde_json::to_string(b).expect("serialize"));
     let mut req = format!("{method} /parse{path} HTTP/1.1\r\nHost: {host}\r\n");

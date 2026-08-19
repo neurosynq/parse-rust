@@ -22,7 +22,35 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// not use one, and the failure read as "MongoDB must be running" rather than as a lost guarantee.
 /// `MongoAdapter::connect` stays because `AppState` needs a storage value; it builds a lazy client
 /// and does not contact the server, so no connection is opened unless a route asks for one.
+///
+/// **Serves with connect info, which is the one thing `serve` does that cannot be skipped here.**
+/// `masterKeyIps` filters on the connection's peer address and there is nowhere else to read it,
+/// so a router served plainly refuses every master-key request. That is deliberate and it is
+/// asserted separately, by [`boot_without_connect_info`].
 async fn boot() -> String {
+    let listener = bind().await;
+    let bound = listener.local_addr().expect("local_addr");
+    let app = parse_rust_server::router(state().await)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    bound.to_string()
+}
+
+/// The embedder who mounts the router and serves it plainly.
+async fn boot_without_connect_info() -> String {
+    let listener = bind().await;
+    let bound = listener.local_addr().expect("local_addr");
+    let app = parse_rust_server::router(state().await);
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    bound.to_string()
+}
+
+async fn bind() -> tokio::net::TcpListener {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    tokio::net::TcpListener::bind(addr).await.expect("bind")
+}
+
+async fn state() -> AppState {
     let config = ServerConfig::new("test", "test")
         .rest_api_key("rest")
         .mount_path("/parse");
@@ -31,12 +59,7 @@ async fn boot() -> String {
     let storage = MongoAdapter::connect("mongodb://127.0.0.1:27017", &db)
         .await
         .expect("building a lazy Mongo client cannot fail for a valid URI");
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
-    let bound = listener.local_addr().expect("local_addr");
-    let app = parse_rust_server::router(AppState::new(config, storage));
-    tokio::spawn(async move { axum::serve(listener, app).await });
-    bound.to_string()
+    AppState::new(config, storage)
 }
 
 /// A minimal HTTP/1.1 GET, written by hand so the test has no HTTP client dependency and so
@@ -243,4 +266,33 @@ async fn nothing_is_served_off_the_mount_path() {
         status, 404,
         "route must not be reachable off the mount path"
     );
+}
+
+/// **Failing closed when the transport gives no peer address.**
+///
+/// `masterKeyIps` filters on the connection's address, so a router mounted into an embedder's own
+/// axum app without `into_make_service_with_connect_info` has nothing to filter on. The two
+/// privileged keys are refused rather than admitted, which is loud and recoverable; admitting them
+/// would silently restore the behavior 0.2.1 exists to remove.
+///
+/// Everything else still works, so the failure is confined to the keys that are actually gated.
+#[tokio::test]
+async fn a_router_served_without_connect_info_refuses_the_master_key() {
+    let host = boot_without_connect_info().await;
+
+    let (status, body) = get(
+        &host,
+        "/parse/serverInfo",
+        &[
+            ("X-Parse-Application-Id", "test"),
+            ("X-Parse-REST-API-Key", "rest"),
+            ("X-Parse-Master-Key", "test"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 403, "body: {body}");
+    assert_eq!(json(&body)["error"], serde_json::json!("unauthorized"));
+
+    let (status, body) = get(&host, "/parse/health", &[]).await;
+    assert_eq!(status, 200, "an unprivileged route is unaffected: {body}");
 }

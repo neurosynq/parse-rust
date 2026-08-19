@@ -286,6 +286,17 @@ run_gate_c_both_detailed() { node tools/spec/authorization.mjs "$1" test test "-
 run_gate_c_rust_detailed() { node tools/spec/authorization.mjs "$1" test test --detailed; }
 run_gate_d() { node tools/spec/shared-auth-state.mjs "$1" "$2"; }
 
+# Gate E is the one gate `with_server` cannot host. It varies server configuration across four
+# servers and it needs a second source address, so it boots its own and takes only a database.
+run_gate_e() {
+  cargo build --workspace --quiet || return 1
+  if [[ ! -x ./target/debug/parse-rust ]]; then
+    echo "./target/debug/parse-rust is missing; the binary name and this script disagree"
+    return 1
+  fi
+  node tools/spec/stock-config.mjs "mongodb://127.0.0.1:27017/parse_rust_e_$$_${RANDOM}"
+}
+
 # Every runner resolves the `parse` npm SDK from the upstream checkout, and gates B, C and D boot a
 # real parse-server out of it. The two are separate conditions: CI installs the SDK without the
 # checkout, so the SDK can be present while `lib/index.js` is not.
@@ -300,11 +311,13 @@ if [[ $QUICK -eq 1 ]]; then
   skip "gate C: authorization" "--quick"
   skip "gate C: detailed messages" "--quick"
   skip "gate D: shared auth state" "--quick"
+  skip "gate E: stock configuration" "--quick"
 elif ! oracle_revision_ok; then
   # A hard failure, not a skip. A skip says "not measured here"; this says "measured against the
   # wrong thing", and the two must not read the same.
   for step in "conformance: features.spec" "gate A: SDK flow" "gate B: data fidelity" \
-              "gate C: authorization" "gate C: detailed messages" "gate D: shared auth state"; do
+              "gate C: authorization" "gate C: detailed messages" "gate D: shared auth state" \
+              "gate E: stock configuration"; do
     fail_step "$step" "$(oracle_mismatch_reason)"
   done
   echo "       to fix: git -C $PS_ROOT checkout $PIN_COMMIT"
@@ -316,6 +329,7 @@ elif ! have node || ! have curl; then
   skip "gate C: authorization" "node or curl not on PATH"
   skip "gate C: detailed messages" "node or curl not on PATH"
   skip "gate D: shared auth state" "node or curl not on PATH"
+  skip "gate E: stock configuration" "node or curl not on PATH"
 elif ! have_sdk; then
   skip "conformance: features.spec" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate A: SDK flow" "no parse SDK under $PS_ROOT/node_modules"
@@ -323,9 +337,10 @@ elif ! have_sdk; then
   skip "gate C: authorization" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate C: detailed messages" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate D: shared auth state" "no parse SDK under $PS_ROOT/node_modules"
+  skip "gate E: stock configuration" "no parse SDK under $PS_ROOT/node_modules"
 else
   run "conformance: features.spec"  with_server run_features
-  # The four acceptance gates. Every assertion in them also holds against real parse-server, so a
+  # The five acceptance gates. Every assertion in them also holds against real parse-server, so a
   # failure means parse-rust diverged rather than that the expectation was invented.
   run "gate A: SDK flow"            with_server run_gate_a
   # The second parse-rust is booted with `enableSanitizedErrorResponse` off, which is the only
@@ -336,6 +351,7 @@ else
     run "gate C: authorization"     with_server run_gate_c_both
     run "gate C: detailed messages" with_server run_gate_c_both_detailed "$SANITIZE_OFF"
     run "gate D: shared auth state" with_server run_gate_d
+    run "gate E: stock configuration" run_gate_e
   else
     # Named where they would have run rather than dropped, so a short green log cannot be mistaken
     # for a full one. Gates B and D boot parse-server themselves and have no half that runs
@@ -345,6 +361,7 @@ else
     run  "gate C: detailed messages" with_server run_gate_c_rust_detailed "$SANITIZE_OFF"
     skip "gate C: upstream half"    "no parse-server at $PS_ROOT; parse-rust half ran above"
     skip "gate D: shared auth state" "no parse-server at $PS_ROOT; the gate boots one"
+    skip "gate E: stock configuration" "no parse-server at $PS_ROOT; the gate boots one"
   fi
 fi
 

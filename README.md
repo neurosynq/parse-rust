@@ -19,7 +19,11 @@ and that the rows it wrote were interchangeable with parse-server's on the same 
 class-level permissions are evaluated, pointer permissions narrow queries, protected fields are
 stripped, and the sessions, roles and join tables it writes are the rows parse-server reads from
 the same database. 0.1.0 could talk to a Parse client; 0.2.0 can be pointed at a Parse database.
-Everything else is ahead of that, not behind it.
+
+0.2.1 closes the stock-configuration gaps found while testing that milestone: the master key is
+limited to loopback unless `masterKeyIps` says otherwise, CLP-declared default ACLs are applied on
+create, and falsy or object-shaped `_User` ACLs no longer leave the row public or remove its
+owner's access. Everything else is ahead of that, not behind it.
 
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
@@ -36,7 +40,7 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 | Users | `POST /users` (signup, bcrypt), `POST /login`, `GET /users/me`, `POST /logout` |
 | Sessions | `_Session` rows in upstream's format, surviving a restart and readable by parse-server. `/sessions` with `me`, list, get and delete |
 | Roles | `_Role` with its `users` and `roles` relations, the five `/roles` verbs, and transitive role graph expansion |
-| Access control | Object ACLs, class-level permissions with pointer permissions, and `protectedFields` |
+| Access control | Object ACLs, class-level permissions with pointer permissions and default ACLs, and `protectedFields` |
 | Schema | Classes and fields created by first write with types inferred, plus the full `/schemas` API and `/purge`, master-key only |
 | Relations | `_Join` tables, `AddRelation` and `RemoveRelation`, and constraints on a `Relation`-typed field |
 | Writes | The atomic update operations: `Increment`, `Add`, `AddUnique`, `Remove`, `Delete` |
@@ -44,7 +48,7 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 | Types | Pointer, Date, Bytes, GeoPoint, File, Polygon, Relation and the update operations, encoded as upstream encodes them |
 | Errors | Upstream's numeric codes, messages and both error envelopes |
 | Transport | The JavaScript SDK's `POST`-everything form, normalized before routing |
-| Server | `GET /serverInfo`, `GET /health`, the master key gate, client-key validation |
+| Server | `GET /serverInfo`, `GET /health`, the master key gate with source-address filtering, client-key validation |
 | Browsers | Upstream's CORS headers on every response including errors, and an `OPTIONS` preflight answered directly. `allowOrigin` and `allowHeaders` are configurable |
 
 ### What is not there yet
@@ -89,7 +93,7 @@ not on the code existing, which is why the first item is the instrument rather t
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
 
-0.1.0 and 0.2.0 are done; `CHANGELOG.md` says what each one actually landed.
+0.1.0, 0.2.0 and 0.2.1 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
@@ -174,6 +178,7 @@ has behavior behind it; the names are upstream's, so they carry over.
 |---|---|---|
 | `PARSE_SERVER_APPLICATION_ID` | none | **required** |
 | `PARSE_SERVER_MASTER_KEY` | none | **required** |
+| `PARSE_SERVER_MASTER_KEY_IPS` | `127.0.0.1,::1` | comma-separated IP addresses or CIDR ranges allowed to use the master key |
 | `PARSE_SERVER_DATABASE_URI` | `mongodb://127.0.0.1:27017/parse` | |
 | `PORT` | `27800` | `0` binds an ephemeral port and prints it |
 | `PARSE_SERVER_HOST` | `127.0.0.1` | upstream defaults to `0.0.0.0`; set that in a container |
@@ -195,6 +200,12 @@ has behavior behind it; the names are upstream's, so they carry over.
 
 The client keys are all-or-nothing, as upstream: configure none and none is required; configure
 any one and every non-master request must present a matching key.
+
+The master key is accepted only when the connection's peer address matches
+`PARSE_SERVER_MASTER_KEY_IPS`. Forwarding headers do not change that address. A container or a
+deployment behind a load balancer therefore has to list the address or CIDR range the server
+actually sees, not the original client's address. The environment value is not whitespace-trimmed,
+and an empty value is a startup error rather than "allow none", matching upstream.
 
 An unparsable value is a startup failure rather than a fallback to the default. Several of these
 are security defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly
@@ -322,7 +333,7 @@ tools/test.sh --quick    # skip steps needing node, MongoDB or an upstream check
 Steps that need more than a Rust toolchain skip with a stated reason rather than silently passing.
 
 Several suites compare against a real parse-server checkout. They expect it as a sibling directory
-(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points. The four acceptance gates are:
+(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points. The five acceptance gates are:
 
 - **Gate A** drives the whole flow through the unmodified `parse` npm SDK, including ACL round
   trips, cross-user read and write isolation, and rejection of invalid session tokens.
@@ -336,13 +347,16 @@ Several suites compare against a real parse-server checkout. They expect it as a
 - **Gate D** points both servers at one database and checks that neither rewrites the other's
   `_Session`, `_Role` or `_Join` schema, that a CLP block survives an ordinary write by either,
   and that a failed write leaves the same `_SCHEMA` state behind under both.
+- **Gate E** boots parse-rust and parse-server at stock and configured settings, then exercises
+  both from loopback and a second source address. It compares master-key IP filtering,
+  CLP-declared default ACLs and the `_User` identity cases fixed in 0.2.1.
 
 Each gate carries an assertion floor and fails if it runs fewer checks than it declares, so a gate
 cannot quietly stop testing anything while still reporting green.
 
-Gates B, C and D also run against a real parse-server, so a failure there means parse-rust diverged
-rather than that an expectation was invented. Gate A's assertions hold against parse-server too, but
-it is executed only against parse-rust.
+Gates B, C, D and E also run against a real parse-server, so a failure there means parse-rust
+diverged rather than that an expectation was invented. Gate A's assertions hold against
+parse-server too, but it is executed only against parse-rust.
 
 What the gates do not do is check combinations. They walk stories, and the defects found late in
 0.2.0 all came from composition: a server-imposed predicate meeting a client-supplied one, an

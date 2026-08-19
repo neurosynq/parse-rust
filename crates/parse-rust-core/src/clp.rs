@@ -324,6 +324,30 @@ impl ClassLevelPermissions {
         &self.write_user_fields
     }
 
+    /// The class's declared default ACL, if it has one that upstream would stamp on a create.
+    ///
+    /// `None` covers three cases that upstream's condition collapses (`RestWrite.js:379-384`):
+    /// the `ACL` key is absent; its value is falsy, which is `schema?.classLevelPermissions?.ACL`
+    /// failing its own truthiness test; or it is exactly the public ACL, which upstream skips
+    /// because stamping `{"*": {"read": true, "write": true}}` on a row would only reproduce what
+    /// an absent ACL already means.
+    ///
+    /// **That last comparison is `JSON.stringify` equality upstream, so it is key-order
+    /// sensitive**, and [`is_the_public_acl`] reproduces the ordering rather than comparing
+    /// structurally. A block whose keys arrived in the other order is *not* the public ACL as far
+    /// as upstream is concerned, and it gets stamped.
+    ///
+    /// A truthy non-object is returned rather than filtered: upstream clones and assigns whatever
+    /// it finds, and the resulting `ACL` value is then lowered by the same rule any client-supplied
+    /// one is.
+    pub fn default_acl(&self) -> Option<&ParseValue> {
+        let acl = self.raw.get("ACL")?;
+        if !is_js_truthy(acl) || is_the_public_acl(acl) {
+            return None;
+        }
+        Some(acl)
+    }
+
     /// Every pointer field that applies to an operation, per-op first then class-wide, deduped.
     ///
     /// Order is upstream's (`DatabaseController.js:1749-1764`) and matters, because the clauses
@@ -344,6 +368,45 @@ impl ClassLevelPermissions {
         }
         out
     }
+}
+
+/// Is this value what `JSON.stringify` would render as `{"*":{"read":true,"write":true}}`?
+///
+/// The one comparison upstream makes by stringifying both sides
+/// (`RestWrite.js:382-383`), which makes it **sensitive to key order**: a block spelled
+/// `{"*":{"write":true,"read":true}}` stringifies differently and is therefore not the public ACL,
+/// so upstream stamps it onto every new object. The observable result is the same permissions
+/// either way, but the row carries `_rperm` and `_wperm` in one case and neither in the other, and
+/// a mixed fleet has to agree on which.
+///
+/// Written as an ordered structural test rather than by building a JSON string. For this one
+/// literal the two are the same predicate: a value stringifies to it exactly when it is an object
+/// of one key `*` whose value is an object of two keys, `read` then `write`, both `true`. Anything
+/// else, including `{"*":{"read":true,"write":true,"x":1}}` or `read: 1` instead of `read: true`,
+/// renders a different string and is correctly not the public ACL.
+fn is_the_public_acl(value: &ParseValue) -> bool {
+    let ParseValue::Object(entries) = value else {
+        return false;
+    };
+    let mut entries = entries.iter();
+    let (Some(("*", ParseValue::Object(flags))), None) =
+        (entries.next().map(|(k, v)| (k.as_str(), v)), entries.next())
+    else {
+        return false;
+    };
+    let mut flags = flags.iter();
+    matches!(
+        (
+            flags.next().map(|(k, v)| (k.as_str(), v)),
+            flags.next().map(|(k, v)| (k.as_str(), v)),
+            flags.next(),
+        ),
+        (
+            Some(("read", ParseValue::Bool(true))),
+            Some(("write", ParseValue::Bool(true))),
+            None,
+        )
+    )
 }
 
 /// JavaScript truthiness, which is what `!classPermissions[operation]` tests.
@@ -613,5 +676,65 @@ mod tests {
                 .map(Vec::len),
             Some(2)
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The declared default ACL
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_declared_acl_is_readable_and_an_absent_one_is_none() {
+        assert!(clp(r#"{"find":{"*":true}}"#).default_acl().is_none());
+        let c = clp(r#"{"ACL":{"currentUser":{"read":true,"write":true}}}"#);
+        let ParseValue::Object(acl) = c.default_acl().expect("declared") else {
+            panic!("expected an object");
+        };
+        assert!(acl.contains_key("currentUser"));
+    }
+
+    /// Upstream tests `schema?.classLevelPermissions?.ACL` for truthiness, so a falsy value is not
+    /// a default ACL at all. Returning it instead would reach `lower_acl`, where a falsy value is
+    /// dropped and the row is public anyway, but the two paths differ for `_Role`, whose ACL is a
+    /// required column.
+    #[test]
+    fn a_falsy_declared_acl_is_not_a_default() {
+        for literal in [
+            r#"{"ACL":null}"#,
+            r#"{"ACL":false}"#,
+            r#"{"ACL":0}"#,
+            r#"{"ACL":""}"#,
+        ] {
+            assert!(clp(literal).default_acl().is_none(), "{literal}");
+        }
+    }
+
+    /// The public ACL is skipped, because stamping it would only restate what an absent ACL
+    /// already means: a row every caller can read and write.
+    #[test]
+    fn the_public_acl_is_not_stamped() {
+        assert!(clp(r#"{"ACL":{"*":{"read":true,"write":true}}}"#)
+            .default_acl()
+            .is_none());
+    }
+
+    /// **The comparison is `JSON.stringify` equality upstream and therefore key-order sensitive.**
+    /// Every literal here grants exactly the same permissions as the public ACL, and upstream
+    /// stamps every one of them, because none stringifies to the same bytes. Comparing
+    /// structurally would skip them all and write no ACL columns where parse-server writes two,
+    /// which a mixed fleet reading the same rows can see.
+    #[test]
+    fn a_reordered_or_extended_public_acl_is_still_stamped() {
+        for literal in [
+            r#"{"ACL":{"*":{"write":true,"read":true}}}"#,
+            r#"{"ACL":{"*":{"read":true,"write":true,"delete":true}}}"#,
+            r#"{"ACL":{"*":{"read":true}}}"#,
+            r#"{"ACL":{"*":{"read":true,"write":true},"role:A":{"read":true}}}"#,
+            r#"{"ACL":{"role:A":{"read":true},"*":{"read":true,"write":true}}}"#,
+        ] {
+            assert!(
+                clp(literal).default_acl().is_some(),
+                "{literal} does not stringify to the public ACL and must be stamped"
+            );
+        }
     }
 }

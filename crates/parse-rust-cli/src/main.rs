@@ -107,6 +107,27 @@ async fn run() -> std::io::Result<()> {
         config.batch_request_limit =
             number(&v, "PARSE_SERVER_REQUEST_COMPLEXITY_BATCH_REQUEST_LIMIT")?;
     }
+    // The master key's address allowlist. Left unset it keeps upstream's default, which is loopback
+    // only, so a deployment that wants to use the master key from elsewhere has to say so.
+    //
+    // **`maintenanceKeyIps` deliberately has no variable here, and upstream does define one.**
+    // The pin declares both `PARSE_SERVER_MAINTENANCE_KEY` and `PARSE_SERVER_MAINTENANCE_KEY_IPS`
+    // (`Options/Definitions.js:381`, `:386`), so this is a parse-rust CLI limitation rather than a
+    // gap on upstream's side, and an earlier version of this comment claimed the opposite.
+    //
+    // The key itself is not exposed by this binary, so its allowlist is not either: a variable
+    // configuring the allowlist of a credential the binary cannot hold would read as support for
+    // the credential. Why the key stays unexposed is on `ServerConfig::maintenance_key`, and the
+    // reason is no longer the missing IP filter.
+    //
+    // **The empty array cannot be expressed here and that is upstream's limitation too**: there is
+    // no way to pass an empty array through an environment variable, so `masterKeyIps: []`, which
+    // disables the key entirely, is reachable only through `ServerConfig`. Setting the variable to
+    // an empty string is an **error**, not a silent deny-all, because upstream's `validateIps`
+    // refuses the empty entry `arrayParser` produces from it and refuses to boot.
+    if let Some(v) = env("PARSE_SERVER_MASTER_KEY_IPS") {
+        config.master_key_ips = ip_allowlist(&v, "PARSE_SERVER_MASTER_KEY_IPS")?;
+    }
     // `protectedFields` is stringified JSON upstream, `{"ClassName": {"entity": ["field"]}}`.
     //
     // **Setting it adds to the defaults rather than replacing them** (`ParseServer.ts:657-673`),
@@ -218,6 +239,21 @@ fn protected_fields(value: &str) -> std::io::Result<parse_rust_server::Protected
             ))
         })?;
     Ok(parsed)
+}
+
+/// A comma-separated address allowlist, for `masterKeyIps` and `maintenanceKeyIps`.
+///
+/// **Upstream refuses a malformed entry too, and this is the same refusal.** `arrayParser` only
+/// splits on commas (`Options/parsers.js:42-50`), and `Config.validateIps` then rejects any entry
+/// whose address portion is not an IP, naming it (`Config.js:627-636`). So neither server trims,
+/// and an empty value fails to boot on both.
+///
+/// The one difference is the mask, which upstream strips before validating: `127.0.0.1/999` boots
+/// there and throws out of `BlockList.addSubnet` on the first master-key request, which the client
+/// sees as a 500. Refusing it at boot is the same information before it matters.
+fn ip_allowlist(value: &str, name: &str) -> std::io::Result<parse_rust_server::IpAllowlist> {
+    parse_rust_server::IpAllowlist::parse_env(value)
+        .map_err(|e| std::io::Error::other(format!("{name}: {e}")))
 }
 
 /// Default database name when the URI selects none. Upstream's own default is `parse`.

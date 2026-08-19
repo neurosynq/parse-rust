@@ -34,7 +34,7 @@ use parse_rust_storage::{
     SortDirection, StorageAdapter, UpdateValue, DEFAULT_LIMIT,
 };
 
-use crate::acl::{lower_acl, raise_acl, AclScope};
+use crate::acl::{default_acl_for_create, lower_acl, raise_acl, AclScope};
 use crate::clp::{
     adds_field, apply_pointer_permissions, deny_protected_fields, filter_sensitive_data,
     plan_protected_fields, validate_permission, PermissionOptions, PointerPermOutcome,
@@ -952,6 +952,51 @@ pub async fn create<S: StorageAdapter>(
     // `CHANGELOG.md`.
     ensure_class_exists(ctx, class_name, class_exists).await?;
 
+    // The class's CLP-declared default ACL (`RestWrite.js:378-395`).
+    //
+    // **0.2.0 accepted this setting, stored it, echoed it back from `GET /schemas` and never
+    // applied it**, so a class an operator had configured as private created world-readable rows:
+    // no `ACL` on the body means no `_rperm` or `_wperm` columns, and an absent `_rperm` is public.
+    // The configuration said one thing and the data did the other, which is worse than not
+    // supporting the feature.
+    //
+    // Three conditions, all upstream's and all easy to get subtly wrong:
+    //
+    // - **Create only.** Upstream guards on `!this.query`, so [`update`] has no counterpart to
+    //   this block. Stamping on update would silently revert an ACL a client changed on purpose.
+    // - **The body's `ACL` is tested for falsiness, not for presence** (`!this.data.ACL`), so a
+    //   client that sent `{"ACL": null}` gets the default, and only a truthy value suppresses it.
+    //   An `{"__op":"Delete"}` is an object and therefore truthy, so it suppresses it too.
+    // - **The public ACL is skipped**, by a key-order-sensitive comparison living in
+    //   [`parse_rust_core::ClassLevelPermissions::default_acl`].
+    //
+    // Placed after `ensure_class_exists` and after the required-column check, which is upstream's
+    // order: `validateSchema` runs both and precedes `setRequiredFieldsIfNeeded`. It matters for
+    // `_Role`, whose ACL is a required column: a role created with no ACL is refused rather than
+    // rescued by the class default.
+    //
+    // **The stamped ACL is returned in the create response**, which is a second thing the setting
+    // owes a client and not a cosmetic one: the caller has no other way to learn the permissions
+    // its object was given, and on a private class it cannot read the row back to find out.
+    // Upstream pushes `'ACL'` onto `fieldsChangedByTrigger` at `RestWrite.js:394` for exactly this
+    // reason. Measured against a parse-server at the pin: a create in such a class answers
+    // `{"objectId":…,"createdAt":…,"ACL":{"<callerId>":{"read":true,"write":true}}}`, and an
+    // anonymous create in the same class answers `"ACL":{}`. Both are reproduced, the empty object
+    // included.
+    let mut generated_acl = None;
+    if let Some(declared) = clp.and_then(|c| c.default_acl()) {
+        let suppressed = match body.get("ACL") {
+            Some(FieldWrite::Value(v)) => parse_rust_core::is_js_truthy(v),
+            Some(FieldWrite::Op(_)) => true,
+            None => false,
+        };
+        if !suppressed {
+            let acl = default_acl_for_create(declared, ctx.scope.user_id());
+            generated_acl = Some(acl.clone());
+            body.insert("ACL".to_string(), FieldWrite::Value(acl));
+        }
+    }
+
     // Signup pre-generates an objectId so it can build the user's private ACL before the write.
     // Honour one if it is already present rather than overwriting it, which would leave the ACL
     // pointing at an id the row does not have.
@@ -981,7 +1026,13 @@ pub async fn create<S: StorageAdapter>(
             return Err(match got {
                 Some(got) => schema_mismatch(class_name, "objectId", &FieldType::String, &got),
                 // No inferable type, which upstream skips entirely (`if (!expected) continue`).
-                // Unreachable for a truthy value, and refusing beats writing an unknown id.
+                //
+                // **Reachable, and this is the arm that answers `{"__op":"Delete"}`.** An earlier
+                // comment called it unreachable for a truthy value, which is wrong: a `Delete` is
+                // truthy and has no inferred type. Upstream skips the check and answers 201, having
+                // stored the row under a Mongo-generated `_id` while echoing the operation object
+                // back as the `objectId`; parse-rust answers 107 instead. Recorded as a deliberate
+                // difference and scoped for 0.3.0, which decides whether to keep it.
                 None => ParseError::invalid_json("objectId is an invalid field name."),
             });
         }
@@ -1012,6 +1063,27 @@ pub async fn create<S: StorageAdapter>(
 
     let relation_updates = relations::collect_relation_updates(&mut body);
 
+    // **An `ACL` carrying an operation is an object upstream and disappears here.**
+    // `flatten_for_create` removes a `Delete` op from the body entirely, so the `ACL` key is gone
+    // by the time `lower_acl` runs, no permission columns are written, and an absent `_rperm` is
+    // public. Upstream keeps `{"__op":"Delete"}` on `this.data.ACL`; `transformObjectACL` walks it,
+    // finds no key carrying `read` or `write`, and writes two **empty** arrays, which is a
+    // master-only row.
+    //
+    // Measured at the pin on an ordinary class: `{"ACL":{"__op":"Delete"}}` on a create answers
+    // 201 on both servers, and an anonymous read of the object then answers **200 here and 404
+    // upstream**. An empty object reproduces every op shape, because an op's keys are `__op`,
+    // `objects` and `amount` and none of them carries a permission.
+    //
+    // `_User` never reaches this: `ensure_user_identity_and_acl` has already turned an op into the
+    // owner-only ACL that upstream's `ACL[objectId] = ...` produces there.
+    if matches!(body.get("ACL"), Some(FieldWrite::Op(_))) {
+        body.insert(
+            "ACL".to_string(),
+            FieldWrite::Value(ParseValue::Object(ParseMap::new())),
+        );
+    }
+
     // `ACL` is lowered after validation, because `_rperm` and `_wperm` are not fields and would
     // otherwise be validated as though a client had named them.
     let row = lower_acl(flatten_for_create(&body)?);
@@ -1020,10 +1092,18 @@ pub async fn create<S: StorageAdapter>(
     relations::apply_relation_updates(ctx.storage, class_name, &object_id, &relation_updates)
         .await?;
 
+    // The operation echo, plus the ACL if this server generated one. `echo_response` reports only
+    // what the *client* asked to echo, which is the right rule for the five result-bearing
+    // operations and the wrong one here: the client did not ask, and upstream returns it anyway.
+    let mut echoed = echo_response(&body, Some(&row));
+    if let Some(acl) = generated_acl {
+        echoed.insert("ACL".to_string(), acl);
+    }
+
     Ok(CreateResponse {
         object_id,
         created_at: now,
-        echoed: echo_response(&body, Some(&row)),
+        echoed,
     })
 }
 
@@ -1875,6 +1955,276 @@ mod tests {
             delete(&ctx, "Post", "private").await.unwrap_err().code,
             ErrorCode::ObjectNotFound
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The CLP-declared default ACL
+    //
+    // Every assertion below is a read or a write rather than an inspection of `_rperm`, because
+    // the failure being guarded is that no permission columns are written at all, and a test that
+    // looks at a column and finds it missing has to decide what missing means. A request does not.
+    // -----------------------------------------------------------------------------------------
+
+    /// A class declared private, an object created by user A, and the two halves that a naive
+    /// test would only get half of: user B is shut out, **and user A is not**. An implementation
+    /// that wrote an empty ACL, or that stored the literal string `currentUser` as a principal,
+    /// would deny B and pass the first half while locking out the owner.
+    #[tokio::test]
+    async fn a_declared_default_acl_isolates_the_creator_without_locking_them_out() {
+        let storage = FakeStorage::new().with_schema(
+            default_schema("Post")
+                .with_clp(clp(r#"{"ACL":{"currentUser":{"read":true,"write":true}}}"#)),
+        );
+        let snap = snapshot(&storage).await;
+        let options = opts();
+
+        let a = AclScope::user("userA", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &a, &options);
+        let created = create(&ctx, "Post", body(r#"{"title":"x"}"#, OpPath::Create))
+            .await
+            .expect("create");
+
+        assert_eq!(
+            find(&ctx, "Post", ParsedWhere::default(), FindOptions::default())
+                .await
+                .expect("find")
+                .len(),
+            1,
+            "the creator must still be able to read its own object"
+        );
+        assert!(
+            update(
+                &ctx,
+                "Post",
+                &created.object_id,
+                body(r#"{"title":"y"}"#, OpPath::Update)
+            )
+            .await
+            .is_ok(),
+            "and to write it: _wperm is a separate column and can be wrong on its own"
+        );
+
+        let b = AclScope::user("userB", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &b, &options);
+        assert!(
+            find(&ctx, "Post", ParsedWhere::default(), FindOptions::default())
+                .await
+                .expect("find")
+                .is_empty(),
+            "0.2.0 returned this object to every caller"
+        );
+        assert_eq!(
+            update(
+                &ctx,
+                "Post",
+                &created.object_id,
+                body(r#"{"title":"z"}"#, OpPath::Update)
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::ObjectNotFound
+        );
+    }
+
+    /// The control. Without it the test above passes against a pipeline that lost the ability to
+    /// read anything at all.
+    #[tokio::test]
+    async fn a_class_with_no_declared_acl_still_creates_public_rows() {
+        let storage = FakeStorage::new().with_schema(default_schema("Post"));
+        let snap = snapshot(&storage).await;
+        let options = opts();
+
+        let a = AclScope::user("userA", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &a, &options);
+        create(&ctx, "Post", body(r#"{"title":"x"}"#, OpPath::Create))
+            .await
+            .expect("create");
+
+        let b = AclScope::user("userB", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &b, &options);
+        assert_eq!(
+            find(&ctx, "Post", ParsedWhere::default(), FindOptions::default())
+                .await
+                .expect("find")
+                .len(),
+            1
+        );
+    }
+
+    /// **The `!this.query` guard.** Without it a server stamps the default on every write and
+    /// passes everything above while silently reverting a permission change a client made on
+    /// purpose. Nothing in the response shows it: the update succeeds either way.
+    #[tokio::test]
+    async fn the_default_applies_on_create_and_never_on_update() {
+        let storage = FakeStorage::new().with_schema(
+            default_schema("Post")
+                .with_clp(clp(r#"{"ACL":{"currentUser":{"read":true,"write":true}}}"#)),
+        );
+        let snap = snapshot(&storage).await;
+        let options = opts();
+
+        // A supplies its own ACL, which suppresses the default: B may read, A may write.
+        let a = AclScope::user("userA", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &a, &options);
+        let created = create(
+            &ctx,
+            "Post",
+            body(
+                r#"{"title":"x","ACL":{"userA":{"read":true,"write":true},"userB":{"read":true}}}"#,
+                OpPath::Create,
+            ),
+        )
+        .await
+        .expect("create");
+
+        let b = AclScope::user("userB", vec![]).expect("scope");
+        let b_ctx = Ctx::new(&storage, &snap, &b, &options);
+        assert_eq!(
+            find(
+                &b_ctx,
+                "Post",
+                ParsedWhere::default(),
+                FindOptions::default()
+            )
+            .await
+            .expect("find")
+            .len(),
+            1,
+            "the client's own ACL must win over the class default on create"
+        );
+
+        // An update to an unrelated field must not restamp the class default over it.
+        update(
+            &ctx,
+            "Post",
+            &created.object_id,
+            body(r#"{"title":"y"}"#, OpPath::Update),
+        )
+        .await
+        .expect("update");
+        assert_eq!(
+            find(
+                &b_ctx,
+                "Post",
+                ParsedWhere::default(),
+                FindOptions::default()
+            )
+            .await
+            .expect("find")
+            .len(),
+            1,
+            "the explicitly set ACL must survive an unrelated update"
+        );
+    }
+
+    /// A falsy `ACL` on the body does not suppress the default, because upstream's test is
+    /// `!this.data.ACL` rather than a presence check. `{"ACL": null}` from a client therefore
+    /// lands on the class default rather than on a public row.
+    #[tokio::test]
+    async fn a_falsy_acl_on_the_body_does_not_suppress_the_default() {
+        let storage = FakeStorage::new().with_schema(
+            default_schema("Post").with_clp(clp(r#"{"ACL":{"currentUser":{"read":true}}}"#)),
+        );
+        let snap = snapshot(&storage).await;
+        let options = opts();
+
+        let a = AclScope::user("userA", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &a, &options);
+        create(
+            &ctx,
+            "Post",
+            body(r#"{"title":"x","ACL":null}"#, OpPath::Create),
+        )
+        .await
+        .expect("create");
+
+        let b = AclScope::user("userB", vec![]).expect("scope");
+        let ctx = Ctx::new(&storage, &snap, &b, &options);
+        assert!(
+            find(&ctx, "Post", ParsedWhere::default(), FindOptions::default())
+                .await
+                .expect("find")
+                .is_empty()
+        );
+    }
+
+    /// **An `ACL` carrying an operation must not vanish.** `flatten_for_create` removes a `Delete`
+    /// op from the body, so the key disappeared before `lower_acl` ran and the row was written
+    /// with no permission columns, which is public. Upstream keeps the op object and writes two
+    /// empty arrays, which is master-only. Measured at the pin on an ordinary class: an anonymous
+    /// read of the created object answered 200 here and 404 there.
+    ///
+    /// Asserted on the stored columns rather than through a read, because "public" and
+    /// "master-only" are the presence and the emptiness of the same two columns, and the
+    /// distinction is exactly what a read cannot show for a master caller.
+    #[tokio::test]
+    async fn an_acl_operation_on_create_writes_empty_columns_rather_than_none() {
+        for literal in [
+            r#"{"title":"x","ACL":{"__op":"Delete"}}"#,
+            r#"{"title":"x","ACL":{"__op":"Increment","amount":1}}"#,
+        ] {
+            let storage = FakeStorage::new().with_schema(default_schema("Post"));
+            let snap = snapshot(&storage).await;
+            let options = opts();
+            let master = AclScope::Unrestricted;
+            let ctx = Ctx::new(&storage, &snap, &master, &options);
+
+            create(&ctx, "Post", body(literal, OpPath::Create))
+                .await
+                .expect("create");
+
+            let rows = storage.rows("Post");
+            assert_eq!(rows.len(), 1, "{literal}");
+            for column in ["_rperm", "_wperm"] {
+                assert!(
+                    matches!(rows[0].get(column), Some(ParseValue::Array(a)) if a.is_empty()),
+                    "{literal} must write an empty {column}, got {:?}",
+                    rows[0].get(column)
+                );
+            }
+        }
+    }
+
+    /// The control for the test above, and the reason it cannot simply assert "columns exist": an
+    /// ordinary create with no `ACL` writes **no** columns, which is what makes a row public.
+    #[tokio::test]
+    async fn a_create_with_no_acl_still_writes_no_columns() {
+        let storage = FakeStorage::new().with_schema(default_schema("Post"));
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let master = AclScope::Unrestricted;
+        let ctx = Ctx::new(&storage, &snap, &master, &options);
+
+        create(&ctx, "Post", body(r#"{"title":"x"}"#, OpPath::Create))
+            .await
+            .expect("create");
+
+        let rows = storage.rows("Post");
+        assert!(rows[0].get("_rperm").is_none());
+        assert!(rows[0].get("_wperm").is_none());
+    }
+
+    /// `_Role`'s ACL is a required column, and the class default does not satisfy it: upstream
+    /// runs `validateRequiredColumns` inside `validateSchema`, which precedes
+    /// `setRequiredFieldsIfNeeded`. Asserting it here pins the ordering, which is otherwise
+    /// invisible.
+    #[tokio::test]
+    async fn a_declared_default_does_not_satisfy_roles_required_acl() {
+        let storage = FakeStorage::new().with_schema(
+            default_schema("_Role").with_clp(clp(r#"{"ACL":{"currentUser":{"read":true}}}"#)),
+        );
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let master = AclScope::Unrestricted;
+        let ctx = Ctx::new(&storage, &snap, &master, &options);
+
+        let e = create(&ctx, "_Role", body(r#"{"name":"Admins"}"#, OpPath::Create))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::IncorrectType);
+        assert_eq!(e.message, "ACL is required.");
+        assert!(storage.rows("_Role").is_empty());
     }
 
     // -----------------------------------------------------------------------------------------

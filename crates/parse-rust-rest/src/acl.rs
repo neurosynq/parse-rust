@@ -5,6 +5,19 @@
 //! `addReadACL` emits `_rperm: {$in: [null, '*', ...acl]}` and `null` in a Mongo `$in` matches a
 //! document where the field is *missing*, which is how a row saved without an ACL stays readable.
 //! Omitting the null silently hides every such row, and there is no error to notice.
+//!
+//! **Two known differences from upstream live in [`lower_acl`], both recorded as deliberate
+//! differences and both deferred rather than fixed here.**
+//!
+//! It reads principals from a map and nothing else, so an `ACL` that is an *array* takes the
+//! truthy-non-object path below: two **empty** columns, which is a master-only row rather than a
+//! column-less public one. Upstream enumerates the array, so `[{"read":true}]` grants principal
+//! `"0"` there, an index being a property name. **That does change who may read the row**, in the
+//! restrictive direction: a principal upstream grants is granted nothing here.
+//!
+//! And the columns come out in wire order, where upstream enumerates a JavaScript object and puts
+//! integer-like keys first. That one grants the same rights to the same principals and is visible
+//! only to a client preserving map order, or to a mixed fleet comparing stored rows.
 
 use parse_rust_core::{Acl, ErrorCode, ParseError, ParseMap, ParseValue, Permissions, Principal};
 use parse_rust_storage::{Comparison, Constraint};
@@ -148,6 +161,55 @@ impl AclScope {
     }
 }
 
+/// Resolve a class's declared default ACL into the value a create should carry.
+///
+/// `RestWrite.js:385-391`. The declared block is copied, and if it names `currentUser` then the
+/// caller's objectId gains a copy of that entry and the `currentUser` key is removed.
+///
+/// Three details are load-bearing and each fails silently if it is got wrong.
+///
+/// **`currentUser` is resolved, never stored.** An ACL containing the literal string
+/// `currentUser` as a principal matches nobody, so the row is unreadable by everyone including
+/// the user it was meant for, and the configuration reads as though it worked.
+///
+/// **An anonymous caller loses the entry rather than keeping it.** Upstream's `delete` is outside
+/// the `if (this.auth.user?.id)` guard, so with no caller there is no substitute id and the key
+/// simply goes. A class whose only declared entry is `currentUser` therefore produces an ACL with
+/// no entries at all for an anonymous create, which is a row only master can read. That is
+/// upstream's behavior and it is the restrictive direction.
+///
+/// **Key order is preserved, and it is not upstream's order.** The `_rperm` and `_wperm` arrays
+/// are built by walking the ACL, so their element order comes from here, and a mixed fleet compares
+/// stored rows. Substituting the caller's id in place of `currentUser` rather than appending would
+/// reorder them, so the substitution appends as upstream's assignment does.
+///
+/// That is where the resemblance stops. **Upstream enumerates a JavaScript object, so an
+/// integer-like key sorts ahead of every string key regardless of insertion order**, and an
+/// objectId of `1234567890` is integer-like. parse-rust preserves wire order throughout, so the
+/// stored arrays differ for any ACL naming such a principal. Measured, and not fixed here: it has
+/// no authorization consequence and the fix belongs in `lower_acl` with the array case.
+pub fn default_acl_for_create(declared: &ParseValue, caller: Option<&str>) -> ParseValue {
+    let ParseValue::Object(map) = declared else {
+        // A truthy non-object is assigned verbatim upstream and lowered by the same rule any
+        // client-supplied non-object ACL is: two empty columns, a master-only row.
+        return declared.clone();
+    };
+    let mut acl = map.clone();
+    let Some(current_user) = acl.get("currentUser").cloned() else {
+        return ParseValue::Object(acl);
+    };
+    // `if (acl.currentUser)`: a falsy entry is left in place and not resolved, because upstream's
+    // guard is truthiness rather than presence.
+    if !parse_rust_core::is_js_truthy(&current_user) {
+        return ParseValue::Object(acl);
+    }
+    if let Some(caller) = caller {
+        acl.insert(caller.to_string(), current_user);
+    }
+    acl.shift_remove("currentUser");
+    ParseValue::Object(acl)
+}
+
 /// Split an `ACL` field out of a row into the two storage columns.
 ///
 /// Returns the row with `ACL` removed and the columns added. A row with no `ACL` gets no columns,
@@ -289,6 +351,34 @@ mod tests {
                     .any(|v| matches!(v, ParseValue::String(s) if s == "*")));
             }
             other => panic!("expected In, got {other:?}"),
+        }
+    }
+
+    /// **The array case that is a known divergence, pinned so the eventual fix is visible.**
+    ///
+    /// The test above uses `[]` and `["*"]`, neither of which carries a permission, so it passes
+    /// whether or not arrays are enumerated. `[{"read":true}]` is the case that separates the two:
+    /// upstream's `for...in` grants principal `"0"`, because an array index is a property name, and
+    /// `lower_acl` reads principals from a map only, so it writes two empty columns and grants
+    /// nobody. Measured at the pin, on signup, on a `_User` update and as a CLP-declared default.
+    ///
+    /// This asserts today's behavior rather than upstream's. When `lower_acl` learns to enumerate
+    /// an array, this test fails and is the reminder to move the divergence row with it.
+    #[test]
+    fn a_permission_bearing_array_currently_grants_nobody() {
+        let mut entry = ParseMap::new();
+        entry.insert("read".into(), ParseValue::Bool(true));
+        let lowered = lower_acl(row(vec![(
+            "ACL",
+            ParseValue::Array(vec![ParseValue::Object(entry)]),
+        )]));
+        for column in ["_rperm", "_wperm"] {
+            assert!(
+                matches!(lowered.get(column), Some(ParseValue::Array(a)) if a.is_empty()),
+                "upstream grants principal \"0\" here; parse-rust grants nobody, and the row \
+                 records it. Got {:?} for {column}",
+                lowered.get(column)
+            );
         }
     }
 
@@ -463,6 +553,131 @@ mod tests {
             !star.contains_key("write"),
             "the false key is dropped, matching untransformObjectACL"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The CLP-declared default ACL
+    // -----------------------------------------------------------------------------------------
+
+    fn declared(json: &str) -> ParseValue {
+        parse_rust_core::decode::classify(
+            serde_json::from_str(json).expect("test literal must be valid JSON"),
+        )
+        .expect("classify")
+    }
+
+    /// What the resolved ACL looks like on the wire, after a round trip through the two columns.
+    /// Asserted this way rather than on the intermediate map, because the columns are what the
+    /// row actually carries and an entry that survives resolution but not lowering grants nothing.
+    fn principals(acl: ParseValue) -> (Vec<String>, Vec<String>) {
+        let mut carrier = ParseMap::new();
+        carrier.insert("ACL".to_string(), acl);
+        let lowered = lower_acl(carrier);
+        let read = take_string_array(&mut lowered.clone(), "_rperm").unwrap_or_default();
+        let write = take_string_array(&mut lowered.clone(), "_wperm").unwrap_or_default();
+        (read, write)
+    }
+
+    /// The headline case, and the one the release is named for: a class declared private, an
+    /// object created by user A, and the caller's own id in both columns.
+    #[test]
+    fn current_user_resolves_to_the_callers_object_id() {
+        let acl = default_acl_for_create(
+            &declared(r#"{"currentUser":{"read":true,"write":true}}"#),
+            Some("userA"),
+        );
+        let ParseValue::Object(map) = &acl else {
+            panic!("expected an object")
+        };
+        assert!(
+            !map.contains_key("currentUser"),
+            "the literal key matches nobody and must not be stored"
+        );
+        assert_eq!(
+            principals(acl),
+            (vec!["userA".to_string()], vec!["userA".to_string()])
+        );
+    }
+
+    /// **Both columns, not just `_rperm`.** They are written separately, so an implementation that
+    /// resolved the read entry and dropped the write one would hide the row from user B and pass a
+    /// read-only test while leaving it writable by everybody.
+    #[test]
+    fn a_read_only_declaration_produces_a_read_only_row() {
+        let acl = default_acl_for_create(&declared(r#"{"currentUser":{"read":true}}"#), Some("u1"));
+        assert_eq!(principals(acl), (vec!["u1".to_string()], Vec::new()));
+    }
+
+    /// With no caller there is no substitute id, and upstream's `delete` is outside the guard, so
+    /// the entry goes. A class whose only declared entry is `currentUser` therefore yields an ACL
+    /// with no principals at all for an anonymous create: readable by master and nobody else.
+    #[test]
+    fn an_anonymous_create_loses_the_current_user_entry_rather_than_keeping_it() {
+        let acl = default_acl_for_create(
+            &declared(r#"{"currentUser":{"read":true,"write":true}}"#),
+            None,
+        );
+        let ParseValue::Object(map) = &acl else {
+            panic!("expected an object")
+        };
+        assert!(map.is_empty(), "the literal key must not survive: {map:?}");
+        assert_eq!(principals(acl), (Vec::new(), Vec::new()));
+    }
+
+    /// Entries other than `currentUser` are carried through untouched, and the caller's own entry
+    /// is appended after them, which is where a JS property assignment puts a new key. The column
+    /// order is observable in a stored row.
+    #[test]
+    fn other_entries_survive_and_the_caller_is_appended() {
+        let acl = default_acl_for_create(
+            &declared(
+                r#"{"role:Admins":{"read":true,"write":true},"currentUser":{"read":true},"*":{"read":true}}"#,
+            ),
+            Some("u1"),
+        );
+        let (read, write) = principals(acl);
+        assert_eq!(read, vec!["role:Admins", "*", "u1"]);
+        assert_eq!(write, vec!["role:Admins"]);
+    }
+
+    /// An id already present is updated in place rather than moved to the end, which is what a
+    /// JavaScript assignment to an existing key does.
+    #[test]
+    fn a_caller_already_named_keeps_its_position() {
+        let acl = default_acl_for_create(
+            &declared(
+                r#"{"u1":{"read":true},"*":{"read":true},"currentUser":{"read":true,"write":true}}"#,
+            ),
+            Some("u1"),
+        );
+        let (read, write) = principals(acl);
+        assert_eq!(read, vec!["u1", "*"]);
+        assert_eq!(write, vec!["u1"], "the currentUser entry replaced it");
+    }
+
+    /// `if (acl.currentUser)` is truthiness, so a falsy entry is neither resolved nor deleted.
+    #[test]
+    fn a_falsy_current_user_entry_is_left_alone() {
+        let acl = default_acl_for_create(&declared(r#"{"currentUser":null}"#), Some("u1"));
+        let ParseValue::Object(map) = &acl else {
+            panic!("expected an object")
+        };
+        assert!(map.contains_key("currentUser"));
+        assert!(!map.contains_key("u1"));
+    }
+
+    /// A truthy non-object is assigned verbatim and lowered like any other truthy non-object ACL:
+    /// two empty columns, which is a master-only row rather than a public one.
+    #[test]
+    fn a_truthy_non_object_declaration_yields_a_master_only_row() {
+        let acl = default_acl_for_create(&declared(r#""nonsense""#), Some("u1"));
+        assert!(matches!(&acl, ParseValue::String(s) if s == "nonsense"));
+        let mut carrier = ParseMap::new();
+        carrier.insert("ACL".to_string(), acl);
+        let lowered = lower_acl(carrier);
+        for column in ["_rperm", "_wperm"] {
+            assert!(matches!(lowered.get(column), Some(ParseValue::Array(a)) if a.is_empty()));
+        }
     }
 
     #[test]

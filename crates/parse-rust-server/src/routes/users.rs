@@ -78,7 +78,7 @@ pub(crate) async fn prepare_user_write(
 ) -> Result<(), ParseError> {
     hash_user_password(body).await?;
     if is_create {
-        ensure_user_identity_and_acl(body);
+        ensure_user_identity_and_acl(body)?;
     }
     Ok(())
 }
@@ -108,8 +108,83 @@ async fn hash_user_password(body: &mut WriteBody) -> Result<(), ParseError> {
 /// With that option set to `false` upstream additionally grants `{"*": {"read": true}}`. The
 /// option is not modeled, so the private form is the only one produced here: the safe direction,
 /// and the one matching the default.
-pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> String {
-    let object_id = match take_string(body, "objectId") {
+///
+/// **Upstream's two tests are `!ACL` and then a property assignment onto a JavaScript object**
+/// (`RestWrite.js:1676-1686`, literally `var ACL = this.data.ACL; if (!ACL) { ACL = {}; ... }`
+/// followed by `ACL[objectId] = ...`). Reading either of them as `ParseValue::Object` produced a
+/// **publicly readable `_User`**, and 0.2.0 shipped both mistakes:
+///
+/// - `null`, `false`, `0` and `""` are falsy, so upstream replaces them. Left in place here they
+///   reached `lower_acl`, which drops a falsy ACL without writing `_rperm` or `_wperm`.
+/// - An op envelope, an array and a tagged value are all **objects** in JavaScript, so upstream
+///   assigns the owner into them. Skipped here, `{"__op":"Delete"}` was then removed from the body
+///   by `flatten_for_create`, leaving no permission columns at all.
+///
+/// Both measured against a parse-server at the pin: each of those seven values answered 201 on
+/// both servers. **Five of them produced a public row and two did not.** The four falsy values and
+/// `{"__op":"Delete"}` left no permission columns at all, so an anonymous read answered 200 here
+/// and 404 upstream. The array and the tagged value left two *empty* columns, which is master-only,
+/// so both servers answered 404 and the defect there was the missing owner rather than a
+/// disclosure. A non-`Delete` operation behaved like the array.
+///
+/// The one case left alone is a truthy **scalar**, where upstream throws and answers a bare 500.
+/// See the `Shape` enum below.
+pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> Result<String, ParseError> {
+    // **A truthy non-string `objectId` is refused, not replaced.** Upstream's substitution test is
+    // `if (!this.data.objectId)` (`RestWrite.js:429-431`), so it replaces an absent or falsy id and
+    // leaves a truthy one in place, where `enforceFieldExists` then compares it against the
+    // `String` type of the default column and answers `INCORRECT_TYPE`.
+    //
+    // Reading "not a string" as "absent" instead is what generated an id and carried on. Measured
+    // at the pin with `allowCustomObjectId` enabled and a body of `{"objectId": 123, ...}`, through
+    // both `POST /users` and `POST /classes/_User`: upstream answers 400 code 111 and writes no
+    // row, and parse-rust answered 201 with an id the client never asked for, persisted the user
+    // and issued a session for it.
+    //
+    // **That agreement holds for every shape with an inferable type and not for `{"__op":"Delete"}`.**
+    // Upstream infers no type for a `Delete`, skips the field check, and answers 201 having stored
+    // the row under a Mongo-generated `_id` while echoing the operation object back as the
+    // `objectId`. parse-rust refuses it with 107 below. That difference is deliberate, recorded,
+    // and scoped for 0.3.0; it is not the 111 case.
+    //
+    // The pipeline already makes exactly this check for every other class. It could never fire for
+    // `_User`, because this function had rewritten the key before the pipeline saw the body, so
+    // the class with the strongest reason to have it was the one class that did not.
+    if let Some(write) = body.get("objectId") {
+        let truthy_non_string = match write {
+            FieldWrite::Value(ParseValue::String(_)) => false,
+            FieldWrite::Value(v) => parse_rust_core::is_js_truthy(v),
+            // An op envelope is a truthy object, so it is never a substitutable absent id.
+            FieldWrite::Op(_) => true,
+        };
+        if truthy_non_string {
+            let got = match write {
+                FieldWrite::Value(v) => parse_rust_schema::infer_type(v),
+                FieldWrite::Op(op) => parse_rust_schema::infer_op_type(op)?,
+            };
+            return Err(match got {
+                Some(got) => parse_rust_schema::infer::schema_mismatch(
+                    USER_CLASS,
+                    "objectId",
+                    &parse_rust_storage::FieldType::String,
+                    &got,
+                ),
+                None => ParseError::invalid_json("objectId is an invalid field name."),
+            });
+        }
+    }
+
+    // Whatever is left is absent, falsy, or a non-empty string, because the truthy non-string
+    // cases returned above. **The empty string belongs with `null`, not with a usable id**:
+    // `take_string` answered `Some("")` for it, so a body carrying `{"objectId": ""}` created a
+    // `_User` whose objectId was the empty string, and every ACL entry naming it named nothing.
+    // Upstream's `!this.data.objectId` is falsiness, so it generates one, and the pipeline already
+    // agrees for every other class.
+    let existing = match body.get("objectId") {
+        Some(FieldWrite::Value(ParseValue::String(s))) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let object_id = match existing {
         Some(id) => id,
         None => {
             let id = parse_rust_core::new_object_id();
@@ -125,22 +200,63 @@ pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> String {
     permissions.insert("read".to_string(), ParseValue::Bool(true));
     permissions.insert("write".to_string(), ParseValue::Bool(true));
 
-    match body.get_mut("ACL") {
-        Some(FieldWrite::Value(ParseValue::Object(acl))) => {
-            acl.insert(object_id.clone(), ParseValue::Object(permissions));
-        }
-        // A non-object ACL is left alone so the ACL validator reports it.
-        Some(_) => {}
-        None => {
-            let mut acl = ParseMap::new();
-            acl.insert(object_id.clone(), ParseValue::Object(permissions));
-            body.insert(
-                "ACL".to_string(),
-                FieldWrite::Value(ParseValue::Object(acl)),
-            );
-        }
+    // **Which shape the submitted `ACL` is, in JavaScript's terms rather than in ours.** Upstream
+    // does `ACL[objectId] = {read, write}` on whatever `this.data.ACL` holds, so the only question
+    // that matters is what that assignment produces, and the answer is one of three things.
+    //
+    // The trap this encodes: **an op envelope, an array and a tagged value are all objects in
+    // JavaScript and none of them is `ParseValue::Object` here.** Matching only on `Object` looks
+    // like "the client sent an ACL" and is not. Measured at the pin, one of them was a public
+    // `_User`: `{"ACL":{"__op":"Delete"}}` on signup answered 201 on both servers, and an
+    // anonymous read of that user then answered 200 here and 404 upstream.
+    enum Shape {
+        /// Absent, or falsy, which upstream's `if (!ACL)` treats identically. A fresh object
+        /// holding the owner and nothing else.
+        Replace,
+        /// A principal map. The owner is added alongside whatever the caller sent.
+        Merge,
+        /// A truthy scalar. Upstream throws a `TypeError` out of the assignment and answers a bare
+        /// 500 (measured for `"nonsense"`, `123` and `true`). There is no correct answer to
+        /// reproduce, so the value is left for the ACL validator and `lower_acl` writes two empty
+        /// permission columns, which is master-only rather than public.
+        LeaveAlone,
     }
-    object_id
+    let shape = match body.get("ACL") {
+        None => Shape::Replace,
+        Some(FieldWrite::Value(v)) if !parse_rust_core::is_js_truthy(v) => Shape::Replace,
+        Some(FieldWrite::Value(ParseValue::Object(_))) => Shape::Merge,
+        Some(FieldWrite::Value(
+            ParseValue::Bool(_) | ParseValue::Number(_) | ParseValue::String(_),
+        )) => Shape::LeaveAlone,
+        // **Every remaining case is a JavaScript object**, so upstream assigns the owner onto it
+        // and the owner is normally the only entry that contributes a permission: an op envelope
+        // has `__op`, `objects` and `amount`, a tagged value has `__type` and its payload, and an
+        // array has indices. Measured at the pin for `{"__op":"Delete"}`, `[]`, `[1,2]` and a
+        // tagged Date: all four come back owner-only.
+        //
+        // **"Normally" is doing work, and an array is the exception.** `[{"read":true}]` grants
+        // principal `"0"` upstream, because an index *is* a property name and that element does
+        // carry a `read`. Collapsing to owner-only drops it, which is narrower than upstream and
+        // is a recorded Tier 3 row rather than a claim that it cannot happen. An earlier version of
+        // this comment asserted arrays could never contribute a permission, which is false.
+        Some(FieldWrite::Op(_)) | Some(FieldWrite::Value(_)) => Shape::Replace,
+    };
+    if matches!(shape, Shape::Replace) {
+        let mut acl = ParseMap::new();
+        acl.insert(object_id.clone(), ParseValue::Object(permissions));
+        body.insert(
+            "ACL".to_string(),
+            FieldWrite::Value(ParseValue::Object(acl)),
+        );
+        return Ok(object_id);
+    }
+
+    if let (Shape::Merge, Some(FieldWrite::Value(ParseValue::Object(acl)))) =
+        (shape, body.get_mut("ACL"))
+    {
+        acl.insert(object_id.clone(), ParseValue::Object(permissions));
+    }
+    Ok(object_id)
 }
 
 /// `handleCreate`'s `role:`-prefixed objectId refusal (`ClassesRouter.js:105-112`).
@@ -783,26 +899,65 @@ pub(crate) fn force_owner_into_acl(body: &mut WriteBody, object_id: &str, privil
     permissions.insert("write".to_string(), ParseValue::Bool(true));
     let owner_entry = ParseValue::Object(permissions);
 
-    match body.get_mut("ACL") {
-        Some(FieldWrite::Value(ParseValue::Object(acl))) => {
-            acl.insert(object_id.to_string(), owner_entry);
+    // **Upstream's test is `this.data.ACL &&` followed by a property assignment**
+    // (`RestWrite.js:1590-1599`), which is the same pair the create path applies and has the same
+    // trap: an op envelope, an array and a tagged value are all truthy objects in JavaScript and
+    // none of them is `ParseValue::Object` here.
+    //
+    // **Getting this wrong disables accounts.** Measured at the pin with
+    // `{"ACL":{"__op":"Increment","amount":1}}` on `PUT /classes/_User/:id`: both servers answer
+    // 200, upstream keeps the owner entry and the caller's session still resolves, and parse-rust
+    // stored `{}` and the same session then answered 209 `INVALID_SESSION_TOKEN`. Any principal
+    // permitted to write a `_User` could therefore lock that user out, which is the exact failure
+    // this function exists to prevent and it covered only two of the shapes that reach it.
+    //
+    // A **falsy** ACL is the one case that must not be touched, and it is upstream's `&&` doing
+    // the work: the assignment is skipped, and the falsy value is then dropped by the lowering,
+    // which leaves the stored columns exactly as they were. Forcing an owner in here would replace
+    // a deliberate ACL with an owner-only one on any request that happened to send `ACL: null`.
+    let shape = match body.get("ACL") {
+        None => None,
+        Some(FieldWrite::Value(v)) if !parse_rust_core::is_js_truthy(v) => None,
+        Some(FieldWrite::Value(ParseValue::Object(_))) => Some(OwnerInto::ExistingMap),
+        // Every other truthy shape, including a truthy **scalar**. Upstream throws a `TypeError`
+        // out of the assignment there and writes nothing at all, so there is no answer to
+        // reproduce; what matters is that the alternative here is worse than either. Left alone,
+        // the scalar reaches the lowering, which writes two empty permission columns, and on
+        // `_User` that is an account its owner can no longer read, write or log in to. An
+        // owner-only ACL is narrower than upstream's "nothing changed" and it keeps the invariant
+        // this function is named for.
+        Some(_) => Some(OwnerInto::FreshMap),
+    };
+
+    match shape {
+        None => {}
+        Some(OwnerInto::ExistingMap) => {
+            if let Some(FieldWrite::Value(ParseValue::Object(acl))) = body.get_mut("ACL") {
+                acl.insert(object_id.to_string(), owner_entry);
+            }
         }
-        // **`{"ACL": {"__op": "Delete"}}` is the other way to replace an ACL, and it was not
-        // covered.** `user.unset("ACL").save()` sends exactly this. Matching only the object form
-        // let it through to the lowering, which cleared both permission columns, and an empty ACL
-        // on `_User` is a row its owner can no longer read or write: their next save answered 101
-        // and the account read as disabled at login. Upstream answers 200 and the row comes back
-        // holding the owner entry alone.
-        //
-        // Rewritten to that value rather than dropped, so the delete still happens: every other
-        // principal goes, the owner stays.
-        Some(entry @ FieldWrite::Op(parse_rust_core::Op::Delete)) => {
+        // Rewritten rather than dropped, so a `{"__op":"Delete"}` still deletes: every other
+        // principal goes and the owner stays, which is what upstream's assignment onto the op
+        // object produces once the lowering walks it. `user.unset("ACL").save()` sends exactly
+        // that op.
+        Some(OwnerInto::FreshMap) => {
             let mut acl = ParseMap::new();
             acl.insert(object_id.to_string(), owner_entry);
-            *entry = FieldWrite::Value(ParseValue::Object(acl));
+            body.insert(
+                "ACL".to_string(),
+                FieldWrite::Value(ParseValue::Object(acl)),
+            );
         }
-        _ => {}
     }
+}
+
+/// Where the owner entry goes when a `_User` update carries an `ACL`.
+enum OwnerInto {
+    /// The client sent a principal map; the owner joins it.
+    ExistingMap,
+    /// The client sent something that is an object to JavaScript but not a principal map, so the
+    /// only entry that survives upstream's lowering is the owner. Replaced wholesale.
+    FreshMap,
 }
 
 /// `_validateUserName` and `_validateEmail` (`RestWrite.js:811-884`), for the update path.
@@ -1053,7 +1208,7 @@ mod tests {
     #[test]
     fn user_owner_acl_is_added_without_discarding_a_master_supplied_acl() {
         let mut b = body(r#"{"objectId":"user123456","ACL":{"*":{"read":true}}}"#);
-        let object_id = ensure_user_identity_and_acl(&mut b);
+        let object_id = ensure_user_identity_and_acl(&mut b).expect("string id");
 
         assert_eq!(object_id, "user123456");
         let Some(FieldWrite::Value(ParseValue::Object(acl))) = b.get("ACL") else {
@@ -1065,6 +1220,203 @@ mod tests {
         };
         assert!(matches!(owner.get("read"), Some(ParseValue::Bool(true))));
         assert!(matches!(owner.get("write"), Some(ParseValue::Bool(true))));
+    }
+
+    /// **A falsy `ACL` is not "leave it alone", it is "there is no ACL"**, which is upstream's
+    /// `if (!ACL)`. 0.2.0 left all four in place, they were dropped by `lower_acl` without writing
+    /// permission columns, and an absent `_rperm` is public: signing up with `{"ACL": null}`
+    /// produced a `_User` row any anonymous caller could read. Measured against a parse-server at
+    /// the pin, which answers 404 to that read.
+    ///
+    /// The values are looped rather than sampled, because checking one is exactly how the other
+    /// three survived the last review of this function.
+    #[test]
+    fn a_falsy_acl_on_signup_becomes_the_owner_acl_rather_than_a_public_row() {
+        for literal in [
+            r#"{"objectId":"user123456","ACL":null}"#,
+            r#"{"objectId":"user123456","ACL":false}"#,
+            r#"{"objectId":"user123456","ACL":0}"#,
+            r#"{"objectId":"user123456","ACL":""}"#,
+        ] {
+            let mut b = body(literal);
+            ensure_user_identity_and_acl(&mut b).expect("string id");
+            let Some(FieldWrite::Value(ParseValue::Object(acl))) = b.get("ACL") else {
+                panic!("ACL missing or not an object for {literal}");
+            };
+            assert_eq!(acl.len(), 1, "{literal} produced {acl:?}");
+            let Some(ParseValue::Object(owner)) = acl.get("user123456") else {
+                panic!("owner entry missing for {literal}");
+            };
+            assert!(matches!(owner.get("read"), Some(ParseValue::Bool(true))));
+            assert!(matches!(owner.get("write"), Some(ParseValue::Bool(true))));
+        }
+    }
+
+    /// **An op envelope, an array and a tagged value are all objects in JavaScript**, and none of
+    /// them is `ParseValue::Object` here. Matching only on `Object` looks like "the client sent an
+    /// ACL" and is not: `{"ACL":{"__op":"Delete"}}` produced a **publicly readable `_User`**,
+    /// because `flatten_for_create` then removed the key and no permission columns were written.
+    ///
+    /// Every case below is measured against a parse-server at the pin, where all four answer with
+    /// the owner-only ACL. They do so because an op's keys are `__op`, `objects` and `amount`, an
+    /// array's are indices and a tagged value's are `__type` and its payload, so none of them
+    /// contributes a `read` or a `write` and the owner is the only entry left.
+    #[test]
+    fn a_js_object_acl_that_is_not_a_principal_map_still_gets_the_owner() {
+        for literal in [
+            r#"{"objectId":"user123456","ACL":{"__op":"Delete"}}"#,
+            r#"{"objectId":"user123456","ACL":{"__op":"Increment","amount":1}}"#,
+            r#"{"objectId":"user123456","ACL":[]}"#,
+            r#"{"objectId":"user123456","ACL":[1,2]}"#,
+            r#"{"objectId":"user123456","ACL":{"__type":"Date","iso":"2020-01-01T00:00:00.000Z"}}"#,
+        ] {
+            let mut b = body(literal);
+            ensure_user_identity_and_acl(&mut b).expect("string id");
+            let Some(FieldWrite::Value(ParseValue::Object(acl))) = b.get("ACL") else {
+                panic!("ACL missing or not an object for {literal}");
+            };
+            assert_eq!(acl.len(), 1, "{literal} produced {acl:?}");
+            assert!(acl.contains_key("user123456"), "{literal}");
+        }
+    }
+
+    /// The one shape that is left as it arrived. Upstream throws a `TypeError` out of
+    /// `ACL[objectId] = ...` and answers a bare 500, measured for `"nonsense"`, `123` and `true`,
+    /// so there is no upstream answer to reproduce. `lower_acl` writes two empty columns for it,
+    /// which is master-only rather than public, so the failure direction is closed.
+    #[test]
+    fn a_truthy_scalar_acl_on_signup_is_left_for_the_validator() {
+        for literal in [
+            r#"{"objectId":"user123456","ACL":"nonsense"}"#,
+            r#"{"objectId":"user123456","ACL":123}"#,
+            r#"{"objectId":"user123456","ACL":true}"#,
+        ] {
+            let mut b = body(literal);
+            ensure_user_identity_and_acl(&mut b).expect("string id");
+            assert!(
+                !matches!(b.get("ACL"), Some(FieldWrite::Value(ParseValue::Object(_)))),
+                "{literal} must be left alone"
+            );
+        }
+    }
+
+    /// **The update path has the same JavaScript-object trap as the create path, and getting it
+    /// wrong disables accounts rather than exposing them.** `force_owner_into_acl` handled a
+    /// principal map and `{"__op":"Delete"}` and nothing else, so every other truthy shape reached
+    /// the lowering and cleared both permission columns. On `_User` that is a row its owner can no
+    /// longer read, write or log in with.
+    ///
+    /// Measured at the pin with `{"__op":"Increment","amount":1}` on `PUT /classes/_User/:id`:
+    /// both servers answer 200, upstream keeps the owner entry and the caller's session still
+    /// resolves, and parse-rust stored `{}` and the same session then answered 209.
+    #[test]
+    fn every_truthy_acl_shape_on_an_update_keeps_the_owner() {
+        for literal in [
+            r#"{"ACL":{"__op":"Increment","amount":1}}"#,
+            r#"{"ACL":{"__op":"Delete"}}"#,
+            r#"{"ACL":{"__op":"Add","objects":[1]}}"#,
+            r#"{"ACL":[]}"#,
+            r#"{"ACL":[1,2]}"#,
+            r#"{"ACL":{"__type":"Date","iso":"2020-01-01T00:00:00.000Z"}}"#,
+            // A truthy scalar, where upstream throws and writes nothing. There is no answer to
+            // reproduce, and the alternative here is an account nobody can reach.
+            r#"{"ACL":"nonsense"}"#,
+            r#"{"ACL":123}"#,
+            r#"{"ACL":true}"#,
+        ] {
+            let mut b = body(literal);
+            force_owner_into_acl(&mut b, "user123456", false);
+            let Some(FieldWrite::Value(ParseValue::Object(acl))) = b.get("ACL") else {
+                panic!("ACL missing or not an object for {literal}");
+            };
+            let Some(ParseValue::Object(owner)) = acl.get("user123456") else {
+                panic!("owner entry missing for {literal}");
+            };
+            assert!(matches!(owner.get("read"), Some(ParseValue::Bool(true))));
+            assert!(matches!(owner.get("write"), Some(ParseValue::Bool(true))));
+        }
+    }
+
+    /// The half that must **not** change, and the reason the rule is not "always force an owner
+    /// in". Upstream's test is `this.data.ACL &&`, so a falsy value skips the assignment and is
+    /// then dropped by the lowering, which leaves the stored columns exactly as they were. Forcing
+    /// an owner here would replace a deliberate ACL on any request that sent `ACL: null`.
+    #[test]
+    fn a_falsy_acl_on_an_update_is_left_for_the_lowering_to_drop() {
+        for literal in [
+            r#"{"ACL":null}"#,
+            r#"{"ACL":false}"#,
+            r#"{"ACL":0}"#,
+            r#"{"ACL":""}"#,
+        ] {
+            let mut b = body(literal);
+            force_owner_into_acl(&mut b, "user123456", false);
+            assert!(
+                !matches!(b.get("ACL"), Some(FieldWrite::Value(ParseValue::Object(_)))),
+                "{literal} must be left alone"
+            );
+        }
+    }
+
+    /// Master and maintenance are exempt, which is upstream's `isMaster !== true` guard. An
+    /// operator revoking a user's access to their own row is a legitimate administrative action.
+    #[test]
+    fn a_privileged_caller_can_still_remove_the_owner() {
+        let mut b = body(r#"{"ACL":{"__op":"Delete"}}"#);
+        force_owner_into_acl(&mut b, "user123456", true);
+        assert!(matches!(b.get("ACL"), Some(FieldWrite::Op(_))));
+    }
+
+    /// **A truthy non-string `objectId` is refused rather than replaced.** Upstream's substitution
+    /// test is `if (!this.data.objectId)`, so a truthy one survives to the type check and answers
+    /// `INCORRECT_TYPE`. Reading "not a string" as "absent" generated an id instead: measured at
+    /// the pin with `allowCustomObjectId` on, upstream answered 400 code 111 and wrote no row
+    /// through either `POST /users` or `POST /classes/_User`, and parse-rust answered 201 with an
+    /// id the client never asked for.
+    #[test]
+    fn a_truthy_non_string_object_id_is_refused_rather_than_replaced() {
+        for literal in [
+            r#"{"objectId":123,"username":"u"}"#,
+            r#"{"objectId":true,"username":"u"}"#,
+            r#"{"objectId":["a"],"username":"u"}"#,
+            r#"{"objectId":{"a":1},"username":"u"}"#,
+        ] {
+            let mut b = body(literal);
+            let e = ensure_user_identity_and_acl(&mut b).expect_err(literal);
+            assert_eq!(e.code, ErrorCode::IncorrectType, "{literal}");
+        }
+    }
+
+    /// **The one shape that is refused with a different code, and a deliberate difference from
+    /// upstream rather than a match.** A `Delete` operation is truthy, so it is not a substitutable
+    /// absent id, and upstream infers no type for it, skips the field check and answers 201 having
+    /// stored the row under a Mongo-generated `_id` while echoing the operation back as the
+    /// `objectId`. parse-rust refuses with `INVALID_JSON`.
+    ///
+    /// Pinned here rather than in Gate E, which may hold only assertions that pass against both
+    /// servers, and this one does not.
+    #[test]
+    fn a_delete_operation_as_an_object_id_is_refused_with_invalid_json() {
+        let mut b = body(r#"{"objectId":{"__op":"Delete"},"username":"u"}"#);
+        let e = ensure_user_identity_and_acl(&mut b).expect_err("Delete op");
+        assert_eq!(e.code, ErrorCode::InvalidJson);
+        assert_eq!(e.message, "objectId is an invalid field name.");
+    }
+
+    /// The other side of that test, and the reason it is truthiness rather than presence: an empty
+    /// string and a `null` are falsy, so upstream replaces them with a generated id exactly as it
+    /// replaces an absent one.
+    #[test]
+    fn a_falsy_object_id_is_still_replaced_with_a_generated_one() {
+        for literal in [
+            r#"{"objectId":"","username":"u"}"#,
+            r#"{"objectId":null,"username":"u"}"#,
+            r#"{"username":"u"}"#,
+        ] {
+            let mut b = body(literal);
+            let id = ensure_user_identity_and_acl(&mut b).expect(literal);
+            assert_eq!(id.len(), 10, "{literal} produced {id}");
+        }
     }
 
     /// An update must not acquire an ACL or an objectId it did not ask for.

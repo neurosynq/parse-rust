@@ -70,6 +70,7 @@ a real parse-server and cannot run:
 
 - Gate B, data fidelity, which boots one on the same database.
 - Gate D, shared auth state, likewise.
+- Gate E, stock configuration, which boots four servers of its own.
 - The upstream half of Gate C, which is the half that makes it a comparison rather than a
   self-check. CI runs the parse-rust half only.
 - The differentials that compare against upstream's own modules: bcrypt interop, the
@@ -87,16 +88,23 @@ bcrypt interop, the Parse/BSON transform and the `_SCHEMA` type strings are all 
 actual parse-server behavior rather than against expectations someone typed in. More than one bug
 in this codebase was found that way and would not have been found otherwise.
 
-The four acceptance gates drive the whole flow through the unmodified Parse SDK. Gate A is the
+Four of the five acceptance gates drive the whole flow through the unmodified Parse SDK. **Gate E
+is the exception and has to be**: it selects the socket's source address per request, which the SDK
+gives no way to do, so it speaks raw `node:http`. Gate A is the
 signup-to-logout flow; Gate B compares stored BSON types against a real parse-server on the same
 database; Gate C replays the authorization model against both servers and requires them to agree
 assertion for assertion; Gate D puts both servers on one database and checks that sessions, roles
-and `_SCHEMA` documents cross. If you change behavior a client can observe, a gate should notice.
+and `_SCHEMA` documents cross; Gate E boots its own servers at two configurations and from two
+source addresses, because the decisions it covers depend on both. If you change behavior a client
+can observe, a gate should notice.
 
-Two rules they live by, both of them scars. **Assert that a caller can see its own data before
-asserting it cannot see anyone else's**, or a server that hides everything passes. And **each gate
+Three rules they live by, all of them scars. **Assert that a caller can see its own data before
+asserting it cannot see anyone else's**, or a server that hides everything passes. **Each gate
 carries a floor on how many assertions it executed**, because a runner that finds nothing exits
-zero. Raise a floor when you add assertions; never lower one to make a run pass.
+zero. And **a floor covering more than one subject must be per subject**: Gate E's first version had
+one floor of 44 over 60 assertions split 16 and 44, so deleting its entire master-key half left
+exactly 44 and reported green. Raise a count when you add assertions; never lower one to make a run
+pass.
 
 **Never bind a fixed port in a test.** Bind `0` and read back the address. Test batteries get run
 in parallel, so a fixed port collides with another copy of itself, and the failure looks like
