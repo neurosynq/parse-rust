@@ -597,7 +597,12 @@ impl StorageAdapter for FakeStorage {
         Ok(serde_json::json!({ "fake": verbosity.as_str() }))
     }
 
-    async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
+    async fn count(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        _options: &parse_rust_storage::CountOptions,
+    ) -> Result<u64, ParseError> {
         let inner = self.locked()?;
         let empty = Vec::new();
         let rows = inner.rows.get(&schema.class_name).unwrap_or(&empty);

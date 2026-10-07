@@ -80,10 +80,10 @@ const EXPECTED = {
   'default ACL': 104,
   'user identity': 40,
   'custom objectId': 20,
-  'I1 explain': 26,
+  'I1 explain': 30,
   'I2 lockout': 18,
   'I3 installation': 16,
-  'I4 limit': 12,
+  'I4 limit': 20,
   'I5-6 user ACL refusals': 24,
   'I7 ACL arrays': 16,
   'I8 permission order': 4,
@@ -821,6 +821,17 @@ async function gateI1Explain(servers) {
       path: `/classes/${fresh}?explain=true&where=${where}`, from: 'loopback', headers: master(),
     });
     eq(`${who}: explaining a first $text search answers 200`, textExplain.status, 200);
+
+    const badPoint = encodeURIComponent(JSON.stringify({ location: { $geoWithin: { $polygon: [
+      { __type: 'GeoPoint', latitude: 100, longitude: 0 },
+      { __type: 'GeoPoint', latitude: 0, longitude: 1 },
+      { __type: 'GeoPoint', latitude: 1, longitude: 1 },
+    ] } } }));
+    // An invalid point is thrown while the query is built, before the read path's sanitizing
+    // `.catch` exists upstream, so it is the bare 500 rather than the find's sanitized one.
+    const geo = await request(server, { path: `/classes/${cls}?where=${badPoint}`, from: 'loopback' });
+    eq(`${who}: an out-of-range polygon point is a 500`, geo.status, 500);
+    eq(`${who}: with the bare internal error`, J(geo.body), J({ code: 1, message: 'Internal server error.' }));
   }
 }
 
@@ -917,6 +928,20 @@ async function gateI4Limit(servers) {
       const r = await request(server, { path: `/classes/${cls}?limit=${encodeURIComponent(limit)}`, from: 'loopback' });
       counts[server.kind][limit] = r.body?.results?.length;
     }
+    // A count carries the request's `hint` to the database as the find does
+    // (`DatabaseController.js:1525-1535`). An index that does not exist is the database's refusal,
+    // which upstream's count path leaves uncaught; an index that does, counts. parse-rust dropped
+    // the hint on a count and answered 200 to both.
+    const countWith = hint => request(server, {
+      path: `/classes/${cls}?limit=0&count=1&hint=${hint}&where=${encodeURIComponent('{"n":{"$gte":0}}')}`,
+      from: 'loopback', headers: master(),
+    });
+    const missing = await countWith('nosuch');
+    eq(`${server.kind}: a count hinting a missing index is refused`, missing.status, 500);
+    eq(`${server.kind}: with the generic internal error`, J(missing.body), J({ code: 1, message: 'Internal server error.' }));
+    const present = await countWith('_id_');
+    eq(`${server.kind}: a count hinting an existing index answers`, present.status, 200);
+    eq(`${server.kind}: and counts`, present.body?.count, 3);
   }
   // `[[2]]` is `Number(String([[2]]))`, which is 2: a nested array joins recursively.
   for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3], ['[[2]]', 2]]) {

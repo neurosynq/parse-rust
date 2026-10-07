@@ -6,8 +6,12 @@
 //! its body. One type for both, built at each entry point, so the readers below cannot know or
 //! care which happened.
 //!
-//! Values are held as strings, which is the query-string form. A caller that starts from JSON
-//! re-encodes objects and arrays as JSON text, which is what a real query string carries.
+//! Each value remembers where it came from, because upstream decodes the two differently.
+//! `JSONFromQuery` parses a query value as JSON and falls back to the raw string
+//! (`ClassesRouter.js:148-158`); a body value is already JSON and is read as it is. So a query
+//! `comment=123` is the number 123 and a body `{"comment":"123"}` stays a string. Readers that take
+//! text (`where`, `order`, `keys`, `include`) see a body object or array re-encoded as JSON text,
+//! which is what a real query string carries.
 
 use std::collections::HashMap;
 
@@ -18,7 +22,32 @@ use serde_json::Value as Json;
 
 /// Parameters for one request.
 #[derive(Debug, Clone, Default)]
-pub struct Params(HashMap<String, String>);
+pub struct Params(HashMap<String, Param>);
+
+/// One parameter, as the text readers take and, for a body value, the JSON it arrived as.
+#[derive(Debug, Clone)]
+struct Param {
+    text: String,
+    /// `Some` for a body value, which upstream reads without `JSONFromQuery`.
+    json: Option<Json>,
+}
+
+impl Param {
+    fn query(text: String) -> Self {
+        Self { text, json: None }
+    }
+
+    fn body(value: Json) -> Self {
+        let text = match &value {
+            Json::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        Self {
+            text,
+            json: Some(value),
+        }
+    }
+}
 
 /// `allowConstraints` (`ClassesRouter.js:161-178`). Anything else is `INVALID_QUERY`.
 const FIND_KEYS: [&str; 16] = [
@@ -78,30 +107,34 @@ impl Default for LimitPolicy {
 
 impl Params {
     pub fn from_map(map: HashMap<String, String>) -> Self {
-        Self(map)
+        Self(map.into_iter().map(|(k, v)| (k, Param::query(v))).collect())
     }
 
-    /// Build from a JSON object, which is how a `/batch` sub-request carries its parameters.
-    ///
-    /// Non-string values are re-encoded as JSON text, matching the query-string form. This is the
-    /// inverse of upstream's `JSONFromQuery` (`ClassesRouter.js:148-158`), which parses each query
-    /// value as JSON and falls back to the raw string.
+    /// Build from a JSON object: a `/batch` sub-request's body, or the body of an SDK read sent
+    /// as `POST` with `_method: "GET"`. Values keep their JSON types.
     pub fn from_json(value: Option<&Json>) -> Self {
         let mut map = HashMap::new();
         if let Some(Json::Object(object)) = value {
             for (key, value) in object {
-                let text = match value {
-                    Json::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                map.insert(key.clone(), text);
+                map.insert(key.clone(), Param::body(value.clone()));
             }
         }
         Self(map)
     }
 
+    /// A query string over a body, as `handleFind` merges them:
+    /// `Object.assign(req.body, JSONFromQuery(req.query))` (`ClassesRouter.js:23`), so a key in
+    /// both takes the query's value.
+    pub fn merged(query: HashMap<String, String>, body: Option<&Json>) -> Self {
+        let mut params = Self::from_json(body);
+        params
+            .0
+            .extend(query.into_iter().map(|(k, v)| (k, Param::query(v))));
+        params
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
+        self.0.get(key).map(|p| p.text.as_str())
     }
 
     /// `optionsFromBody`'s key check (`ClassesRouter.js:180-184`).
@@ -157,12 +190,18 @@ impl Params {
         self.js_value("count").is_some_and(|v| js_truthy(&v))
     }
 
-    /// A parameter as `JSONFromQuery` leaves it: parsed as JSON when it parses, the raw string
-    /// otherwise (`ClassesRouter.js:148-158`). Every option below is read from this, because
-    /// upstream's tests are JavaScript truthiness and `Number()` over exactly this value.
+    /// A parameter as upstream's options code sees it. A query value is what `JSONFromQuery`
+    /// leaves: parsed as JSON when it parses, the raw string otherwise (`ClassesRouter.js:148-158`).
+    /// A body value is its own JSON, never parsed a second time. Every option below is read from
+    /// this, because upstream's tests are JavaScript truthiness and `Number()` over exactly this
+    /// value.
     fn js_value(&self, key: &str) -> Option<Json> {
-        let raw = self.get(key)?;
-        Some(serde_json::from_str(raw).unwrap_or_else(|_| Json::String(raw.to_string())))
+        let param = self.0.get(key)?;
+        if let Some(json) = &param.json {
+            return Some(json.clone());
+        }
+        let raw = &param.text;
+        Some(serde_json::from_str(raw).unwrap_or_else(|_| Json::String(raw.clone())))
     }
 
     /// Whether the request asks for an explain at all: `if (body.explain)`.
@@ -470,6 +509,48 @@ mod tests {
                 .limit,
             Some(5)
         );
+    }
+
+    /// A body value is JSON already. Reading it through `JSONFromQuery` a second time turned
+    /// strings that look like JSON into other types.
+    #[test]
+    fn a_body_value_is_not_parsed_a_second_time() {
+        let body = |raw: &str| {
+            let value: Json = serde_json::from_str(raw).expect("literal");
+            Params::from_json(Some(&value))
+        };
+        let options = |p: &Params| p.find_options(&LimitPolicy::default()).expect("options");
+
+        assert_eq!(
+            options(&body(r#"{"comment":"123"}"#)).comment.as_deref(),
+            Some("123")
+        );
+        let e = body(r#"{"explain":"true"}"#).explain().expect_err("string");
+        assert_eq!(e.message, "Invalid value for explain");
+        assert_eq!(
+            body(r#"{"explain":true}"#).explain().expect("bool"),
+            Some(ExplainVerbosity::AllPlansExecution)
+        );
+        // Non-empty strings, so truthy.
+        assert!(body(r#"{"count":"0"}"#).wants_count());
+        assert!(body(r#"{"explain":"false"}"#).js_explain_requested());
+        assert!(matches!(
+            options(&body(r#"{"hint":"123"}"#)).hint,
+            Some(Hint::Name(ref n)) if n == "123"
+        ));
+        // A query value of the same text is still parsed.
+        assert!(!params(&[("count", "0")]).wants_count());
+    }
+
+    #[test]
+    fn the_query_string_wins_over_the_body() {
+        let body: Json = serde_json::from_str(r#"{"limit":5,"skip":2}"#).expect("literal");
+        let query = HashMap::from([("limit".to_string(), "7".to_string())]);
+        let o = Params::merged(query, Some(&body))
+            .find_options(&LimitPolicy::default())
+            .expect("options");
+        assert_eq!(o.limit, Some(7));
+        assert_eq!(o.skip, Some(2));
     }
 
     #[test]

@@ -70,6 +70,12 @@ pub async fn find_core(
     let where_ = params.parse_where()?;
     let options = params.find_options(&state.config().limit_policy())?;
     let wants_count = params.wants_count();
+    // The count beside the results takes the same `hint` and `comment` the find does
+    // (`DatabaseController.js:1525-1535`).
+    let count_options = parse_rust_storage::CountOptions {
+        hint: options.hint.clone(),
+        comment: options.comment.clone(),
+    };
     let ctx = rc.ctx(state.storage());
 
     // **`explain` ships with its authorization boundary.** A caller without the master key is
@@ -93,7 +99,7 @@ pub async fn find_core(
         json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() })
     };
     if wants_count {
-        let n = parse_rust_rest::count(&ctx, class_name, where_).await?;
+        let n = parse_rust_rest::count(&ctx, class_name, where_, &count_options).await?;
         body["count"] = json!(n);
     }
     Ok(body)
@@ -240,6 +246,7 @@ async fn update_inner(
         crate::routes::users::authorize_user_update(state, rc, authority, object_id, &body).await?;
         crate::routes::users::require_update_credentials(&body)?;
         crate::routes::users::enforce_user_update_policy(&body, rc, authority, object_id)?;
+        crate::routes::users::owner_update_gate(state, rc, authority, object_id)?;
         crate::routes::users::validate_user_identity(state, rc, &body, object_id).await?;
         crate::routes::users::force_owner_into_acl(
             &mut body,

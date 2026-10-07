@@ -131,6 +131,12 @@ pub struct ParseErrorInfo {
     /// `err.userInfo.duplicated_field` (`MongoStorageAdapter.js:584`). The field whose unique
     /// index a write collided on.
     pub duplicated_field: Option<String>,
+    /// The adapter raised this while building the query, before it had a database call to
+    /// await. Upstream's adapters do that work synchronously (`transformWhere` in
+    /// `MongoStorageAdapter.js:730`), so the throw escapes before `DatabaseController.find`
+    /// attaches the `.catch` that rewrites storage failures (`DatabaseController.js:1583-1596`).
+    /// [`ParseError::before_query`] sets it, and the read path leaves such an error as it is.
+    pub before_query: bool,
 }
 
 /// A Parse error: a code plus a message, plus how much of it may be seen.
@@ -184,6 +190,13 @@ impl ParseError {
     #[must_use]
     pub fn with_duplicated_field(mut self, field: impl Into<String>) -> Self {
         self.info.duplicated_field = Some(field.into());
+        self
+    }
+
+    /// Mark an error as raised before the database was asked. See [`ParseErrorInfo::before_query`].
+    #[must_use]
+    pub fn before_query(mut self) -> Self {
+        self.info.before_query = true;
         self
     }
 

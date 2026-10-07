@@ -18,7 +18,7 @@ use axum::Json;
 use serde_json::Value as Json_;
 
 use crate::auth::Authority;
-use crate::body_credentials::MethodOverride;
+use crate::body_credentials::{BodyParams, MethodOverride};
 use crate::params::Params;
 use crate::response::{HttpError, ParseErrorResponse};
 use crate::routes::dispatch::{self, Incoming, Route, RouteError};
@@ -88,8 +88,27 @@ fn effective_method(
     }
 }
 
-fn params(query: HashMap<String, String>) -> Params {
-    Params::from_map(query)
+/// A read's parameters: the query string over whatever the body carried as [`BodyParams`],
+/// merged as upstream merges them. One extractor for both, so a handler cannot take one and
+/// forget the other.
+pub struct ReadParams(Params);
+
+#[axum::async_trait]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ReadParams {
+    type Rejection = axum::extract::rejection::QueryRejection;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let Query(query) =
+            Query::<HashMap<String, String>>::from_request_parts(parts, state).await?;
+        let body = parts
+            .extensions
+            .get::<BodyParams>()
+            .map(|BodyParams(map)| Json_::Object(map.clone()));
+        Ok(Self(Params::merged(query, body.as_ref())))
+    }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -194,7 +213,7 @@ pub async fn classes_collection(
     State(state): State<AppState>,
     authority: Authority,
     Path(class_name): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     body: Option<Json<Json_>>,
@@ -207,7 +226,7 @@ pub async fn classes_collection(
         Incoming {
             method,
             route: Route::Classes { class_name },
-            params: params(query),
+            params,
             body: body.map(|b| b.0),
             path,
         },
@@ -219,7 +238,7 @@ pub async fn classes_object(
     State(state): State<AppState>,
     authority: Authority,
     Path((class_name, object_id)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     body: Option<Json<Json_>>,
@@ -238,7 +257,7 @@ pub async fn classes_object(
                 class_name,
                 object_id,
             },
-            params: params(query),
+            params,
             body: body.map(|b| b.0),
             path,
         },
@@ -249,7 +268,7 @@ pub async fn classes_object(
 pub async fn roles_collection(
     State(state): State<AppState>,
     authority: Authority,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     body: Option<Json<Json_>>,
@@ -261,7 +280,7 @@ pub async fn roles_collection(
         Incoming {
             method,
             route: Route::Roles,
-            params: params(query),
+            params,
             body: body.map(|b| b.0),
             path: "/roles".to_string(),
         },
@@ -273,7 +292,7 @@ pub async fn roles_object(
     State(state): State<AppState>,
     authority: Authority,
     Path(object_id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     body: Option<Json<Json_>>,
@@ -286,7 +305,7 @@ pub async fn roles_object(
         Incoming {
             method,
             route: Route::RoleObject { object_id },
-            params: params(query),
+            params,
             body: body.map(|b| b.0),
             path,
         },
@@ -297,7 +316,7 @@ pub async fn roles_object(
 pub async fn sessions_collection(
     State(state): State<AppState>,
     authority: Authority,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
 ) -> Response {
@@ -308,7 +327,7 @@ pub async fn sessions_collection(
         Incoming {
             method,
             route: Route::Sessions,
-            params: params(query),
+            params,
             body: None,
             path: "/sessions".to_string(),
         },
@@ -341,7 +360,7 @@ pub async fn sessions_object(
     State(state): State<AppState>,
     authority: Authority,
     Path(object_id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
 ) -> Response {
@@ -353,7 +372,7 @@ pub async fn sessions_object(
         Incoming {
             method,
             route: Route::SessionObject { object_id },
-            params: params(query),
+            params,
             body: None,
             path,
         },

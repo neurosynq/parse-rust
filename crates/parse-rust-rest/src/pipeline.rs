@@ -176,11 +176,40 @@ pub async fn find<S: StorageAdapter>(
     // **`limit=0` asks the database nothing, and so asks no permission either**
     // (`RestQuery.js:864-867`): `runFind` answers an empty result before `DatabaseController.find`,
     // where the CLP gate lives. It is what `query.count()` sends, `limit=0&count=1`, so a class
-    // whose CLP grants `count` and not `find` is countable. The class-creation check runs
-    // earlier upstream, in `buildRestWhere`, and still applies.
+    // whose CLP grants `count` and not `find` is countable.
+    //
+    // What runs before `runFind` still runs, in upstream's order: the constructor's class
+    // security and `_Session` refusal (`RestQuery.js:54`, `:118-120`), the class-creation check
+    // in `buildRestWhere`, and `denyProtectedFields` (`RestQuery.js:287`). Skipping them let
+    // `GET /classes/_Session?limit=0` with no session answer 200 where upstream answers 209.
     if options.limit == Some(0) {
+        let master = ctx.scope.is_master();
+        crate::class_security::enforce_class_security(
+            class_name,
+            master,
+            ReadMethod::Find.as_str(),
+            ctx.options.error_detail,
+        )?;
+        let mut where_ = where_;
+        narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
         if !ctx.snapshot.contains(class_name) {
             validate_client_class_creation(ctx, class_name, false)?;
+        }
+        if !master {
+            let protected = plan_protected_fields(
+                class_name,
+                ctx.snapshot.clp(class_name),
+                ctx.scope,
+                where_.pinned_object_id(),
+                ctx.options,
+            );
+            deny_protected_fields(
+                protected.as_ref(),
+                class_name,
+                &where_,
+                &options.order,
+                ctx.options.error_detail,
+            )?;
         }
         return Ok(Vec::new());
     }
@@ -233,6 +262,7 @@ pub async fn count<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     where_: ParsedWhere,
+    options: &parse_rust_storage::CountOptions,
 ) -> Result<u64, ParseError> {
     let schema = ctx.snapshot.get_or_default(class_name);
     // A count is served by the find route, so the class-security method is `find` (`rest.js:136`).
@@ -260,7 +290,7 @@ pub async fn count<S: StorageAdapter>(
     if !ctx.snapshot.contains(class_name) {
         return Ok(0);
     }
-    ctx.storage.count(&schema, &query).await
+    ctx.storage.count(&schema, &query, options).await
 }
 
 /// `RestQuery.Method` (`RestQuery.js:80-83`): which read this is, as opposed to what the CLP gate
@@ -539,7 +569,8 @@ fn find_core<'a, S: StorageAdapter>(
 
         let query_options = QueryOptions {
             limit: options.limit,
-            skip: storage_skip(options.skip, ctx.options.error_detail)?,
+            skip: storage_skip(options.skip)
+                .map_err(|e| find_failure(e, ctx.options.error_detail))?,
             order,
             keys: projection(&schema, &options),
             case_insensitive: false,
@@ -580,8 +611,12 @@ fn find_core<'a, S: StorageAdapter>(
 /// a find the database refuses, a negative `skip` or a `hint` naming no index, answers
 /// `{"code":1,"error":"An internal server error occurred"}`, not the bare
 /// `{"code":1,"message":"Internal server error."}` a thrown `Error` gets elsewhere.
+///
+/// An error the adapter raised while building the query is left alone: upstream throws it
+/// synchronously, before that `.catch` is attached, so it answers the bare 500. A `$geoWithin`
+/// point with latitude 100 is the case that shows the difference.
 fn find_failure(e: ParseError, detail: parse_rust_core::ErrorDetail) -> ParseError {
-    if e.origin != parse_rust_core::ErrorOrigin::Internal {
+    if e.origin != parse_rust_core::ErrorOrigin::Internal || e.info.before_query {
         return e;
     }
     ParseError::sanitized(
@@ -592,19 +627,16 @@ fn find_failure(e: ParseError, detail: parse_rust_core::ErrorDetail) -> ParseErr
     )
 }
 
-/// A skip as storage takes it. A negative one is the database's refusal upstream, so it is reported
-/// the way [`find_failure`] reports any other: measured at the pin, `skip=-1` answers
+/// A skip as storage takes it. A negative one is the database's refusal upstream, so it is a bare
+/// internal error here and the caller reports it as it reports any other storage failure: on a
+/// find, through [`find_failure`], which measured at the pin is `skip=-1` answering
 /// `{"code":1,"error":"An internal server error occurred"}`.
-fn storage_skip(
-    skip: Option<i64>,
-    detail: parse_rust_core::ErrorDetail,
-) -> Result<Option<u32>, ParseError> {
+fn storage_skip(skip: Option<i64>) -> Result<Option<u32>, ParseError> {
     match skip {
         None => Ok(None),
-        Some(n) if n < 0 => Err(find_failure(
-            ParseError::internal(format!("skip must be non-negative, got {n}")),
-            detail,
-        )),
+        Some(n) if n < 0 => Err(ParseError::internal(format!(
+            "skip must be non-negative, got {n}"
+        ))),
         Some(n) => Ok(Some(u32::try_from(n).unwrap_or(u32::MAX))),
     }
 }
@@ -666,9 +698,13 @@ pub async fn explain<S: StorageAdapter>(
     if options.limit == Some(0) {
         return Ok(serde_json::Value::Array(Vec::new()));
     }
+    // **No [`find_failure`] here.** Upstream's explain branch returns `this.adapter.find(...)`
+    // with no `.catch` (`DatabaseController.js:1561`); the sanitizing one belongs to the
+    // non-explain branch beside it. So a refused explain, a `hint` naming no index or a negative
+    // `skip`, answers the bare `{"code":1,"message":"Internal server error."}`.
     let query_options = QueryOptions {
         limit: options.limit,
-        skip: storage_skip(options.skip, ctx.options.error_detail)?,
+        skip: storage_skip(options.skip)?,
         order,
         keys: projection(&schema, &options),
         case_insensitive: false,
@@ -678,7 +714,6 @@ pub async fn explain<S: StorageAdapter>(
     ctx.storage
         .explain(&schema, &query, &query_options, verbosity)
         .await
-        .map_err(|e| find_failure(e, ctx.options.error_detail))
 }
 
 /// `keys` and `excludeKeys` folded into one positive projection.
@@ -1293,7 +1328,16 @@ pub async fn authorize_update<S: StorageAdapter>(
     let schema = ctx.snapshot.resolve_for_write(class_name);
     update_gate(ctx, class_name)?;
     let query = update_query(ctx, &schema, object_id, false)?;
-    if ctx.storage.count(&schema, &query).await? == 0 {
+    if ctx
+        .storage
+        .count(
+            &schema,
+            &query,
+            &parse_rust_storage::CountOptions::default(),
+        )
+        .await?
+        == 0
+    {
         return Err(object_not_found());
     }
     Ok(())
@@ -1961,7 +2005,7 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default())
+            count(&ctx, "Post", ParsedWhere::default(), &Default::default())
                 .await
                 .expect("count resolves"),
             0
@@ -2005,7 +2049,7 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default())
+            count(&ctx, "Post", ParsedWhere::default(), &Default::default())
                 .await
                 .expect("count"),
             1
@@ -2145,6 +2189,45 @@ mod tests {
         )
         .await
         .is_ok());
+    }
+
+    /// `limit=0` skips the database, not the checks upstream runs before `runFind`.
+    #[tokio::test]
+    async fn a_zero_limit_still_runs_the_checks_before_the_find() {
+        let storage = protected_storage();
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let zero = FindOptions {
+            limit: Some(0),
+            ..Default::default()
+        };
+
+        let e = find(&ctx, "_Session", ParsedWhere::default(), zero.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidSessionToken);
+
+        let e = find(&ctx, "Post", where_(r#"{"secret":"s"}"#), zero.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+
+        let sorted = FindOptions {
+            order: vec![("secret".to_string(), SortDirection::Ascending)],
+            ..zero.clone()
+        };
+        let e = find(&ctx, "Post", ParsedWhere::default(), sorted)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+
+        // Nothing to refuse: still empty, and still no database call.
+        assert!(find(&ctx, "Post", ParsedWhere::default(), zero)
+            .await
+            .expect("empty")
+            .is_empty());
     }
 
     // -----------------------------------------------------------------------------------------

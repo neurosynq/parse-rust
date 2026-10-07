@@ -1339,3 +1339,56 @@ async fn a_raw_default_value_is_still_validated() {
     .await;
     assert_eq!(ok.status, 200, "{}", ok.raw);
 }
+
+/// An SDK read carries its parameters in the body, already JSON, and they are not parsed a second
+/// time. A query-string value of the same name wins (`ClassesRouter.js:23`).
+#[tokio::test]
+#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+async fn sdk_body_parameters_keep_their_json_types() {
+    let server = common::boot().await;
+    let host = &server.host;
+    for title in ["a", "b", "c"] {
+        let r = post(
+            host,
+            "/classes/BodyParams",
+            &As::master(),
+            &json!({ "title": title }),
+        )
+        .await;
+        assert_eq!(r.status, 201, "{}", r.raw);
+    }
+
+    // The string "true" is not the boolean upstream's explain validation accepts.
+    let explained = raw_post(
+        host,
+        "/classes/BodyParams",
+        &json!({
+            "_ApplicationId": common::APP_ID,
+            "_MasterKey": common::MASTER_KEY,
+            "_method": "GET",
+            "explain": "true",
+        }),
+    )
+    .await;
+    assert_eq!(explained.code(), Some(102), "{}", explained.raw);
+    assert_eq!(explained.error(), "Invalid value for explain");
+
+    let limited = raw_post(
+        host,
+        "/classes/BodyParams?limit=1",
+        &json!({
+            "_ApplicationId": common::APP_ID,
+            "_JavaScriptKey": common::JS_KEY,
+            "_method": "GET",
+            "limit": 2,
+        }),
+    )
+    .await;
+    assert_eq!(limited.status, 200, "{}", limited.raw);
+    assert_eq!(
+        limited.body["results"].as_array().map(Vec::len),
+        Some(1),
+        "the query string's limit wins: {}",
+        limited.raw
+    );
+}

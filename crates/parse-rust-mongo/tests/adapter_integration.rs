@@ -14,7 +14,8 @@ use parse_rust_mongo::MongoAdapter;
 use parse_rust_schema::default_schema;
 use parse_rust_storage::{
     join_schema, join_table_name, AddFieldOutcome, ClassSchema, Clause, Comparison, Constraint,
-    FieldType, Query, QueryOptions, SortDirection, StorageAdapter, Update, UpdateValue,
+    CountOptions, FieldType, Query, QueryOptions, SortDirection, StorageAdapter, Update,
+    UpdateValue,
 };
 
 const URI: &str = "mongodb://127.0.0.1:27017";
@@ -253,7 +254,9 @@ async fn regex_and_all_reach_the_server_in_a_shape_it_accepts() {
         },
     }]);
     assert_eq!(
-        a.count(&schema, &regex).await.expect("count"),
+        a.count(&schema, &regex, &CountOptions::default())
+            .await
+            .expect("count"),
         1,
         "$options must reach the server, or the case-insensitive match fails"
     );
@@ -265,7 +268,12 @@ async fn regex_and_all_reach_the_server_in_a_shape_it_accepts() {
             ParseValue::String("y".into()),
         ]),
     }]);
-    assert_eq!(a.count(&schema, &all).await.expect("count"), 1);
+    assert_eq!(
+        a.count(&schema, &all, &CountOptions::default())
+            .await
+            .expect("count"),
+        1
+    );
 
     drop_db(&db).await;
 }
@@ -358,7 +366,12 @@ async fn update_and_delete_report_matched_counts() {
         .await
         .expect("delete");
     assert_eq!(deleted, 1);
-    assert_eq!(a.count(&schema, &Query::new()).await.expect("count"), 0);
+    assert_eq!(
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
+        0
+    );
 
     drop_db(&db).await;
 }
@@ -644,7 +657,9 @@ async fn upsert_one_is_idempotent_and_writes_no_schema() {
     a.upsert_one(&schema, &filter, &doc).await.expect("second");
 
     assert_eq!(
-        a.count(&schema, &Query::new()).await.expect("count"),
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
         1,
         "a membership added twice is one row"
     );
@@ -701,9 +716,16 @@ async fn delete_class_removes_rows_schema_and_join_collections() {
 
     a.delete_class(&schema).await.expect("delete_class");
 
-    assert_eq!(a.count(&schema, &Query::new()).await.expect("count"), 0);
     assert_eq!(
-        a.count(&join, &Query::new()).await.expect("count"),
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
+        0
+    );
+    assert_eq!(
+        a.count(&join, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
         0,
         "a Relation's join collection goes with the class"
     );

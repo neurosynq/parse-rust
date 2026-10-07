@@ -11,8 +11,8 @@ use parse_rust_schema::storage_format::{
     field_type_to_storage, storage_to_field_type, NON_FIELD_KEYS,
 };
 use parse_rust_storage::{
-    join_table_name, AddFieldOutcome, ClassSchema, ExplainVerbosity, FieldType, Hint, Query,
-    QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update, WriteResult,
+    join_table_name, AddFieldOutcome, ClassSchema, CountOptions, ExplainVerbosity, FieldType, Hint,
+    Query, QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update, WriteResult,
 };
 
 use crate::transform::{
@@ -1047,7 +1047,10 @@ impl StorageAdapter for MongoAdapter {
         if options.limit == Some(0) {
             return Ok(Vec::new());
         }
-        let filter = transform_where(schema, query)?;
+        // Built before anything is awaited, as upstream's synchronous `transformWhere` is
+        // (`MongoStorageAdapter.js:728-729`), so an invalid point is raised before the read path's
+        // sanitizing `.catch` exists. See `ParseErrorInfo::before_query`.
+        let filter = transform_where(schema, query).map_err(ParseError::before_query)?;
         self.create_text_indexes_if_needed(schema, query).await?;
         let docs = match self.raw_find(schema, filter.clone(), options).await {
             Ok(docs) => docs,
@@ -1141,13 +1144,27 @@ impl StorageAdapter for MongoAdapter {
         Ok(Bson::Document(explained).into_relaxed_extjson())
     }
 
-    async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
+    async fn count(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        options: &CountOptions,
+    ) -> Result<u64, ParseError> {
         let filter = crate::transform::transform_where_for_count(schema, query)?;
-        self.db
-            .collection::<Document>(&schema.class_name)
-            .count_documents(filter)
-            .await
-            .map_err(mongo_err)
+        let collection = self.db.collection::<Document>(&schema.class_name);
+        // An empty filter is `estimatedDocumentCount` upstream, which takes neither option
+        // (`MongoCollection.js:180-187`); anything else passes both to `countDocuments`.
+        if filter.is_empty() {
+            return collection.count_documents(filter).await.map_err(mongo_err);
+        }
+        let mut action = collection.count_documents(filter);
+        if let Some(hint) = &options.hint {
+            action = action.hint(hint_doc(hint));
+        }
+        if let Some(comment) = &options.comment {
+            action = action.comment(Bson::String(comment.clone()));
+        }
+        action.await.map_err(mongo_err)
     }
 
     async fn update(

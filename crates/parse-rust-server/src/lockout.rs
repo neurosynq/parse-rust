@@ -83,7 +83,15 @@ pub async fn handle_login_attempt<S: StorageAdapter>(
         field: "_failed_login_count".into(),
         comparison: Comparison::GreaterThanOrEqual(threshold.clone()),
     });
-    if storage.count(schema, &locked).await? > 0 {
+    if storage
+        .count(
+            schema,
+            &locked,
+            &parse_rust_storage::CountOptions::default(),
+        )
+        .await?
+        > 0
+    {
         return Err(policy.locked());
     }
 

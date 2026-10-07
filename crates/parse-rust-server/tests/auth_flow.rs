@@ -2010,3 +2010,44 @@ async fn deleting_a_username_is_refused_and_deleting_an_email_is_not() {
         allowed.raw
     );
 }
+
+/// An owner's credential checks answer before the class-level `update` gate.
+///
+/// Upstream's `authorizeUserUpdate` returns early for the owner, and the gate runs later in
+/// `validateWritePermission` (`RestWrite.js:113-134`). So with `update` closed, an empty username
+/// is still 200 `bad or missing username`, and a valid change is 119.
+#[tokio::test]
+#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+async fn an_owner_update_checks_credentials_before_the_class_gate() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let (object_id, token) = signup(host, "gate_order", "pw").await;
+
+    let clp = put(
+        host,
+        "/schemas/_User",
+        &As::master(),
+        &json!({
+            "className": "_User",
+            "classLevelPermissions": {
+                "find": {"*": true}, "get": {"*": true}, "create": {"*": true}, "update": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(clp.status, 200, "{}", clp.raw);
+
+    let path = format!("/classes/_User/{object_id}");
+    let empty = put(host, &path, &As::user(&token), &json!({ "username": "" })).await;
+    assert_eq!(empty.code(), Some(200), "{}", empty.raw);
+    assert_eq!(empty.error(), "bad or missing username");
+
+    let renamed = put(
+        host,
+        &path,
+        &As::user(&token),
+        &json!({ "username": "renamed" }),
+    )
+    .await;
+    assert_eq!(renamed.code(), Some(119), "{}", renamed.raw);
+}

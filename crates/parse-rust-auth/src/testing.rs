@@ -343,7 +343,12 @@ impl StorageAdapter for FakeStorage {
         Ok(serde_json::json!({ "fake": verbosity.as_str() }))
     }
 
-    async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
+    async fn count(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        _options: &parse_rust_storage::CountOptions,
+    ) -> Result<u64, ParseError> {
         let state = self.lock();
         Ok(state
             .rows

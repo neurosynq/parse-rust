@@ -372,10 +372,19 @@ pub struct QueryOptions {
     /// identities upstream treats as duplicates. It does not fold diacritics: `Café` and `Cafe`
     /// remain different identities under it.
     pub case_insensitive: bool,
-    /// `hint`, handed to the driver untouched (`MongoStorageAdapter.js:766`). An index that does
+    /// `hint`, handed to the driver untouched (`MongoStorageAdapter.js:767`). An index that does
     /// not exist is the driver's error, not a validation here.
     pub hint: Option<Hint>,
     /// `comment`, attached to the operation for the database's profiler and logs.
+    pub comment: Option<String>,
+}
+
+/// The options a count carries, which are the two upstream hands to `countDocuments`
+/// (`MongoStorageAdapter.js:888-910`, `MongoCollection.js:179-198`). A count has no sort, skip,
+/// limit or projection of its own.
+#[derive(Debug, Clone, Default)]
+pub struct CountOptions {
+    pub hint: Option<Hint>,
     pub comment: Option<String>,
 }
 

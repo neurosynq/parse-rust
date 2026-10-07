@@ -372,7 +372,14 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
         Some(schema) => schema,
         None => ClassSchema::new(class_name),
     };
-    let count = state.storage().count(&schema, &Query::new()).await?;
+    let count = state
+        .storage()
+        .count(
+            &schema,
+            &Query::new(),
+            &parse_rust_storage::CountOptions::default(),
+        )
+        .await?;
     if count > 0 {
         return Err(ParseError::new(
             ErrorCode::InvalidSchemaOperation,

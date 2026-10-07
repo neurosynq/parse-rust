@@ -932,9 +932,14 @@ pub async fn logout_core(state: &AppState, rc: &RequestContext) -> Result<Json, 
 /// [`validate_user_identity`] reads anything else.
 ///
 /// Order, as upstream's: no session refuses outright; a body `objectId` naming another row is not
-/// found; the owner passes the class-level `update` gate, which upstream runs before
-/// `transformUser` (`RestWrite.js:134`, `:144`); anybody else must be able to write the target,
-/// judged by the same query the update itself would run.
+/// found; the owner returns here; anybody else must be able to write the target, judged by the
+/// same query the update itself would run.
+///
+/// **The owner's class-level `update` gate is not here.** Upstream's `authorizeUserUpdate`
+/// returns early for the owner, so `validateAuthData` and `checkRestrictedFields` run before the
+/// gate does, in `validateWritePermission` (`RestWrite.js:113-134`). [`owner_update_gate`] runs it
+/// at that position. Running it here answered 119 to an owner sending `{"username":""}` under a
+/// CLP that denies `update`, where upstream answers 200 `bad or missing username`.
 pub(crate) async fn authorize_user_update(
     state: &AppState,
     rc: &RequestContext,
@@ -965,9 +970,25 @@ pub(crate) async fn authorize_user_update(
         }
     }
     if caller == object_id {
-        return parse_rust_rest::update_gate(&rc.ctx(state.storage()), USER_CLASS);
+        return Ok(());
     }
     parse_rust_rest::authorize_update(&rc.ctx(state.storage()), USER_CLASS, object_id).await
+}
+
+/// The class-level `update` gate for a caller updating their own row, at `validateWritePermission`'s
+/// position (`RestWrite.js:134`): after the credential and restricted-field checks, and before
+/// `transformUser` (`:144`), so it still precedes [`validate_user_identity`]'s reads of other rows.
+/// Every other caller already passed it inside [`authorize_user_update`].
+pub(crate) fn owner_update_gate(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    object_id: &str,
+) -> Result<(), ParseError> {
+    if authority.is_privileged() || rc.user_id.as_deref() != Some(object_id) {
+        return Ok(());
+    }
+    parse_rust_rest::update_gate(&rc.ctx(state.storage()), USER_CLASS)
 }
 
 /// `handleSessionMissingError` (`rest.js:320-331`): on `_User`, a non-privileged update or delete

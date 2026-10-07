@@ -30,6 +30,15 @@ use crate::auth::headers;
 #[derive(Debug, Clone)]
 pub struct MethodOverride(pub http::Method);
 
+/// The parameters a read carried in its body, still typed as the JSON they arrived as.
+///
+/// Kept apart from the query string rather than merged into it, because the two are decoded
+/// differently upstream: `JSONFromQuery` parses each query value as JSON, and a body value is
+/// already JSON (`ClassesRouter.js:23`, `:148-158`). Flattening a body string into the URL made a
+/// body `{"comment":"123"}` the number 123 and a body `{"explain":"true"}` the boolean `true`.
+#[derive(Debug, Clone, Default)]
+pub struct BodyParams(pub serde_json::Map<String, Json>);
+
 /// Body key to header name.
 const CREDENTIALS: [(&str, &str); 6] = [
     ("_ApplicationId", headers::APP_ID),
@@ -102,33 +111,13 @@ pub async fn extract(request: Request, next: Next) -> Response {
         parts.extensions.insert(MethodOverride(method));
     }
 
-    // 3. For a read, the remaining body keys are query parameters. Object and array values are
-    //    re-encoded as JSON text, which is the form they take in a real query string.
+    // 3. For a read, the remaining body keys are query parameters. They travel to the route as
+    //    an extension, typed, and the route merges them under the query string. See
+    //    [`BodyParams`].
     let effective = overridden.clone().unwrap_or_else(|| parts.method.clone());
     if effective == http::Method::GET || effective == http::Method::DELETE {
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for (k, v) in &map {
-            let value = match v {
-                Json::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            pairs.push((k.clone(), value));
-        }
-        if !pairs.is_empty() {
-            let existing = parts.uri.query().unwrap_or("").to_string();
-            let mut serializer = form_urlencoded::Serializer::new(String::new());
-            for (k, v) in pairs {
-                serializer.append_pair(&k, &v);
-            }
-            let merged = if existing.is_empty() {
-                serializer.finish()
-            } else {
-                format!("{existing}&{}", serializer.finish())
-            };
-            let path = parts.uri.path().to_string();
-            if let Ok(uri) = format!("{path}?{merged}").parse::<http::Uri>() {
-                parts.uri = uri;
-            }
+        if !map.is_empty() {
+            parts.extensions.insert(BodyParams(map));
         }
         // A GET carries no body.
         let trace = std::env::var("PARSE_RUST_TRACE").is_ok();

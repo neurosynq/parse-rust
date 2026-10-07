@@ -37,7 +37,8 @@ parse-server's for every shape a client can send.
   as upstream does.
 - **`$text`** with `$search`, `$language`, `$caseSensitive` and `$diacriticSensitive`, building a
   `<field>_text` index and recording it in `_SCHEMA` the first time a field is searched.
-- **`explain`, `hint` and `comment`** on find. `explain` requires the master key unless
+- **`explain`, `hint` and `comment`** on find, with `hint` and `comment` also carried by the count
+  a find returns beside its results. `explain` requires the master key unless
   `databaseOptions.allowPublicExplain` is set, which defaults to false, so a query plan is never
   disclosed at the default.
 - **`defaultLimit` and `maxLimit`.** `maxLimit` caps the resolved row count.
@@ -65,7 +66,13 @@ parse-server's for every shape a client can send.
 - **`limit` and `skip` are read as JavaScript reads them**: `Number()` over the decoded value, then
   the driver's truncation, as upstream reads them. `limit=0` answers an empty result
   without asking the database, and so without asking for `find` permission, which is what lets a
-  class whose CLP grants only `count` be counted.
+  class whose CLP grants only `count` be counted. The checks upstream runs before its find still
+  apply: a `_Session` query with no session is 209, and a query or sort on a protected field is 119.
+- **Read parameters sent in the body keep their JSON types.** The SDK sends a find as `POST` with
+  `_method: "GET"` and its parameters in the body, and those were flattened into the query string
+  and parsed as JSON a second time, so `{"comment":"123"}` became a number and was dropped, and
+  `{"explain":"true"}` passed as `true` where upstream answers 102. A key in both the URL and the
+  body now takes the URL's value, as upstream merges them.
 - **`ACL` lowering follows parse-server's exactly.** An array's indices are principals, a flag is
   tested for truthiness rather than for `true`, integer-like principals are stored first in
   ascending order, a `null` entry is refused with a 500 and writes nothing, as is a `Batch`
@@ -85,7 +92,12 @@ parse-server's for every shape a client can send.
 - **An `include` replaces each pointer where it stands** rather than moving it to the end of its
   object, so an included object's keys keep upstream's order.
 - **A storage error on a find answers `{"code":1,"error":"An internal server error occurred"}`**,
-  upstream's body for that path.
+  upstream's body for that path. An explain, and a query the adapter refuses while building it,
+  such as a `$geoWithin` point with latitude 100, keep the bare
+  `{"code":1,"message":"Internal server error."}`, as upstream's do.
+- **An owner's `_User` update checks `username` and `password` before the class-level `update`
+  permission**, as 9.10.3 orders them, so an empty username under a CLP that closes `update` is 200,
+  not 119.
 
 ### Deliberate differences
 

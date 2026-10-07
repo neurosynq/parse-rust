@@ -215,10 +215,14 @@ pub trait StorageAdapter: Send + Sync {
     ) -> impl Future<Output = Result<serde_json::Value, ParseError>> + Send;
 
     /// Count rows matching the query.
+    ///
+    /// `options` carries the `hint` and `comment` a client sent with `count=1`. A backend that
+    /// cannot honour a hint must refuse it rather than drop it, as `find` does.
     fn count(
         &self,
         schema: &ClassSchema,
         query: &Query,
+        options: &crate::CountOptions,
     ) -> impl Future<Output = Result<u64, ParseError>> + Send;
 
     /// Update matching rows.
