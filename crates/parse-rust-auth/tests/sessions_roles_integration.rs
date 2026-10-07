@@ -26,18 +26,23 @@ use parse_rust_mongo::MongoAdapter;
 use parse_rust_schema::default_schema;
 use parse_rust_storage::{join_schema, join_table_name, Constraint, Query, StorageAdapter};
 
-const URI: &str = "mongodb://127.0.0.1:27017";
+/// `PARSE_RUST_TEST_MONGO`, or the local default, so the suite can run against each supported
+/// server version.
+fn uri() -> String {
+    std::env::var("PARSE_RUST_TEST_MONGO")
+        .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string())
+}
 
 async fn adapter(test: &str) -> (MongoAdapter, String) {
     let db = format!("parse_rust_auth_it_{}_{}", std::process::id(), test);
-    let a = MongoAdapter::connect(URI, &db)
+    let a = MongoAdapter::connect(&uri(), &db)
         .await
         .expect("MongoDB must be running on 27017 for this test");
     (a, db)
 }
 
 async fn drop_db(db: &str) {
-    if let Ok(client) = mongodb::Client::with_uri_str(URI).await {
+    if let Ok(client) = mongodb::Client::with_uri_str(uri()).await {
         let _ = client.database(db).drop().await;
     }
 }
@@ -46,7 +51,7 @@ async fn drop_db(db: &str) {
 /// on the same database sees.
 async fn raw_docs(db: &str, collection: &str) -> Vec<Document> {
     use futures::TryStreamExt;
-    let client = mongodb::Client::with_uri_str(URI).await.expect("client");
+    let client = mongodb::Client::with_uri_str(uri()).await.expect("client");
     let cursor = client
         .database(db)
         .collection::<Document>(collection)

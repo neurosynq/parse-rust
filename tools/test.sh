@@ -15,6 +15,14 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The MongoDB every step uses. Set PARSE_RUST_TEST_MONGO to run the whole suite against another
+# server version: `docker run -d -p 127.0.0.1:27917:27017 mongo:9`, then
+# `PARSE_RUST_TEST_MONGO=mongodb://127.0.0.1:27917 tools/test.sh`. The Rust integration tests, the
+# conformance harness and the schema-format oracle read the same variable.
+export PARSE_RUST_TEST_MONGO="${PARSE_RUST_TEST_MONGO:-mongodb://127.0.0.1:27017}"
+TEST_MONGO="$PARSE_RUST_TEST_MONGO"
+export CONFORMANCE_MONGO="${CONFORMANCE_MONGO:-$TEST_MONGO}"
+
 # Editors inject `NODE_OPTIONS=--require .../bootloader.js` for auto-attach debugging. Every node
 # process then waits for a debug server, so a harness that inherits it hangs instead of running,
 # and the failure looks like a slow test rather than an environment leak. The harness controls its
@@ -202,7 +210,7 @@ elif ! oracle_revision_ok; then
 else
   # `--ignored` covers every such test in the workspace: the number formatter and bcrypt
   # differentials, the `_SCHEMA` format oracle, the MongoTransform oracle, and the Mongo adapter
-  # integration tests. Several need a MongoDB on 27017. They fail loudly rather than skipping,
+  # integration tests. Several need the MongoDB at $TEST_MONGO. They fail loudly rather than skipping,
   # because a differential that quietly does not run is worse than not having one.
   run "differentials and integration"  cargo test --workspace -- --ignored
 fi
@@ -233,7 +241,7 @@ with_server() {
   fi
 
   local db="parse_rust_h_$$_${RANDOM}"
-  local uri="mongodb://127.0.0.1:27017/${db}"
+  local uri="${TEST_MONGO}/${db}"
   local log; log=$(mktemp -t parse-rust-harness)
   # `allowClientClassCreation` on, matching the `allowClientClassCreation: true` every gate script
   # already passes to the parse-server it boots. Both servers have to agree, or a differential run
@@ -309,7 +317,7 @@ run_gate_e() {
     echo "./target/debug/parse-rust is missing; the binary name and this script disagree"
     return 1
   fi
-  node tools/spec/stock-config.mjs "mongodb://127.0.0.1:27017/parse_rust_e_$$_${RANDOM}"
+  node tools/spec/stock-config.mjs "${TEST_MONGO}/parse_rust_e_$$_${RANDOM}"
 }
 
 # Every runner resolves the `parse` npm SDK from the upstream checkout, and gates B, C and D boot a

@@ -56,9 +56,13 @@ async fn state() -> AppState {
         .mount_path("/parse");
     // A per-process database so parallel batteries cannot collide.
     let db = format!("parse_rust_srv_{}", std::process::id());
-    let storage = MongoAdapter::connect("mongodb://127.0.0.1:27017", &db)
-        .await
-        .expect("building a lazy Mongo client cannot fail for a valid URI");
+    let storage = MongoAdapter::connect(
+        &std::env::var("PARSE_RUST_TEST_MONGO")
+            .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string()),
+        &db,
+    )
+    .await
+    .expect("building a lazy Mongo client cannot fail for a valid URI");
     AppState::new(config, storage)
 }
 

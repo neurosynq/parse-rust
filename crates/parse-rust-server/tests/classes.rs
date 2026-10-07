@@ -8,7 +8,7 @@ use common::{delete, get, post, put, request, signup, where_query, As};
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn create_read_update_delete() {
     let server = common::boot().await;
     let host = &server.host;
@@ -102,7 +102,7 @@ async fn create_read_update_delete() {
 /// The JavaScript SDK sends every request as a POST with the real method in `_method`, and the
 /// credentials in the body rather than in headers.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_sdk_transport_reaches_every_verb() {
     let server = common::boot().await;
     let host = &server.host;
@@ -180,7 +180,7 @@ async fn the_sdk_transport_reaches_every_verb() {
 /// A POST to an object route with no `_method` is not an update. Falling through to one meant an
 /// unrelated request could mutate a row.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_bare_post_to_an_object_route_is_not_an_update() {
     let server = common::boot().await;
     let host = &server.host;
@@ -216,7 +216,7 @@ async fn a_bare_post_to_an_object_route_is_not_an_update() {
 
 /// The class-security gate, reproduced from `enforceRoleSecurity`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_master_only_classes_are_upstreams_list() {
     let server = common::boot().await;
     let host = &server.host;
@@ -269,7 +269,7 @@ async fn the_master_only_classes_are_upstreams_list() {
 
 /// Two deliberate additions to that list, both fail-closed over a write stage that does not exist.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn session_and_user_writes_through_the_class_route_are_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -319,7 +319,7 @@ async fn session_and_user_writes_through_the_class_route_are_refused() {
 // -------------------------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_five_role_verbs() {
     let server = common::boot().await;
     let host = &server.host;
@@ -375,7 +375,7 @@ async fn the_five_role_verbs() {
 /// `_Role` requires `name` and `ACL` on write. A role saved with no ACL is world-writable, so any
 /// client could add itself to it.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_role_without_a_name_or_an_acl_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -407,7 +407,7 @@ async fn raw_post(host: &str, path: &str, body: &serde_json::Value) -> common::R
 /// Both keys are refused and both report `INVALID_KEY_NAME` (`RestWrite.js:59-64`). Honoring a
 /// client's objectId at the default lets a caller collide with, or predict, an existing row.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_client_supplied_object_id_is_refused_by_default() {
     let server = common::boot().await;
     let host = &server.host;
@@ -437,7 +437,7 @@ async fn a_client_supplied_object_id_is_refused_by_default() {
 
 /// With the option on, the id is honored and only an empty one is refused, under code 104.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn allowing_custom_object_ids_honors_the_id_and_refuses_an_empty_one() {
     let server = common::boot_fresh_with(|mut config| {
         config.allow_custom_object_id = true;
@@ -502,7 +502,7 @@ async fn allowing_custom_object_ids_honors_the_id_and_refuses_an_empty_one() {
 /// `enforce_object_id_policy` refuses only *truthy* client ids when the option is off, which is
 /// the same truthiness test one step earlier.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_falsy_object_id_is_replaced_rather_than_stored() {
     let server = common::boot().await;
     let host = &server.host;
@@ -529,7 +529,7 @@ async fn a_falsy_object_id_is_replaced_rather_than_stored() {
 /// A `_User` whose objectId is `role:X` would be granted that role by every ACL check, and the
 /// guard is on `ClassesRouter`, so it covers the class route as well as signup.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_role_prefixed_user_id_is_refused_on_both_create_routes() {
     let server = common::boot_fresh_with(|mut config| {
         // The guard is independent of this option; turning it on is only what lets the id reach
@@ -562,7 +562,7 @@ async fn a_role_prefixed_user_id_is_refused_on_both_create_routes() {
 /// Gate D asserts the class-name half differentially. This one carries the objectId half, which
 /// needs the option on and therefore a second upstream the gate does not boot.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_refused_create_leaves_the_class_behind_unless_the_class_name_is_the_problem() {
     let server = common::boot_fresh_with(|mut config| {
         config.allow_custom_object_id = true;
@@ -615,7 +615,7 @@ async fn a_refused_create_leaves_the_class_behind_unless_the_class_name_is_the_p
 /// Both are code 111. A single check with a single message would match upstream on one case and
 /// not the other.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_class_may_hold_only_one_geopoint_field() {
     let server = common::boot().await;
     let host = &server.host;
@@ -678,7 +678,7 @@ async fn a_class_may_hold_only_one_geopoint_field() {
 /// row is created by an `insert_one` now, which is atomic on `_id`, so the loser gets a
 /// duplicate-key error and re-tests the guard.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn concurrent_creates_of_an_absent_class_cannot_both_add_a_geopoint() {
     let server = common::boot().await;
     let host = &server.host;
@@ -726,7 +726,7 @@ async fn concurrent_creates_of_an_absent_class_cannot_both_add_a_geopoint() {
 /// where a Pointer keeps its `__type` envelope. Using the top-level converter made an ordinary
 /// `containedIn` answer 111 with an internal implementation sentence on the wire.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_array_of_pointers_can_be_queried_with_in_and_nin() {
     let server = common::boot().await;
     let host = &server.host;
@@ -779,7 +779,7 @@ async fn an_array_of_pointers_can_be_queried_with_in_and_nin() {
 /// `transformInteriorValue` (`MongoTransform.js:177-187`). MongoDB gives both characters meaning
 /// inside a document key, so these are writes parse-server refuses with 121.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_nested_key_with_a_dollar_or_dot_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -819,7 +819,7 @@ async fn a_nested_key_with_a_dollar_or_dot_is_refused() {
 /// matters: a query answering with more than upstream would is an authorization concern here, not
 /// a formatting one. Measured against parse-server 9.10.1-alpha.6, which answers with no results.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_nested_parse_value_in_a_query_atom_matches_nothing() {
     let server = common::boot().await;
     let host = &server.host;
@@ -849,7 +849,7 @@ async fn a_nested_parse_value_in_a_query_atom_matches_nothing() {
 ///
 /// `new RegExp(atom.$regex)` (`MongoTransform.js:581`): `new RegExp(7)` is `/7/`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_non_string_regex_operand_coerces() {
     let server = common::boot().await;
     let host = &server.host;
@@ -879,7 +879,7 @@ async fn a_non_string_regex_operand_coerces() {
 /// `{}` renders as `[object Object]`, and both are then read as patterns. Measured against the pin:
 /// all four of `[7]`, `[]`, `{}` and `[1,2]` answer 200 there, and `[7]` matches `a7b`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_array_or_object_regex_operand_coerces_rather_than_erroring() {
     let server = common::boot().await;
     let host = &server.host;
@@ -923,7 +923,7 @@ async fn an_array_or_object_regex_operand_coerces_rather_than_erroring() {
 ///
 /// Every expectation was measured against the pinned parse-server rather than reasoned about.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn op_form_writes_match_upstream_on_the_paths_an_audit_covered() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1001,7 +1001,7 @@ async fn op_form_writes_match_upstream_on_the_paths_an_audit_covered() {
 /// does not return**. ACL and CLP still run, so nothing widens what a caller may see, but the query
 /// answers with more than it was asked for, which this project treats as the direction that counts.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_query_operand_is_compared_as_sent() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1063,7 +1063,7 @@ async fn a_query_operand_is_compared_as_sent() {
 /// pointer nested in a plain object is a 107 rather than a comparison. Every row below is measured
 /// against `transformWhere` at the pin.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn operand_atom_recognition_matches_upstreams_two_lists() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1144,7 +1144,7 @@ async fn operand_atom_recognition_matches_upstreams_two_lists() {
 /// form is a bare string, indistinguishable from a String column, so a read path that does not
 /// consult `_SCHEMA` hands the client `"avatar.png"` where every SDK expects a `File`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_file_column_reads_back_as_a_file_and_not_as_its_name() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1194,7 +1194,7 @@ async fn a_file_column_reads_back_as_a_file_and_not_as_its_name() {
 /// without this parse-rust would write schema metadata that parse-server refuses to create into a
 /// database they share.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_raw_default_value_is_still_validated() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1343,7 +1343,7 @@ async fn a_raw_default_value_is_still_validated() {
 /// An SDK read carries its parameters in the body, already JSON, and they are not parsed a second
 /// time. A query-string value of the same name wins (`ClassesRouter.js:23`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn sdk_body_parameters_keep_their_json_types() {
     let server = common::boot().await;
     let host = &server.host;

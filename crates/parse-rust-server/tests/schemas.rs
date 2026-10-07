@@ -11,7 +11,7 @@ use common::{delete, get, post, put, signup, As};
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn every_schema_route_is_master_key_only() {
     let server = common::boot().await;
     let host = &server.host;
@@ -36,7 +36,7 @@ async fn every_schema_route_is_master_key_only() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_class_round_trips_through_the_schema_api() {
     let server = common::boot().await;
     let host = &server.host;
@@ -142,7 +142,7 @@ async fn a_class_round_trips_through_the_schema_api() {
 /// adapter with `clp: None` on every field-adding save, and rewriting `_metadata` from that would
 /// silently delete the class's permissions.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_clp_survives_an_ordinary_object_write() {
     let server = common::boot().await;
     let host = &server.host;
@@ -191,7 +191,7 @@ async fn a_clp_survives_an_ordinary_object_write() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_error_shapes_are_upstreams() {
     let server = common::boot().await;
     let host = &server.host;
@@ -230,7 +230,7 @@ async fn the_error_shapes_are_upstreams() {
 
 /// Dropping a non-empty class is code 255, and the count is in the message.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_non_empty_class_cannot_be_dropped_and_purge_empties_it() {
     let server = common::boot().await;
     let host = &server.host;
@@ -272,7 +272,7 @@ async fn a_non_empty_class_cannot_be_dropped_and_purge_empties_it() {
 /// `editPointerPermissions` is advertised, so the class-wide arrays have to be settable and
 /// enforced, not only the per-operation `pointerFields`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn read_user_fields_is_accepted_and_enforced() {
     let server = common::boot().await;
     let host = &server.host;
@@ -319,7 +319,7 @@ async fn read_user_fields_is_accepted_and_enforced() {
 /// proof the index exists, so neither server ever creates it. The assertion is therefore against
 /// MongoDB's own index catalogue rather than against the response body.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_index_request_builds_the_index_and_then_records_it() {
     let server = common::boot().await;
     let host = &server.host;
@@ -402,7 +402,7 @@ async fn an_index_request_builds_the_index_and_then_records_it() {
 
 /// An index on a field the schema does not have is refused, and refused before anything is built.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_index_on_an_unknown_field_is_refused_and_leaves_nothing_behind() {
     let server = common::boot().await;
     let host = &server.host;
@@ -435,7 +435,7 @@ async fn an_index_on_an_unknown_field_is_refused_and_leaves_nothing_behind() {
 /// request passes the read before any of them writes, so all four report success and the last
 /// one's fields and CLP replace the winner's. `insert_schema` makes the database answer instead.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn concurrent_class_creation_has_exactly_one_winner() {
     let server = common::boot().await;
     let host = &server.host;
@@ -481,7 +481,7 @@ async fn concurrent_class_creation_has_exactly_one_winner() {
 /// both succeed and the later write silently redefine the field. Every row already validated
 /// against the first type is then validated against the second.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_concurrently_added_field_cannot_be_redefined() {
     let server = common::boot().await;
     let host = &server.host;
@@ -559,7 +559,7 @@ async fn a_concurrently_added_field_cannot_be_redefined() {
 /// Silently ignoring it was the worse half of the same defect the index tests above cover: a
 /// client that asked for indexes and got a 200 has no way to learn none were built.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_malformed_indexes_block_is_refused_and_creates_nothing() {
     let server = common::boot().await;
     let host = &server.host;
@@ -611,7 +611,7 @@ async fn a_malformed_indexes_block_is_refused_and_creates_nothing() {
 /// so it can fail only when the delta property is violated, never because the timing went the
 /// other way. Eight adders against one deleter is enough that at least one holds a stale snapshot.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_concurrent_field_addition_does_not_resurrect_a_deleted_field() {
     let server = common::boot().await;
     let host = &server.host;
@@ -671,7 +671,7 @@ async fn a_concurrent_field_addition_does_not_resurrect_a_deleted_field() {
 /// no longer required. Upstream sets the type and `_metadata.fields_options.<field>` together, per
 /// field (`MongoSchemaCollection.js:251-269`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn concurrent_additions_do_not_erase_each_others_field_options() {
     let server = common::boot().await;
     let host = &server.host;
@@ -729,7 +729,7 @@ async fn concurrent_additions_do_not_erase_each_others_field_options() {
 /// option validation was gated on the field being new, so an invalid `defaultValue` on an existing
 /// field was stored rather than refused.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_existing_fields_options_can_be_cleared_and_are_still_validated() {
     let server = common::boot().await;
     let host = &server.host;
@@ -796,7 +796,7 @@ async fn an_existing_fields_options_can_be_cleared_and_are_still_validated() {
 /// Writing indexes first would keep the index and drop the permissions, which is the more
 /// dangerous half to lose.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_clp_survives_a_request_whose_indexes_are_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -851,7 +851,7 @@ async fn a_clp_survives_a_request_whose_indexes_are_refused() {
 /// string or non-empty array answers 105 `invalid field name: 0`, a number, boolean or empty array
 /// answers 200 having created the class with no fields, and null answers a 500.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_malformed_fields_block_is_refused_and_creates_nothing() {
     let server = common::boot().await;
     let host = &server.host;
@@ -912,7 +912,7 @@ async fn a_malformed_fields_block_is_refused_and_creates_nothing() {
 /// value in the message is JavaScript's string conversion, which is why `["Gadget"]` reports
 /// `Gadget`. Falsy values really are absent: `null` and `""` both proceed on the path's name.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_non_string_class_name_in_the_body_is_a_mismatch() {
     let server = common::boot().await;
     let host = &server.host;
@@ -971,7 +971,7 @@ async fn a_non_string_class_name_in_the_body_is_a_mismatch() {
 /// an extra envelope key is already gone. That is an open parity gap recorded in the register; what
 /// this covers is that nothing further is applied on the way down.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_default_value_containing_a_dollar_key_is_stored_verbatim() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1011,7 +1011,7 @@ async fn a_default_value_containing_a_dollar_key_is_stored_verbatim() {
 /// which runs only for fields the request is creating, so a retarget answered 200 and kept the
 /// original target. Measured against parse-server 9.10.1-alpha.6.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn retargeting_an_existing_pointer_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1094,7 +1094,7 @@ async fn retargeting_an_existing_pointer_is_refused() {
 /// disagrees is the other node. Storing a `Date` default as a BSON date makes parse-server render
 /// it as a bare ISO string, and a `Bytes` default as a bare base64 string.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn schema_metadata_keeps_the_type_envelope_in_storage() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1116,7 +1116,7 @@ async fn schema_metadata_keeps_the_type_envelope_in_storage() {
     assert_eq!(made.status, 200, "{}", made.raw);
 
     // Read the raw `_SCHEMA` document, which is what a parse-server node sees.
-    let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1:27017")
+    let client = mongodb::Client::with_uri_str(common::mongo_uri())
         .await
         .expect("mongo");
     let raw: bson::Document = client
@@ -1163,7 +1163,7 @@ async fn schema_metadata_keeps_the_type_envelope_in_storage() {
 /// column. Registered as a deliberate difference: a request parse-rust refuses leaves no durable
 /// state.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_refused_compound_schema_update_applies_neither_half() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1224,7 +1224,7 @@ async fn a_refused_compound_schema_update_applies_neither_half() {
 /// value looks perfect from here. The reader that disagrees is the other node, so the assertion is
 /// against the response body a client sees and the raw `_SCHEMA` document underneath it.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_default_value_is_stored_exactly_as_sent() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1262,7 +1262,7 @@ async fn a_default_value_is_stored_exactly_as_sent() {
     );
 
     // And underneath, so a parse-server node reading the same row sees the same thing.
-    let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1:27017")
+    let client = mongodb::Client::with_uri_str(common::mongo_uri())
         .await
         .expect("mongo");
     let raw: bson::Document = client

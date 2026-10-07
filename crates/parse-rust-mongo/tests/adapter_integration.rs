@@ -18,18 +18,23 @@ use parse_rust_storage::{
     UpdateValue,
 };
 
-const URI: &str = "mongodb://127.0.0.1:27017";
+/// `PARSE_RUST_TEST_MONGO`, or the local default, so the suite can run against each supported
+/// server version.
+fn uri() -> String {
+    std::env::var("PARSE_RUST_TEST_MONGO")
+        .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string())
+}
 
 async fn adapter(test: &str) -> (MongoAdapter, String) {
     let db = format!("parse_rust_it_{}_{}", std::process::id(), test);
-    let a = MongoAdapter::connect(URI, &db)
+    let a = MongoAdapter::connect(&uri(), &db)
         .await
         .expect("MongoDB must be running on 27017 for this test");
     (a, db)
 }
 
 async fn drop_db(db: &str) {
-    if let Ok(client) = mongodb::Client::with_uri_str(URI).await {
+    if let Ok(client) = mongodb::Client::with_uri_str(uri()).await {
         let _ = client.database(db).drop().await;
     }
 }
@@ -602,7 +607,7 @@ async fn reserve_field_is_atomic_under_a_race() {
     assert_eq!(race.field("score"), Some(&FieldType::Number));
 
     // Concurrently, with the class document already present. Exactly one caller may see `Added`.
-    let uri = URI.to_string();
+    let uri = uri();
     let db_name = db.clone();
     let mut handles = Vec::new();
     for ty in [
@@ -805,7 +810,7 @@ async fn the_role_name_index_is_auto_named_and_unique() {
         .await
         .expect("index");
 
-    let client = mongodb::Client::with_uri_str(URI)
+    let client = mongodb::Client::with_uri_str(uri())
         .await
         .expect("MongoDB must be running on 27017 for this test");
     let indexes: Vec<mongodb::IndexModel> = client

@@ -9,7 +9,7 @@ use common::{delete, get, post, put, signup, As};
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn signup_login_me_logout() {
     let server = common::boot().await;
     let host = &server.host;
@@ -67,7 +67,7 @@ async fn signup_login_me_logout() {
 
 /// The whole point of `_Session` being rows rather than a `HashMap`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_session_survives_a_restart() {
     let server = common::boot().await;
     let (object_id, token) = signup(&server.host, "bob", "hunter2").await;
@@ -85,7 +85,7 @@ async fn a_session_survives_a_restart() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn login_does_not_distinguish_a_missing_user_from_a_wrong_password() {
     let server = common::boot().await;
     let host = &server.host;
@@ -108,7 +108,7 @@ async fn login_does_not_distinguish_a_missing_user_from_a_wrong_password() {
 /// colliding value, and none of it may reach a client. Which field collided travels beside the
 /// error rather than inside its message, which is what makes that possible.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_duplicate_username_or_email_is_reported_without_disclosing_the_row() {
     let server = common::boot().await;
     let host = &server.host;
@@ -174,7 +174,7 @@ fn assert_no_storage_detail(raw: &str, database: &str, values: &[&str]) {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_unknown_token_is_an_error_rather_than_anonymity() {
     let server = common::boot().await;
     let host = &server.host;
@@ -197,7 +197,7 @@ async fn an_unknown_token_is_an_error_rather_than_anonymity() {
 /// `Permission denied`, while `SessionsRouter` does not and keeps its detailed string in both
 /// regimes. Both configurations are asserted, because both are what some deployment runs.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_two_me_routes_report_a_missing_token_differently() {
     let server = common::boot().await;
     let host = &server.host;
@@ -227,7 +227,7 @@ async fn the_two_me_routes_report_a_missing_token_differently() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn sessions_me_returns_the_callers_own_session() {
     let server = common::boot().await;
     let host = &server.host;
@@ -247,7 +247,7 @@ async fn sessions_me_returns_the_callers_own_session() {
 /// `_Session` rows carry no ACL, so without the query narrowing a non-master read would return
 /// every session token on the server. This is the test that would catch that.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_session_read_is_narrowed_to_the_caller() {
     let server = common::boot().await;
     let host = &server.host;
@@ -283,7 +283,7 @@ async fn a_session_read_is_narrowed_to_the_caller() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_session_can_only_be_deleted_by_its_owner() {
     let server = common::boot().await;
     let host = &server.host;
@@ -335,7 +335,7 @@ async fn a_session_can_only_be_deleted_by_its_owner() {
 /// `_PushStatus` and `_Hooks` land, and `_GlobalConfig`'s objectId is the literal `1`, which
 /// removes even the guessing step.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_included_master_only_class_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -389,7 +389,7 @@ async fn an_included_master_only_class_is_refused() {
 /// the whole installation collection a page at a time. The CLP operation is a separate question
 /// and stays `get` for both halves of this test (`RestQuery.js:1259`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_multi_object_include_of_installations_is_refused_and_a_single_one_is_not() {
     let server = common::boot().await;
     let host = &server.host;
@@ -448,7 +448,7 @@ async fn a_multi_object_include_of_installations_is_refused_and_a_single_one_is_
 /// `where` narrows what the CLP is asked about (`DatabaseController.js:1413-1414`) and changes
 /// nothing about `enforceRoleSecurity`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_pinned_where_does_not_turn_a_find_on_installations_into_a_get() {
     let server = common::boot().await;
     let host = &server.host;
@@ -479,7 +479,7 @@ async fn a_pinned_where_does_not_turn_a_find_on_installations_into_a_get() {
 /// needs. Upstream narrows in the query constructor (`RestQuery.js:115-134`) and the include path
 /// builds a real query (`RestQuery.js:1250-1258`), so it is narrowed there too.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_included_session_is_narrowed_to_the_caller() {
     let server = common::boot().await;
     let host = &server.host;
@@ -565,7 +565,7 @@ async fn an_included_session_is_narrowed_to_the_caller() {
 
 /// The out-of-scope session routes are absent rather than answering 501.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_excluded_session_routes_are_404() {
     let server = common::boot().await;
     let host = &server.host;
@@ -597,7 +597,7 @@ async fn the_excluded_session_routes_are_404() {
 /// working session is the one route that is failing. SDKs keep sending the stored token until a
 /// login succeeds, which makes it stick rather than resolve.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_dead_session_token_does_not_block_a_login() {
     let server = common::boot().await;
     let host = &server.host;
@@ -652,7 +652,7 @@ async fn a_dead_session_token_does_not_block_a_login() {
 ///
 /// Asserted rather than described, so the changelog sentence has something behind it.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_unserved_method_is_405_unless_post_carries_it_to_dispatch() {
     let server = common::boot().await;
     let host = &server.host;
@@ -691,7 +691,7 @@ async fn an_unserved_method_is_405_unless_post_carries_it_to_dispatch() {
 /// checked case-insensitively under upstream's collation, and
 /// the row's ACL already restricts it to its owner.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_user_can_save_their_own_row() {
     let server = common::boot().await;
     let host = &server.host;
@@ -739,7 +739,7 @@ async fn a_user_can_save_their_own_row() {
 /// anything, and the new token is what stops the caller logging themselves out by changing their
 /// own password.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn changing_a_password_revokes_sessions_and_issues_a_new_token() {
     let server = common::boot().await;
     let host = &server.host;
@@ -808,7 +808,7 @@ async fn changing_a_password_revokes_sessions_and_issues_a_new_token() {
 
 /// A username collision through `user.save()` reports 202, not a raw duplicate-key error.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn saving_a_taken_username_reports_the_parse_code() {
     let server = common::boot().await;
     let host = &server.host;
@@ -834,7 +834,7 @@ async fn saving_a_taken_username_reports_the_parse_code() {
 
 /// Create and delete through `/classes/_User` stay refused for a non-master caller.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn creating_or_deleting_a_user_through_classes_is_still_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -866,7 +866,7 @@ async fn creating_or_deleting_a_user_through_classes_is_still_refused() {
 /// account. Upstream refuses an unauthenticated `_User` update before the ACL is consulted
 /// (`RestWrite.js:1711-1715`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_unauthenticated_user_update_is_refused_even_with_a_public_write_acl() {
     let server = common::boot().await;
     let host = &server.host;
@@ -908,7 +908,7 @@ async fn an_unauthenticated_user_update_is_refused_even_with_a_public_write_acl(
 
 /// Server-controlled `_User` columns are not ordinary fields.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn server_controlled_user_fields_are_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -952,7 +952,7 @@ async fn server_controlled_user_fields_are_refused() {
 /// are two different keys to MongoDB and both would be stored. Upstream refuses the second with
 /// 202, through a case-insensitive query rather than through the index.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn user_identity_is_validated_case_insensitively() {
     let server = common::boot().await;
     let host = &server.host;
@@ -995,7 +995,7 @@ async fn user_identity_is_validated_case_insensitively() {
 /// revoked every session and issued a replacement while leaving the old password working. A false
 /// report of a security-relevant change is worse than either outcome alone.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_non_string_password_is_refused_and_changes_nothing() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1038,7 +1038,7 @@ async fn a_non_string_password_is_refused_and_changes_nothing() {
 
 /// The replacement session carries no `createdWith`, and the relabelling is `_User` only.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_replacement_session_has_no_created_with() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1070,7 +1070,7 @@ async fn a_replacement_session_has_no_created_with() {
 /// index has to actually be unique, and the request has to be an **update**, because `update_core`
 /// is where the relabelling lives.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_non_user_duplicate_is_not_relabelled_as_a_username_error() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1138,7 +1138,7 @@ async fn a_non_user_duplicate_is_not_relabelled_as_a_username_error() {
 /// (`RestWrite.js:895-899`). Validating on the update path alone left signup admitting exactly the
 /// identities the update path refuses.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn signup_validates_identity_the_same_way_an_update_does() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1173,7 +1173,7 @@ async fn signup_validates_identity_the_same_way_an_update_does() {
 /// Forcing it unconditionally means an operator cannot revoke a user's access to their own row,
 /// which is a legitimate administrative action.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn master_can_replace_a_user_acl_without_the_owner_being_re_added() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1217,7 +1217,7 @@ async fn master_can_replace_a_user_acl_without_the_owner_being_re_added() {
 
 /// Email validation matches upstream's laxness, and username is checked first.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn email_validation_matches_upstreams_regex_and_ordering() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1266,7 +1266,7 @@ async fn email_validation_matches_upstreams_regex_and_ordering() {
 
 /// The detailed messages are upstream's, which is contract when sanitizing is off.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn user_update_refusals_carry_upstreams_detailed_messages() {
     let server = common::boot_fresh_with(|mut c| {
         c.enable_sanitized_error_response = false;
@@ -1319,7 +1319,7 @@ async fn user_update_refusals_carry_upstreams_detailed_messages() {
 /// Both spellings carry the same accent. Strength 2 keeps diacritics significant, so this is a
 /// normalization test and not a claim that `Café` and `Cafe` collide.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn uniqueness_folds_unicode_normalization_not_just_case() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1352,7 +1352,7 @@ async fn uniqueness_folds_unicode_normalization_not_just_case() {
 /// and there is no adapter host here to validate against; storing it unvalidated would let a client
 /// write a third-party identity a later login could match on.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn signup_cannot_set_email_verification_or_auth_data() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1393,7 +1393,7 @@ async fn signup_cannot_set_email_verification_or_auth_data() {
 /// (`UsersRouter.js:99-107`); matching `username` alone answered `Invalid username/password.` for a
 /// correct email and password, and an `email` key was not read at all.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn login_accepts_an_email_address_as_the_identifier() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1463,7 +1463,7 @@ async fn login_accepts_an_email_address_as_the_identifier() {
 /// collapsed into `USERNAME_MISSING`, so a client that omitted its password and one that sent a
 /// non-string password both got told the username was missing.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn login_reports_which_credential_was_wrong() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1504,7 +1504,7 @@ async fn login_reports_which_credential_was_wrong() {
 /// Without the check the password still works and the account still receives a session, so the
 /// lock does nothing until the user's existing sessions are separately destroyed.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_empty_acl_disables_login() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1555,7 +1555,7 @@ async fn an_empty_acl_disables_login() {
 /// Capping at one row makes the winner whichever row the database returns first, which can reject
 /// a valid login or authenticate the wrong account when the passwords coincide.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_username_wins_over_another_users_matching_email() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1601,7 +1601,7 @@ async fn a_username_wins_over_another_users_matching_email() {
 /// `RestQuery.js:485-500`. Answering an empty result instead tells a client that cannot create
 /// classes that the class merely has no rows.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_read_of_an_absent_class_is_refused_when_client_class_creation_is_off() {
     // The harness baseline turns the option on so ordinary tests can create classes. This one is
     // about the shipped default, so it turns it back off.
@@ -1661,7 +1661,7 @@ async fn a_read_of_an_absent_class_is_refused_when_client_class_creation_is_off(
 /// defect it catches is three orders of magnitude, so a factor of five is a wide margin that still
 /// fails if the dummy compare is removed.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_login_for_a_missing_user_costs_what_a_real_one_does() {
     use std::time::Instant;
 
@@ -1705,7 +1705,7 @@ async fn a_login_for_a_missing_user_costs_what_a_real_one_does() {
 /// `validateWritePermission` runs ahead of `validateSchema` and `transformUser` (`RestWrite.js:134`,
 /// defined at `:793-804`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_refused_signup_does_not_disclose_whether_the_account_exists() {
     use std::time::Instant;
 
@@ -1755,7 +1755,7 @@ async fn a_refused_signup_does_not_disclose_whether_the_account_exists() {
 ///
 /// `transformUser` is not gated on the caller, and the dashboard creates users through this route.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_master_user_create_validates_identity() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1796,7 +1796,7 @@ async fn a_master_user_create_validates_identity() {
 /// the caller, so the dashboard's own route is subject to it. Without it that route admitted a row
 /// with no username, and a passwordless row that no login can ever match.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn creating_a_user_requires_a_username_and_a_password() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1850,7 +1850,7 @@ async fn creating_a_user_requires_a_username_and_a_password() {
 /// `{"$regex": ...}` operand is what the SDK's `containsAllStartingWith` sends, and refusing it
 /// with `INVALID_NESTED_KEY` turns a legitimate query into a 121.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_regex_operand_in_an_array_in_is_a_query_not_a_write() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1892,7 +1892,7 @@ async fn a_regex_operand_in_an_array_in_is_a_query_not_a_write() {
 /// owner can no longer read or write, and it reads as a disabled account at login. Measured at the
 /// pin: upstream answers 200 and the row comes back holding the owner entry alone.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn deleting_an_acl_keeps_the_owner_and_leaves_the_account_usable() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1950,7 +1950,7 @@ async fn deleting_an_acl_keeps_the_owner_and_leaves_the_account_usable() {
 /// (`RestWrite.js:531-535`). Matching only the string form let `user.unset("username").save()`
 /// remove the username with no validation.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn deleting_a_username_is_refused_and_deleting_an_email_is_not() {
     let server = common::boot().await;
     let host = &server.host;
@@ -2017,7 +2017,7 @@ async fn deleting_a_username_is_refused_and_deleting_an_email_is_not() {
 /// `validateWritePermission` (`RestWrite.js:113-134`). So with `update` closed, an empty username
 /// is still 200 `bad or missing username`, and a valid change is 119.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_owner_update_checks_credentials_before_the_class_gate() {
     let server = common::boot().await;
     let host = &server.host;

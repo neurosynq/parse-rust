@@ -80,7 +80,7 @@ async fn create_role(host: &str, name: &str, members: &[&str]) -> String {
 // -------------------------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn one_user_cannot_read_or_write_anothers_object() {
     let server = common::boot().await;
     let host = &server.host;
@@ -160,7 +160,7 @@ async fn one_user_cannot_read_or_write_anothers_object() {
 // -------------------------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_role_member_reads_a_role_acled_object_and_a_non_member_does_not() {
     let server = common::boot().await;
     let host = &server.host;
@@ -207,7 +207,7 @@ async fn a_role_member_reads_a_role_acled_object_and_a_non_member_does_not() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_nested_role_member_inherits_the_parent_role() {
     let server = common::boot().await;
     let host = &server.host;
@@ -256,7 +256,7 @@ async fn a_nested_role_member_inherits_the_parent_role() {
 /// `A -> B -> A` terminates with both names and no error. A cycle check that raised would be a
 /// behavior change; no cycle check at all is a hang.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_role_cycle_terminates() {
     let server = common::boot().await;
     let host = &server.host;
@@ -307,7 +307,7 @@ async fn a_role_cycle_terminates() {
 
 /// **The code is 101, not 119.** It is deliberate existence hiding and it is wire contract.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn requires_authentication_denies_anonymously_with_code_101() {
     let server = common::boot().await;
     let host = &server.host;
@@ -349,7 +349,7 @@ async fn requires_authentication_denies_anonymously_with_code_101() {
 /// A class with no CLP block is unrestricted. Inverting this fails closed, which looks safe, and
 /// locks every existing database out on upgrade.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_class_with_no_clp_block_is_open() {
     let server = common::boot().await;
     let host = &server.host;
@@ -362,7 +362,7 @@ async fn a_class_with_no_clp_block_is_open() {
 
 /// Stage one is a gate; passing it is not authorization to read anything. Stage two is the filter.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn pointer_permissions_narrow_a_query_to_the_callers_own_rows() {
     let server = common::boot().await;
     let host = &server.host;
@@ -457,7 +457,7 @@ async fn pointer_permissions_narrow_a_query_to_the_callers_own_rows() {
 // -------------------------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_protected_field_is_absent_from_a_read_and_cannot_be_probed() {
     let server = common::boot().await;
     let host = &server.host;
@@ -568,7 +568,7 @@ async fn a_protected_field_is_absent_from_a_read_and_cannot_be_probed() {
 /// The server-level default, `{_User: {'*': ['email']}}`, and the owner exemption that comes with
 /// it. Both are defaults rather than configuration, so getting either wrong is a security default.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_default_protected_fields_hide_another_users_email_but_not_your_own() {
     let server = common::boot().await;
     let host = &server.host;
@@ -616,7 +616,7 @@ async fn the_default_protected_fields_hide_another_users_email_but_not_your_own(
 /// `protectedFieldsSaveResponseExempt`, which decides whether a write response carries a protected
 /// field the write touched. It defaults to `true`, the pass-through case.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_save_response_exemption_controls_the_operation_echo() {
     let server = common::boot().await;
     let host = &server.host;
@@ -707,7 +707,7 @@ async fn the_save_response_exemption_controls_the_operation_echo() {
 /// rather than data hygiene: an ACL entry names a role by string, so a second role called
 /// `Admins` would grant every member of both to anything ACLed `role:Admins`.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_second_role_with_the_same_name_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -788,7 +788,7 @@ async fn a_second_role_with_the_same_name_is_refused() {
 /// `handleParseErrors` renders as `{"code":1,"message":"Internal server error."}` with the key
 /// `message` and none of the detail (`middlewares.js:636-644`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_misconfigured_pointer_permission_is_a_generic_five_hundred() {
     let server = common::boot().await;
     let host = &server.host;
@@ -845,7 +845,7 @@ async fn a_misconfigured_pointer_permission_is_a_generic_five_hundred() {
 /// A fresh database, because a config that skips index creation cannot remove an index an
 /// earlier boot already made.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_role_name_index_can_be_turned_off() {
     let server = common::boot_fresh_with(|mut config| {
         config.create_index_role_name = false;
@@ -884,7 +884,7 @@ async fn the_role_name_index_can_be_turned_off() {
 /// that asserted `email` was *present* passed identically before and after the re-fetch existed,
 /// which is to say it tested nothing about protected fields at all.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_login_response_is_filtered_by_protected_fields() {
     let server = common::boot_fresh_with(|mut c| {
         c.protected_fields_owner_exempt = false;
@@ -937,7 +937,7 @@ async fn a_login_response_is_filtered_by_protected_fields() {
 /// entitle the caller to read the row, and the raw row is the worst possible fallback precisely
 /// because it is reached when access control said no.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_login_denied_the_row_returns_only_the_identity() {
     let server = common::boot().await;
     let host = &server.host;
@@ -1008,7 +1008,7 @@ async fn a_login_denied_the_row_returns_only_the_identity() {
 /// means the request said nothing about permissions, so a typo produced a default-open class and
 /// answered 200. Upstream refuses the body (`SchemaController.js:272-281`).
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_malformed_clp_is_refused_and_creates_nothing() {
     let server = common::boot().await;
     let host = &server.host;

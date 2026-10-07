@@ -140,8 +140,8 @@ That builds parse-rust from the checkout, starts a MongoDB beside it, and serves
 demo, not a deployment: the keys are public and the database has no authentication.
 `tools/demo/check.sh` checks it from a fresh clone.
 
-To run it yourself, it requires a stable Rust toolchain and a MongoDB you can write to. Anything 7.0 or later; a single
-node is fine, no replica set needed.
+To run it yourself, it requires a stable Rust toolchain and a MongoDB you can write to. The test
+suite runs against MongoDB 7 and 9; a single node is fine, no replica set needed.
 
 Install the server:
 

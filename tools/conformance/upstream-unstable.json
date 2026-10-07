@@ -1,0 +1,6 @@
+{
+  "ParseQuery.spec.js": {
+    "Parse.Query testing order by createdAt": "saves three objects back to back and sorts by a millisecond timestamp; consecutive saves can share a millisecond, and the order of tied rows is MongoDB's choice. Failed against the pinned parse-server on MongoDB 7.0.25 and 9.0.2",
+    "Parse.Query testing order by _updated_at": "saves three objects back to back and sorts by a millisecond timestamp; consecutive saves can share a millisecond, and the order of tied rows is MongoDB's choice. Failed against the pinned parse-server on MongoDB 7.0.25 and 9.0.2"
+  }
+}

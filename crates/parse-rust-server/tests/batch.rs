@@ -8,7 +8,7 @@ use common::{get, post, signup, As};
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn mixed_success_and_failure_in_one_request() {
     let server = common::boot().await;
     let host = &server.host;
@@ -78,7 +78,7 @@ async fn mixed_success_and_failure_in_one_request() {
 
 /// A batch runs under the auth the outer request carried, once.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn sub_requests_inherit_the_outer_auth() {
     let server = common::boot().await;
     let host = &server.host;
@@ -114,7 +114,7 @@ async fn sub_requests_inherit_the_outer_auth() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_malformed_shapes_are_refused_before_anything_runs() {
     let server = common::boot().await;
     let host = &server.host;
@@ -173,7 +173,7 @@ async fn the_malformed_shapes_are_refused_before_anything_runs() {
 /// Refused rather than accepted and silently run without one. That is the failure mode the
 /// milestone names by name.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_transactional_batch_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -201,7 +201,7 @@ async fn a_transactional_batch_is_refused() {
 
 /// An unroutable sub-request is a per-operation error, not a 404 for the whole batch.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_unroutable_sub_request_fails_only_itself() {
     let server = common::boot().await;
     let host = &server.host;
@@ -230,7 +230,7 @@ async fn an_unroutable_sub_request_fails_only_itself() {
 
 /// `batchRequestLimit` defaults to `-1`, which disables it.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_batch_request_limit_is_disabled_by_default_and_master_bypasses_it() {
     let server = common::boot().await;
     let requests: Vec<_> = (0..5)

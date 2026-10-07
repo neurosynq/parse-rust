@@ -36,7 +36,7 @@ const REPO = path.resolve(HERE, '..', '..');
 const PS_ROOT = path.resolve(REPO, process.env.PARSE_SERVER_ROOT || '../parse-server-pinned');
 const require = createRequire(`${PS_ROOT}/`);
 const { MongoClient } = require(`${PS_ROOT}/node_modules/mongodb`);
-const MONGO = process.env.CONFORMANCE_MONGO || 'mongodb://127.0.0.1:27017';
+const MONGO = process.env.CONFORMANCE_MONGO || process.env.PARSE_RUST_TEST_MONGO || 'mongodb://127.0.0.1:27017';
 const INVENTORY = path.join(HERE, 'inventory.json');
 const EXCLUSIONS = path.join(HERE, 'exclusions.json');
 const RUST_BIN = path.join(REPO, 'target/harness/debug/parse-rust');
@@ -674,8 +674,29 @@ function judgeDead(results) {
  * the inventory records as passing upstream must be present and passed, and the run itself must be
  * clean.
  */
+/**
+ * Blocks whose outcome against parse-server itself depends on timing, declared with their reason
+ * in `upstream-unstable.json`. They still run; a failure is printed rather than counted, because a
+ * control that fails at random trains people to ignore it. An undeclared block failing is still a
+ * problem, and a declaration naming no block in this run is stale.
+ */
+const UNSTABLE = JSON.parse(fs.readFileSync(path.join(HERE, 'upstream-unstable.json'), 'utf8'));
+const isUnstable = r => Boolean(UNSTABLE[r.file]?.[r.fullName]);
+
 function judgeUpstream(results) {
-  for (const r of results) {
+  for (const [file, blocks] of Object.entries(UNSTABLE).filter(([f]) => files.includes(f))) {
+    for (const name of Object.keys(blocks)) {
+      if (!results.some(r => r.file === file && r.fullName === name)) {
+        problem(`[upstream] stale declaration in upstream-unstable.json: ${file}: ${name}`);
+      }
+    }
+  }
+  for (const r of results.filter(isUnstable)) {
+    if (r.status === 'failed') {
+      console.log(`upstream: declared unstable and failed this run: ${r.file}: ${r.fullName}`);
+    }
+  }
+  for (const r of results.filter(x => !isUnstable(x))) {
     if (r.status === 'failed') {
       problem(`[upstream] fails against the pinned parse-server: ${r.file}: ${r.fullName}: ${r.failures[0]?.slice(0, 200)}`);
     }
@@ -685,6 +706,7 @@ function judgeUpstream(results) {
     for (const [key, block] of Object.entries(spec.blocks)) {
       if (block.upstream !== 'pass') { continue; }
       const r = byKey.get(key);
+      if (r && isUnstable(r)) { continue; }
       if (!r) {
         problem(`[upstream] did not run against the pinned parse-server: ${file}: ${block.name}`);
       } else if (r.status !== 'passed' && r.status !== 'excluded' && !r.reason) {
@@ -695,7 +717,10 @@ function judgeUpstream(results) {
   for (const f of results.run?.failures || []) {
     problem(`[upstream] failure outside any block: ${f.suite}: ${String(f.message).slice(0, 200)}`);
   }
-  if (results.run?.exitCode !== 0) {
+  // Jasmine's exit status counts the unstable blocks too, so it is only a problem when something
+  // other than a declared unstable block failed.
+  const onlyUnstable = results.every(r => r.status !== 'failed' || isUnstable(r));
+  if (results.run?.exitCode !== 0 && !(onlyUnstable && results.run?.overallStatus === 'failed')) {
     problem(`[upstream] jasmine exited ${results.run?.exitCode} (${results.run?.overallStatus})`);
   }
 }
