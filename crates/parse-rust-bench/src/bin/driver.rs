@@ -94,23 +94,30 @@ struct Stack {
 }
 
 fn stack() -> Stack {
-    let base: u16 = std::env::var("PRBENCH_PORT_BASE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(28000);
-    if !base.is_multiple_of(1000)
-        || !(20000..=60000).contains(&base)
-        || base == 29000
-        || base == 26000
-    {
-        fail(format!(
-            "PRBENCH_PORT_BASE {base} is not a free multiple of 1000 in 20000-60000"
-        ));
-    }
+    // The same three variables, with the same defaults, that `compose.yaml` publishes on, so the
+    // driver cannot connect somewhere the stack is not. Each stays in the 28xxx benchmark block.
+    let port = |name: &str, default: u16| -> u16 {
+        let value = std::env::var(name)
+            .ok()
+            .map(|v| {
+                v.parse::<u16>()
+                    .unwrap_or_else(|_| fail(format!("{name}={v} is not a port")))
+            })
+            .unwrap_or(default);
+        if !(28000..=28999).contains(&value) {
+            fail(format!(
+                "{name} {value} is outside the 28xxx benchmark block"
+            ));
+        }
+        value
+    };
+    let mongo = port("PRBENCH_MONGO_PORT", 28017);
+    let proxied = port("PRBENCH_MONGO_PROXY_PORT", 28018);
+    let api = port("PRBENCH_TOXIPROXY_API_PORT", 28474);
     Stack {
-        mongo_direct: format!("mongodb://127.0.0.1:{}", base + 17),
-        mongo_proxied: format!("mongodb://127.0.0.1:{}", base + 18),
-        toxiproxy: format!("http://127.0.0.1:{}", base + 474),
+        mongo_direct: format!("mongodb://127.0.0.1:{mongo}"),
+        mongo_proxied: format!("mongodb://127.0.0.1:{proxied}"),
+        toxiproxy: format!("http://127.0.0.1:{api}"),
     }
 }
 
@@ -169,7 +176,39 @@ fn verify_upstream() -> Value {
             root.display()
         ));
     }
+    // `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built. A
+    // source file newer than the build means `lib/` came from some other revision, as
+    // `tools/test.sh` checks for the gates.
+    let built = std::fs::metadata(root.join("lib/index.js")).and_then(|m| m.modified());
+    if let Ok(built) = built {
+        if let Some(newer) = newer_than(&root.join("src"), built) {
+            fail(format!(
+                "upstream lib/ is older than {}; rebuild with npm run build",
+                newer.display()
+            ));
+        }
+    }
     json!({ "sha": head, "clean": true })
+}
+
+/// The first file under `dir` modified after `than`, if any.
+fn newer_than(dir: &Path, than: std::time::SystemTime) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = newer_than(&path, than) {
+                return Some(found);
+            }
+        } else if entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m > than)
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn context(upstream: &Value) -> Value {
@@ -495,6 +534,9 @@ async fn seed(http: &Http, base: &str) {
     for t in 0..4 {
         let mut target = flat.clone();
         target["objectId"] = json!(id("target", t));
+        // Distinct content per target. The correctness gate scrubs `objectId`, so four identical
+        // bodies would let an `include` that resolved every pointer to one target compare equal.
+        target["slot"] = json!(t);
         must.push(post("/classes/BenchTarget".into(), target));
     }
     for n in 0..20 {

@@ -123,8 +123,10 @@ fn close(request_id: i32) {
     }
 }
 
-/// `<command> <collection> <filter key structure>`, with every value replaced by its type. The
-/// structure is what a query-shape fixture pins; the values are the corpus's business.
+/// `<command> <collection> <filter key structure>`, with every filter value replaced by its type,
+/// then the options that change what the command does, verbatim: projection, sort, limit, skip and
+/// hint. The filter's values are the corpus's business; those options are the server's, and a
+/// fixture that ignored them would not notice a lost projection or a reversed sort.
 fn shape(name: &str, command: &bson::Document) -> String {
     let collection = command.get_str(name).unwrap_or("");
     // An update or delete carries its filter inside its first statement.
@@ -142,8 +144,19 @@ fn shape(name: &str, command: &bson::Document) -> String {
         })
         .map(skeleton)
         .unwrap_or_default();
-    format!("{name} {collection} {filter}")
+    let mut out = format!("{name} {collection} {filter}");
+    for key in OPTION_KEYS {
+        if let Some(value) = command.get(*key) {
+            let text =
+                serde_json::to_string(&value.clone().into_relaxed_extjson()).unwrap_or_default();
+            out.push_str(&format!(" {key}={text}"));
+        }
+    }
+    out
 }
+
+/// The command options a shape carries verbatim, in this order on both targets.
+const OPTION_KEYS: &[&str] = &["projection", "sort", "limit", "skip", "hint"];
 
 fn skeleton(value: &bson::Bson) -> String {
     match value {

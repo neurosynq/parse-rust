@@ -1,8 +1,10 @@
 # The benchmark stack: MongoDB and the toxiproxy that injects the database latency rungs.
 #
 # **Namespaced, on the 28xxx block** (the benchmark design's port rule): project and
-# container names carry `PRBENCH_PREFIX` (default `prbench`), every port is `PRBENCH_PORT_BASE`
-# plus a fixed offset, and everything binds 127.0.0.1. A run with no environment set cannot attach
+# container names carry `PRBENCH_PREFIX` (default `prbench`), the three published ports are
+# `PRBENCH_MONGO_PORT`, `PRBENCH_MONGO_PROXY_PORT` and `PRBENCH_TOXIPROXY_API_PORT` (defaults 28017,
+# 28018 and 28474), which the driver reads with the same names and defaults, and everything binds
+# 127.0.0.1. A run with no environment set cannot attach
 # to another stack's database, which is the failure that looks like a performance finding.
 #
 # The servers under test are not in here. They run on the host, one at a time, as the driver

@@ -334,20 +334,29 @@ fn js_number(value: &Json) -> f64 {
         Json::Bool(b) => f64::from(u8::from(*b)),
         Json::Number(n) => n.as_f64().unwrap_or(f64::NAN),
         Json::String(s) => string_to_number(s),
-        // `Number([3])` is `Number("3")`: an array converts through its `join(",")`.
-        Json::Array(items) => {
-            let joined: Vec<String> = items
-                .iter()
-                .map(|v| match v {
-                    Json::Null => String::new(),
-                    Json::String(s) => s.clone(),
-                    Json::Array(_) => "".to_string(),
-                    other => other.to_string(),
-                })
-                .collect();
-            string_to_number(&joined.join(","))
-        }
+        // `Number([3])` is `Number("3")`: an array converts through its `join(",")`, which
+        // stringifies nested arrays the same way, so `[[3]]` is `"3"` too.
+        Json::Array(_) => string_to_number(&js_join_element(value)),
         Json::Object(_) => f64::NAN,
+    }
+}
+
+/// `ToString` of a value as `Array.prototype.join` sees an element: `null` is empty, an array is
+/// its own `join(",")`, an object is `[object Object]`, a number is ECMAScript's formatting.
+fn js_join_element(value: &Json) -> String {
+    match value {
+        Json::Null => String::new(),
+        Json::Bool(b) => b.to_string(),
+        Json::Number(n) => {
+            parse_rust_core::js_number::to_ecma_string(n.as_f64().unwrap_or(f64::NAN))
+        }
+        Json::String(s) => s.clone(),
+        Json::Array(items) => items
+            .iter()
+            .map(js_join_element)
+            .collect::<Vec<_>>()
+            .join(","),
+        Json::Object(_) => "[object Object]".to_string(),
     }
 }
 
@@ -358,8 +367,13 @@ fn string_to_number(s: &str) -> f64 {
     if t.is_empty() {
         return 0.0;
     }
-    let radix =
-        |digits: &str, base: u32| u64::from_str_radix(digits, base).map_or(f64::NAN, |n| n as f64);
+    // `from_str_radix` accepts a leading sign, which `Number("0x+10")` does not: `NaN`.
+    let radix = |digits: &str, base: u32| {
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(base)) {
+            return f64::NAN;
+        }
+        u64::from_str_radix(digits, base).map_or(f64::NAN, |n| n as f64)
+    };
     match t {
         "Infinity" | "+Infinity" => return f64::INFINITY,
         "-Infinity" => return f64::NEG_INFINITY,
@@ -542,6 +556,19 @@ mod tests {
         assert_eq!(limit(Some("2")), Some(2));
         assert_eq!(limit(Some("0")), Some(0));
         assert_eq!(limit(None), Some(100), "the default is not the option");
+    }
+
+    #[test]
+    fn nested_arrays_and_signed_prefixes_coerce_as_javascript_does() {
+        let n = |raw: &str| js_number(&serde_json::from_str(raw).expect("json"));
+        assert_eq!(n("[[3]]"), 3.0);
+        assert_eq!(n("[[[2]]]"), 2.0);
+        assert!(n("[[1,2]]").is_nan(), "\"1,2\" is not a number");
+        assert_eq!(n("[null]"), 0.0);
+        assert!(n("[{}]").is_nan());
+        assert!(string_to_number("0x+10").is_nan());
+        assert!(string_to_number("0x").is_nan());
+        assert_eq!(string_to_number("0x10"), 16.0);
     }
 
     #[test]

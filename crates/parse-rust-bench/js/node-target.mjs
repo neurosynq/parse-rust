@@ -37,12 +37,28 @@ function skeleton(v) {
   return typeof v;
 }
 
+/** The driver builds `sort` as a `Map`, which `JSON.stringify` writes as `{}`. */
+function plain(v) {
+  if (v instanceof Map) { return Object.fromEntries([...v].map(([k, x]) => [k, plain(x)])); }
+  if (Array.isArray(v)) { return v.map(plain); }
+  if (v && typeof v === 'object' && !v._bsontype) {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, plain(x)]));
+  }
+  return v;
+}
+
 function shapeOf(name, command) {
   const collection = typeof command[name] === 'string' ? command[name] : '';
   const statement = (command.updates || command.deletes || [])[0];
   const filter = command.filter ?? command.q ?? command.query ?? command.pipeline
     ?? statement?.q ?? statement?.filter;
-  return `${name} ${collection} ${filter === undefined ? '' : skeleton(filter)}`;
+  let out = `${name} ${collection} ${filter === undefined ? '' : skeleton(filter)}`;
+  // The options that change what the command does, verbatim, in the same order as the Rust side:
+  // a fixture that ignored them would not notice a lost projection or a reversed sort.
+  for (const key of ['projection', 'sort', 'limit', 'skip', 'hint']) {
+    if (command[key] !== undefined) { out += ` ${key}=${JSON.stringify(plain(command[key]))}`; }
+  }
+  return out;
 }
 
 function unionMicros(intervals) {

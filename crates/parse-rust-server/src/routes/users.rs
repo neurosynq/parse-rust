@@ -213,6 +213,25 @@ pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> Result<Strin
     // answers the error below having already created the user and spent the username, with no
     // session. parse-rust answers the same error and writes nothing. `CHANGELOG.md` lists it under
     // the deliberate differences.
+    // **Where the SDK step runs decides whether it sees the owner's entry.** With an email it runs
+    // in `_validateEmail` (`RestWrite.js:1013`), before the owner is assigned at `:1824`, so it
+    // judges whatever the caller put under the new user's id. Without one it runs after the insert
+    // (`:1149`), by which time `ACL[objectId] = {read, write}` has replaced that entry, so an entry
+    // under the caller's own custom id is never judged. The same holds when non-anonymous
+    // `authData` skips the email step's SDK call.
+    let sdk_sees_owner_entry = email_branch_builds_parse_objects(body);
+    let judge = |value: &ParseValue| -> Result<(), ParseError> {
+        if sdk_sees_owner_entry {
+            return sdk_acl_entries_accepted(value);
+        }
+        let mut map = match value {
+            ParseValue::Object(map) => map.clone(),
+            ParseValue::Array(items) => parse_rust_rest::acl::array_acl_as_object(items),
+            other => return sdk_acl_entries_accepted(other),
+        };
+        map.shift_remove(&object_id);
+        sdk_acl_entries_accepted(&ParseValue::Object(map))
+    };
     match body.get("ACL") {
         // Absent, or falsy, which upstream's `if (!ACL)` treats identically. A fresh object
         // holding the owner and nothing else.
@@ -222,14 +241,14 @@ pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> Result<Strin
         }
         // A principal map. The owner joins whatever the caller sent, once the SDK would accept it.
         Some(FieldWrite::Value(ParseValue::Object(map))) => {
-            sdk_acl_entries_accepted(&ParseValue::Object(map.clone()))?;
+            judge(&ParseValue::Object(map.clone()))?;
             add_owner(body, &object_id);
         }
         // **An array's indices are principals once the owner is assigned onto it**, so
         // `[{"read":true}]` grants `"0"` beside the owner. Held as the object JavaScript sees.
         Some(FieldWrite::Value(ParseValue::Array(items))) => {
             let value = ParseValue::Array(items.clone());
-            sdk_acl_entries_accepted(&value)?;
+            judge(&value)?;
             let map = parse_rust_rest::acl::array_acl_as_object(items);
             body.insert(
                 "ACL".to_string(),
@@ -275,6 +294,25 @@ pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> Result<Strin
         }
     }
     Ok(object_id)
+}
+
+/// Whether `_validateEmail` reaches `buildParseObjects` (`RestWrite.js:977-1013`): a truthy email
+/// that is not a `Delete`, and `authData` absent, empty, or anonymous alone. A malformed or taken
+/// email is refused before that point either way.
+fn email_branch_builds_parse_objects(body: &WriteBody) -> bool {
+    let email = match body.get("email") {
+        Some(FieldWrite::Value(v)) => parse_rust_core::is_js_truthy(v),
+        _ => false,
+    };
+    let auth_data_allows = match body.get("authData") {
+        None => true,
+        Some(FieldWrite::Value(ParseValue::Object(map))) => {
+            map.is_empty() || (map.len() == 1 && map.contains_key("anonymous"))
+        }
+        Some(FieldWrite::Value(v)) => !parse_rust_core::is_js_truthy(v),
+        Some(FieldWrite::Op(_)) => false,
+    };
+    email && auth_data_allows
 }
 
 fn owner_permissions() -> ParseValue {

@@ -34,6 +34,12 @@ if [[ ! -f "$UPSTREAM/lib/Adapters/Storage/Mongo/MongoTransform.js" ]]; then
   echo "micro.sh: $UPSTREAM has no built lib/; run npm run build there" >&2
   exit 1
 fi
+# `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built.
+stale=$(find "$UPSTREAM/src" -type f -newer "$UPSTREAM/lib/index.js" -print -quit 2>/dev/null)
+if [[ -n "$stale" ]]; then
+  echo "micro.sh: $UPSTREAM/lib is older than $stale; rebuild with npm run build" >&2
+  exit 1
+fi
 
 # The Node numbers are parse-server's only if they come from the pinned revision. A checkout that
 # has drifted measures an undeclared revision and calls it the release target.

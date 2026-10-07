@@ -1087,10 +1087,13 @@ impl StorageAdapter for MongoAdapter {
     ) -> Result<serde_json::Value, ParseError> {
         // The same find the driver would run, as a command, inside `explain`. Upstream asks the
         // Node driver's cursor for `.explain(verbosity)` (`MongoCollection.js:176`), which sends
-        // exactly this.
+        // exactly this, through the same `MongoCollection.find` an ordinary query takes: so the
+        // text index is created first and a missing geo index is built and retried, here as there.
+        self.create_text_indexes_if_needed(schema, query).await?;
+        let filter = transform_where(schema, query)?;
         let mut find = doc! {
             "find": schema.class_name.as_str(),
-            "filter": transform_where(schema, query)?,
+            "filter": filter.clone(),
         };
         if let Some(limit) = options.limit {
             find.insert("limit", i64::from(limit));
@@ -1117,11 +1120,24 @@ impl StorageAdapter for MongoAdapter {
         if let Some(comment) = &options.comment {
             find.insert("comment", comment.as_str());
         }
-        let explained = self
-            .db
-            .run_command(doc! { "explain": find, "verbosity": verbosity.as_str() })
-            .await
-            .map_err(mongo_err)?;
+        let command = doc! { "explain": find, "verbosity": verbosity.as_str() };
+        let explained = match self.db.run_command(command.clone()).await {
+            Ok(explained) => explained,
+            Err(e) if is_missing_geo_index(&e) => {
+                let field =
+                    geo_index_field_from_message(&e).or_else(|| find_geo_index_field(&filter));
+                let Some(field) = field else {
+                    return Err(mongo_err(e));
+                };
+                self.db
+                    .collection::<Document>(&schema.class_name)
+                    .create_index(IndexModel::builder().keys(doc! { field: "2d" }).build())
+                    .await
+                    .map_err(mongo_err)?;
+                self.db.run_command(command).await.map_err(mongo_err)?
+            }
+            Err(e) => return Err(mongo_err(e)),
+        };
         Ok(Bson::Document(explained).into_relaxed_extjson())
     }
 

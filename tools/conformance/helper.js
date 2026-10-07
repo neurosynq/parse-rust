@@ -131,6 +131,7 @@ Parse.CoreManager.setRESTController({
 // -------------------------------------------------------------------------------------------
 
 const results = [];
+const suiteFailures = [];
 jasmine.getEnv().addReporter({
   specStarted(spec) {
     const file = declaredIn.get(spec.id) || path.basename(spec.filename || '');
@@ -156,8 +157,20 @@ jasmine.getEnv().addReporter({
     current = null;
     setPhase('lifecycle');
   },
-  jasmineDone() {
+  // Failures that belong to no block: an `afterAll` that threw, a suite that could not load. They
+  // fail nothing per block, so they are written beside the results for the judges to see.
+  suiteDone(result) {
+    for (const f of result.failedExpectations || []) {
+      suiteFailures.push({ suite: result.fullName, message: f.message });
+    }
+  },
+  jasmineDone(result) {
     fs.writeFileSync(RESULTS, JSON.stringify(results, null, 2));
+    fs.writeFileSync(`${RESULTS}.run.json`, JSON.stringify({
+      overallStatus: result.overallStatus,
+      incompleteReason: result.incompleteReason || null,
+      failures: [...suiteFailures, ...(result.failedExpectations || []).map(f => ({ suite: 'top level', message: f.message }))],
+    }, null, 2));
   },
 });
 
@@ -257,6 +270,12 @@ global.reconfigureServer = async (changedConfiguration = {}) => {
     body: JSON.stringify({ options: transportable(changedConfiguration) }),
   });
   const body = await response.json();
+  // Refused or not, the server may now be at a new address; follow it before reporting either.
+  if (body.url) {
+    global.CONFORMANCE_SERVER_URL = body.url;
+    Parse.serverURL = body.url;
+  }
+  if (body.reset) { process.env.CONFORMANCE_RESET_URL = body.reset; }
   if (!response.ok) { throw body.error; }
   global.CONFORMANCE_SERVER_URL = body.url;
   process.env.CONFORMANCE_RESET_URL = body.reset;

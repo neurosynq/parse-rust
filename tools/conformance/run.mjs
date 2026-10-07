@@ -463,7 +463,12 @@ function supervisor(server) {
         } catch (e) {
           const block = String(req.headers['x-parse-conformance-block'] || '').split(';')[0];
           refusals.push({ block, error: e.message });
-          res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: e.message }));
+          // A refusal may have restarted the server on a new port to restore the previous
+          // configuration, so the addresses go back with it: a client left on the old ones would
+          // fail every later block against a process that no longer exists.
+          res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+            error: e.message, url: server.url, reset: server.reset,
+          }));
         }
       });
     }).listen(0, '127.0.0.1', () => resolve({
@@ -503,13 +508,17 @@ async function runSuite(server, label) {
   let out = '';
   child.stdout.on('data', c => { out += c; });
   child.stderr.on('data', c => { out += c; });
-  await new Promise(resolve => child.on('exit', resolve));
+  const exitCode = await new Promise(resolve => child.on('exit', resolve));
   await control.close();
   if (!fs.existsSync(resultsPath)) {
     throw new Error(`the ${label} run wrote no results; jasmine said:\n${out.slice(-4000)}`);
   }
   const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
   results.refusals = control.refusals;
+  const runPath = `${resultsPath}.run.json`;
+  results.run = fs.existsSync(runPath)
+    ? { ...JSON.parse(fs.readFileSync(runPath, 'utf8')), exitCode }
+    : { overallStatus: 'unknown', failures: [], exitCode };
   return results;
 }
 
@@ -659,11 +668,35 @@ function judgeDead(results) {
   return { passing: passing.size, clientOnly: clientOnly.size };
 }
 
+/**
+ * Condition 5, the positive control. Reported failures are not enough: a run that executed nothing,
+ * left blocks pending, or failed outside any block reports no failed block at all. So every block
+ * the inventory records as passing upstream must be present and passed, and the run itself must be
+ * clean.
+ */
 function judgeUpstream(results) {
   for (const r of results) {
     if (r.status === 'failed') {
       problem(`[upstream] fails against the pinned parse-server: ${r.file}: ${r.fullName}: ${r.failures[0]?.slice(0, 200)}`);
     }
+  }
+  const byKey = new Map(results.map(r => [r.key, r]));
+  for (const [file, spec] of Object.entries(inventory.files).filter(([f]) => files.includes(f))) {
+    for (const [key, block] of Object.entries(spec.blocks)) {
+      if (block.upstream !== 'pass') { continue; }
+      const r = byKey.get(key);
+      if (!r) {
+        problem(`[upstream] did not run against the pinned parse-server: ${file}: ${block.name}`);
+      } else if (r.status !== 'passed' && r.status !== 'excluded' && !r.reason) {
+        problem(`[upstream] ${r.status} against the pinned parse-server: ${file}: ${block.name}`);
+      }
+    }
+  }
+  for (const f of results.run?.failures || []) {
+    problem(`[upstream] failure outside any block: ${f.suite}: ${String(f.message).slice(0, 200)}`);
+  }
+  if (results.run?.exitCode !== 0) {
+    problem(`[upstream] jasmine exited ${results.run?.exitCode} (${results.run?.overallStatus})`);
   }
 }
 

@@ -45,10 +45,33 @@ def main():
         if r.get("verdict") != "baseline-unclassified":
             fail(f"record carries verdict {r.get('verdict')!r}; this report publishes none")
 
+    for r in e2e + micro:
+        if "transport" not in r:
+            fail(f"a {r.get('kind')} record has no transport")
+        if "db_share_p50" not in r or r["db_share_p50"] is None:
+            fail(f"a {r.get('kind')} record has no db_share")
+    runs = {r.get("run_id") for r in e2e}
+    if len(runs) != 1:
+        fail(f"{sys.argv[1]} holds {len(runs)} runs; render one run at a time")
+
     measured = [r for r in e2e if r["kind"] == "e2e"]
     historical = [r for r in e2e if r["kind"] == "historical"]
     if not measured:
         fail(f"{sys.argv[1]} has no e2e records")
+    # The same completeness and calibration the driver enforces, so a records file the driver would
+    # have failed cannot be rendered into a report that looks finished.
+    for target in ("node", "rust"):
+        for workload in WORKLOADS:
+            for rung in (0, 1, 10):
+                found = [r for r in measured if r["target"] == target and r["workload"] == workload
+                         and r["db_latency_rung_ms"] == rung]
+                if len(found) != 1:
+                    fail(f"{len(found)} records for {target} {workload} at {rung} ms; expected exactly one")
+                if not isinstance(found[0]["db_share_p50"], (int, float)):
+                    fail(f"{target} {workload} at {rung} ms has no measured db_share")
+        cal = [r for r in e2e if r["kind"] == "calibration" and r["target"] == target]
+        if len(cal) != 4 or not all(r["passed"] is True for r in cal):
+            fail(f"{target}: calibration is missing or failed ({len(cal)} records)")
     ctx = measured[0]["context"]
     rungs = sorted({r["db_latency_rung_ms"] for r in measured})
     calibration = [r for r in e2e if r["kind"] == "calibration"]

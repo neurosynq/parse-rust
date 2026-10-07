@@ -79,11 +79,11 @@ const EXPECTED = {
   'master key': 16,
   'default ACL': 104,
   'user identity': 40,
-  'custom objectId': 16,
-  'I1 explain': 24,
+  'custom objectId': 20,
+  'I1 explain': 26,
   'I2 lockout': 18,
   'I3 installation': 16,
-  'I4 limit': 10,
+  'I4 limit': 12,
   'I5-6 user ACL refusals': 24,
   'I7 ACL arrays': 16,
   'I8 permission order': 4,
@@ -740,6 +740,21 @@ async function customObjectId(servers) {
       });
       eq(`${who}: and the username was not consumed by the refusal`, retry.status, 201);
     }
+
+    // An entry under the caller's own custom id is replaced by the owner before the SDK judges it
+    // when the body has no email (`RestWrite.js:1824` before `:1149`), and judged first when it does
+    // (`:1013`). So the same malformed owner entry is accepted without an email and refused with one.
+    for (const withEmail of [false, true]) {
+      const id = `own${withEmail ? 'e' : 'n'}${suffix}`.replace(/\W/g, '').slice(0, 30);
+      const body = {
+        objectId: id, username: `cid_own_${withEmail ? 'e' : 'n'}_${suffix}`, password: PASSWORD,
+        ACL: { [id]: { read: 1 } },
+      };
+      if (withEmail) { body.email = `${body.username}@example.com`; }
+      const r = await request(server, { method: 'POST', path: '/users', from: 'loopback', body });
+      eq(`${who}: a malformed entry under the new user's own id, ${withEmail ? 'with' : 'without'} an email`,
+        r.status, withEmail ? 500 : 201);
+    }
   }
 }
 
@@ -794,6 +809,18 @@ async function gateI1Explain(servers) {
     // And the same query without explain is an ordinary read, so the refusal is the parameter's.
     const plain = await request(server, { path: `/classes/${cls}`, from: 'loopback' });
     eq(`${who}: the query itself is public`, plain.body?.results?.length, 1);
+
+    // `$text` under explain on a class that has never been searched: the explain runs through the
+    // same find path, which builds the text index first, so the database has one to plan with.
+    const fresh = `I1t_${suffixOf(server)}`;
+    await request(server, {
+      method: 'POST', path: `/classes/${fresh}`, from: 'loopback', headers: master(), body: { subject: 'hello' },
+    });
+    const where = encodeURIComponent(JSON.stringify({ subject: { $text: { $search: { $term: 'hello' } } } }));
+    const textExplain = await request(server, {
+      path: `/classes/${fresh}?explain=true&where=${where}`, from: 'loopback', headers: master(),
+    });
+    eq(`${who}: explaining a first $text search answers 200`, textExplain.status, 200);
   }
 }
 
@@ -886,12 +913,13 @@ async function gateI4Limit(servers) {
       await request(server, { method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { n } });
     }
     counts[server.kind] = {};
-    for (const limit of ['-1', '-2', '1.5', '0', 'abc']) {
-      const r = await request(server, { path: `/classes/${cls}?limit=${limit}`, from: 'loopback' });
+    for (const limit of ['-1', '-2', '1.5', '0', 'abc', '[[2]]']) {
+      const r = await request(server, { path: `/classes/${cls}?limit=${encodeURIComponent(limit)}`, from: 'loopback' });
       counts[server.kind][limit] = r.body?.results?.length;
     }
   }
-  for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3]]) {
+  // `[[2]]` is `Number(String([[2]]))`, which is 2: a nested array joins recursively.
+  for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3], ['[[2]]', 2]]) {
     for (const server of servers) {
       eq(`${server.kind}: limit=${limit} returns ${expected}`, counts[server.kind][limit], expected);
     }
