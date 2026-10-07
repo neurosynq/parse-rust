@@ -83,16 +83,31 @@ fn graft_into_map(map: &mut ParseMap, path: &[String], fetched: &IndexMap<String
     let Some((head, rest)) = path.split_first() else {
         return;
     };
-    let Some(current) = map.shift_remove(head) else {
+    replace_in_place(map, head, |current| graft_value(current, rest, fetched));
+}
+
+/// Replace one key's value where it stands, or remove the key if the replacement is `None`.
+///
+/// **In place, because key order is part of the contract.** Upstream's `replacePointers` rebuilds
+/// the object key by key with the replaced value at the original position (`RestQuery.js:1324-1356`),
+/// and an unresolved pointer becomes `undefined`, which `JSON.stringify` drops. Removing and
+/// re-inserting the key, which this did, moved every included field to the end of its object; the
+/// benchmark correctness gate found it on a four-pointer `include`.
+fn replace_in_place(
+    map: &mut ParseMap,
+    key: &str,
+    f: impl FnOnce(ParseValue) -> Option<ParseValue>,
+) {
+    let Some(index) = map.get_index_of(key) else {
         return;
     };
-    // A pointer that did not resolve leaves the key absent rather than null.
-    if let Some(value) = graft_value(current, rest, fetched) {
-        map.insert(head.clone(), value);
+    let current = std::mem::replace(&mut map[index], ParseValue::Null);
+    match f(current) {
+        Some(value) => map[index] = value,
+        None => {
+            map.shift_remove_index(index);
+        }
     }
-    // `shift_remove` moved the key to the end of the map. Reinsertion above restores the value
-    // but not the position; key order within one object is not part of the wire contract for a
-    // rewritten key, and preserving it would mean rebuilding the map for every result.
 }
 
 fn graft_value(
@@ -116,11 +131,7 @@ fn graft_value(
             .map(|row| ParseValue::Object(row.clone())),
         (None, other) => Some(other),
         (Some((head, rest)), ParseValue::Object(mut map)) => {
-            if let Some(inner) = map.shift_remove(head) {
-                if let Some(replaced) = graft_value(inner, rest, fetched) {
-                    map.insert(head.clone(), replaced);
-                }
-            }
+            replace_in_place(&mut map, head, |inner| graft_value(inner, rest, fetched));
             Some(ParseValue::Object(map))
         }
         (Some(_), other) => Some(other),

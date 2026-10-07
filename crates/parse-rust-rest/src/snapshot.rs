@@ -1,7 +1,7 @@
 //! One schema snapshot per request.
 //!
 //! Upstream threads a `validSchemaController` down through every controller entry point
-//! (`DatabaseController.js:553`, `:843`, `:906`, `:1407`) so that one request cannot evaluate half
+//! (`DatabaseController.js:554`, `:843`, `:906`, `:1407`) so that one request cannot evaluate half
 //! its work under one schema and half under another. A batch that saw two schemas mid-flight would
 //! decide what a caller may write and what a caller may see under two different rule sets, and the
 //! second half would carry no error.
@@ -50,7 +50,7 @@ impl SchemaSnapshot {
     }
 
     /// Does this class exist? Upstream's `classExists`, which decides whether a count short
-    /// circuits to zero rather than reaching the adapter (`DatabaseController.js:1524-1527`).
+    /// circuits to zero rather than reaching the adapter (`DatabaseController.js:1525-1528`).
     pub fn contains(&self, class_name: &str) -> bool {
         self.classes.contains_key(class_name)
     }
@@ -58,7 +58,7 @@ impl SchemaSnapshot {
     /// The schema to read a class under.
     ///
     /// A missing class behaves as `{fields: {}}` rather than as an error
-    /// (`DatabaseController.js:1422-1432`), so a query against a class nobody has written yet
+    /// (`DatabaseController.js:1423-1433`), so a query against a class nobody has written yet
     /// returns nothing instead of failing. Note that this is **not** [`Self::resolve_for_write`]:
     /// the read fallback has no default columns at all, which is what makes every sort key on a
     /// non-existent class get dropped.
@@ -72,7 +72,7 @@ impl SchemaSnapshot {
     /// The schema to write a class under.
     ///
     /// A missing class resolves to the injected default schema, matching `enforceClassExists`
-    /// followed by `getOneSchema` on the create path (`DatabaseController.js:939-940`). The
+    /// followed by `getOneSchema` on the create path (`DatabaseController.js:940-941`). The
     /// difference from [`Self::get_or_default`] is load bearing: without `_Role.users` typed as a
     /// Relation, the first write to a role infers it from whatever it happens to carry.
     pub fn resolve_for_write(&self, class_name: &str) -> ClassSchema {

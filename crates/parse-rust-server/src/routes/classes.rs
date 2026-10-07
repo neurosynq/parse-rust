@@ -11,7 +11,7 @@
 
 use parse_rust_core::{ErrorCode, ParseError, ParseMap, ParseValue};
 use parse_rust_rest::{FindOptions, ParsedClause, ParsedWhere};
-use parse_rust_storage::{Constraint, StorageAdapter};
+use parse_rust_storage::{Constraint, ExplainVerbosity, StorageAdapter};
 use serde_json::{json, Value as Json};
 
 use crate::auth::Authority;
@@ -68,13 +68,30 @@ pub async fn find_core(
     params.reject_unknown_find_keys()?;
 
     let where_ = params.parse_where()?;
-    let options = params.find_options()?;
+    let options = params.find_options(&state.config().limit_policy())?;
     let wants_count = params.wants_count();
-
     let ctx = rc.ctx(state.storage());
-    let results = parse_rust_rest::find(&ctx, class_name, where_.clone(), options).await?;
 
-    let mut body = json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() });
+    // **`explain` ships with its authorization boundary.** A caller without the master key is
+    // refused unless `databaseOptions.allowPublicExplain` says otherwise (`rest.js:39-48`), and
+    // that check precedes the value's own validation, which upstream leaves to the adapter. The
+    // maintenance key is not the master key here, as upstream's `auth.isMaster` is not.
+    let mut body = if params.js_explain_requested() {
+        if !authority.is_master() && !state.config().allow_public_explain {
+            return Err(ParseError::invalid_query(
+                "Using the explain query parameter requires the master key",
+            ));
+        }
+        let verbosity = params
+            .explain()?
+            .unwrap_or(ExplainVerbosity::AllPlansExecution);
+        let explained =
+            parse_rust_rest::explain(&ctx, class_name, where_.clone(), options, verbosity).await?;
+        json!({ "results": explained })
+    } else {
+        let results = parse_rust_rest::find(&ctx, class_name, where_.clone(), options).await?;
+        json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() })
+    };
     if wants_count {
         let n = parse_rust_rest::count(&ctx, class_name, where_).await?;
         body["count"] = json!(n);
@@ -128,19 +145,22 @@ pub async fn create_core(
         rc.options.error_detail,
     )?;
     let mut body = decode_body(body, parse_rust_core::op::OpPath::Create)?;
+    if class_name == crate::routes::installations::INSTALLATION_CLASS {
+        crate::routes::installations::prepare(&mut body, true, rc.installation_id.as_deref())?;
+    }
     // The `RestWrite` constructor's first check, and it runs on the client's body before any
     // server-side identity is folded in (`RestWrite.js:50-65`).
     parse_rust_rest::enforce_object_id_policy(&body, state.config().allow_custom_object_id)?;
     if class_name == crate::routes::users::USER_CLASS {
         // `handleCreate`'s guard, which lives on `ClassesRouter` and therefore covers this route
-        // as well as signup (`ClassesRouter.js:105-112`).
+        // as well as signup (`ClassesRouter.js:111-118`).
         crate::routes::users::reject_role_prefixed_object_id(&body, rc)?;
         // Upstream's `!this.query && !hasAuthData` guard is not gated on the caller
-        // (`RestWrite.js:468-473`), so the master key does not buy an exemption from it. Before
+        // (`RestWrite.js:528`), so the master key does not buy an exemption from it. Before
         // the uniqueness query and the hash, as upstream orders those stages.
         crate::routes::users::require_create_credentials(&body)?;
         // **`transformUser` is not gated on the caller**, so a master create through this route
-        // gets the same username and email validation a signup does (`RestWrite.js:803-807`).
+        // gets the same username and email validation a signup does (`RestWrite.js:895-899`).
         // Without it, `POST /classes/_User` with the master key admitted case-only duplicate
         // usernames and malformed email addresses that `POST /users` refuses. The dashboard
         // creates users through this route. There is no self to exclude on a create, which is
@@ -177,6 +197,21 @@ pub async fn update_core(
     object_id: &str,
     body: &Json,
 ) -> Result<Json, ParseError> {
+    let out = update_inner(state, rc, authority, class_name, object_id, body).await;
+    if class_name == crate::routes::users::USER_CLASS {
+        return out.map_err(|e| crate::routes::users::as_session_missing(e, rc, authority));
+    }
+    out
+}
+
+async fn update_inner(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    class_name: &str,
+    object_id: &str,
+    body: &Json,
+) -> Result<Json, ParseError> {
     parse_rust_rest::enforce_class_security(
         class_name,
         authority.is_privileged(),
@@ -184,6 +219,9 @@ pub async fn update_core(
         rc.options.error_detail,
     )?;
     let mut body = decode_body(body, parse_rust_core::op::OpPath::Update)?;
+    if class_name == crate::routes::installations::INSTALLATION_CLASS {
+        crate::routes::installations::prepare(&mut body, false, rc.installation_id.as_deref())?;
+    }
     let is_user = class_name == crate::routes::users::USER_CLASS;
 
     // Whether this write changes the password, decided before `prepare_user_write` replaces the
@@ -199,9 +237,15 @@ pub async fn update_core(
         );
 
     if is_user {
+        crate::routes::users::authorize_user_update(state, rc, authority, object_id, &body).await?;
+        crate::routes::users::require_update_credentials(&body)?;
         crate::routes::users::enforce_user_update_policy(&body, rc, authority, object_id)?;
         crate::routes::users::validate_user_identity(state, rc, &body, object_id).await?;
-        crate::routes::users::force_owner_into_acl(&mut body, object_id, authority.is_privileged());
+        crate::routes::users::force_owner_into_acl(
+            &mut body,
+            object_id,
+            authority.is_privileged(),
+        )?;
         crate::routes::users::prepare_user_write(&mut body, false).await?;
     }
     let ctx = rc.ctx(state.storage());
@@ -220,11 +264,16 @@ pub async fn update_core(
             }
         })?;
 
-    let mut out = json!({ "updatedAt": res.updated_at.to_iso() });
+    // **The operation results first, then `updatedAt`.** Upstream's response starts as what the
+    // database update returned, the result-bearing operations, and `updatedAt` is assigned onto it
+    // afterwards (`RestWrite.js:1806-1808`), so it is the last key. Found by the benchmark
+    // correctness gate comparing an `Increment` and an `AddUnique` update on both servers.
+    let mut out = json!({});
     merge_echo(&mut out, res.echoed, rc, class_name);
+    out["updatedAt"] = json!(res.updated_at.to_iso());
 
     // **A password change revokes every session and, for a non-master caller, mints a replacement**
-    // (`RestWrite.js:1192-1211`). Both halves matter and they are not symmetric: revoking is what
+    // (`RestWrite.js:1284-1303`). Both halves matter and they are not symmetric: revoking is what
     // makes a password change mean anything, and the new token is what stops the caller logging
     // themselves out by changing their own password. Master gets the revocation and no new token,
     // because upstream gates `generateNewSession` on the caller not being master.
@@ -243,7 +292,7 @@ pub async fn update_core(
                     // **No `createdWith`.** `setCreatedWith` computes `login` only when an auth
                     // provider is in storage and `signup` only on a create; a password update is
                     // neither, so it returns before setting anything and upstream's replacement
-                    // session carries no such column (`RestWrite.js:860-870`). Writing
+                    // session carries no such column (`RestWrite.js:952-962`). Writing
                     // `{"action":"login"}` here would be visible through `/sessions/me` and would
                     // describe a login that did not happen.
                     created_with: None,
@@ -271,7 +320,15 @@ pub async fn delete_core(
         rc.options.error_detail,
     )?;
     let ctx = rc.ctx(state.storage());
-    parse_rust_rest::delete(&ctx, class_name, object_id).await?;
+    parse_rust_rest::delete(&ctx, class_name, object_id)
+        .await
+        .map_err(|e| {
+            if class_name == crate::routes::users::USER_CLASS {
+                crate::routes::users::as_session_missing(e, rc, authority)
+            } else {
+                e
+            }
+        })?;
     // Upstream answers an empty object, not 204.
     Ok(json!({}))
 }
@@ -279,7 +336,7 @@ pub async fn delete_core(
 /// Fold the post-write value of any operation the request carried into the response.
 ///
 /// `protectedFieldsSaveResponseExempt` decides whether a protected field survives that fold. It
-/// defaults to `true` (`Options/Definitions.js:507-512`), which is the pass-through case; set to
+/// defaults to `true` (`Options/Definitions.js:513-518`), which is the pass-through case; set to
 /// `false` the echo is stripped the same way a query result is.
 fn merge_echo(out: &mut Json, echoed: ParseMap, rc: &RequestContext, class_name: &str) {
     if echoed.is_empty() {

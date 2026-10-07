@@ -46,7 +46,7 @@ pub enum Credentials {
 ///
 /// `installationId` is not a credential and grants nothing. It is carried because exactly one
 /// behavior reads it: `destroyDuplicatedSessions` revokes a user's other sessions for the *same*
-/// installation when a new one is minted (`RestWrite.js:1153`), so a request that drops the
+/// installation when a new one is minted (`RestWrite.js:1245`), so a request that drops the
 /// header logs the user in twice on one device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authority {
@@ -82,7 +82,7 @@ pub enum HeaderRejection {
     /// Wrong or missing appId, or a required client key was absent or wrong.
     ///
     /// Upstream answers all of these identically: HTTP 403, body `{"error":"unauthorized"}`,
-    /// with **no `code` field** (`middlewares.js:829-832`). Collapsing the reasons is
+    /// with **no `code` field** (`middlewares.js:845-848`). Collapsing the reasons is
     /// deliberate upstream, and reproducing it means not adding a more helpful message.
     Unauthorized,
 }

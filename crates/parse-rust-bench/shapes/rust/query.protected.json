@@ -1,0 +1,4 @@
+[
+  "find _SCHEMA {}",
+  "find BenchProtected {n:{$lt:int32},_rperm:{$in:[null,string,string]}}"
+]

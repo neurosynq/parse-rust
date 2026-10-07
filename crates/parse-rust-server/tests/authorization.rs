@@ -41,7 +41,7 @@ async fn set_clp(host: &str, class_name: &str, clp: Value) {
 
 /// A second server on the same database with `enableSanitizedErrorResponse` off.
 ///
-/// The option's default is `true` (`Options/Definitions.js:253-258`), so the messages a stock
+/// The option's default is `true` (`Options/Definitions.js:259-264`), so the messages a stock
 /// deployment emits are the generic ones and the detailed ones only exist under this
 /// configuration. Both are wire contract, and a test that asserts one regime says nothing about
 /// the other.
@@ -703,7 +703,7 @@ async fn the_save_response_exemption_controls_the_operation_echo() {
 /// Two `_Role` rows may not share a name.
 ///
 /// Upstream creates a unique index on `_Role.name` at startup unless `createIndexRoleName` is
-/// explicitly `false` (`DatabaseController.js:2033-2038`). It is a privilege-escalation guard
+/// explicitly `false` (`DatabaseController.js:2045-2050`). It is a privilege-escalation guard
 /// rather than data hygiene: an ACL entry names a role by string, so a second role called
 /// `Admins` would grant every member of both to anything ACLed `role:Admins`.
 #[tokio::test]
@@ -784,7 +784,7 @@ async fn a_second_role_with_the_same_name_is_refused() {
 ///
 /// Two things are asserted. The refusal is a 500 rather than an unconstrained query, because
 /// failing open here would hand the whole class to the caller. And the body is the generic one:
-/// upstream throws a plain `Error` here (`DatabaseController.js:1803-1805`), which
+/// upstream throws a plain `Error` here (`DatabaseController.js:1804-1806`), which
 /// `handleParseErrors` renders as `{"code":1,"message":"Internal server error."}` with the key
 /// `message` and none of the detail (`middlewares.js:636-644`).
 #[tokio::test]
@@ -876,7 +876,7 @@ async fn the_role_name_index_can_be_turned_off() {
 /// hash the read pipeline strips. That read answers to no CLP, no ACL and no `protectedFields`, so
 /// returning it puts every protected field on the wire at every login while the response looks
 /// entirely ordinary. Upstream re-fetches under the caller's own auth for exactly this reason
-/// (`UsersRouter.js:349-387`).
+/// (`UsersRouter.js:360-398`).
 ///
 /// **`protectedFieldsOwnerExempt` is turned off here, and the test is worthless without it.** At
 /// login the caller is always the owner of the row being returned, so at the default of `true` the

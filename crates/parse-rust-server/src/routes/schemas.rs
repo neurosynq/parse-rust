@@ -350,7 +350,7 @@ async fn apply_indexes(
 /// `DELETE /schemas/:className`.
 ///
 /// A non-empty class is code `255` `Class <X> is not empty, contains <N> objects, cannot drop
-/// schema.` (`DatabaseController.js:1621-1626`). Count first, then drop.
+/// schema.` (`DatabaseController.js:1622-1627`). Count first, then drop.
 pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseError> {
     if !parse_rust_schema::class_name_is_valid(class_name) {
         return Err(ParseError::new(
@@ -360,7 +360,7 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
     }
     // A class with no `_SCHEMA` row is not an error, and it is **not** a reason to stop either.
     // `getOneSchema` rejects with `undefined`, the caller substitutes `{fields: {}}`, and the count
-    // and the drop then run against that (`DatabaseController.js:1603-1627`). The
+    // and the drop then run against that (`DatabaseController.js:1604-1628`). The
     // `collectionExists` result is discarded by the `.then(() => ...)` that follows it, so nothing
     // upstream short-circuits on it.
     //
@@ -388,7 +388,7 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
 /// `DELETE /purge/:className`.
 ///
 /// Deletes every row and keeps the class, its schema entry and its join tables
-/// (`DatabaseController.js:461-465`, `PurgeRouter.js:19-23`).
+/// (`DatabaseController.js:462-466`, `PurgeRouter.js:19-23`).
 ///
 /// Upstream additionally clears the user cache for `_Session` and the role cache for `_Role`
 /// (`PurgeRouter.js:19-23`). parse-rust caches neither, so there is nothing to clear; stating that

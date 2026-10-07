@@ -34,7 +34,7 @@ use crate::value::{ParseMap, ParseValue};
 /// The seven operations a CLP can restrict.
 ///
 /// `addField` is one of them, and it is checked on every non-master write that introduces a key
-/// the schema does not have (`DatabaseController.js:970-998`).
+/// the schema does not have (`DatabaseController.js:971-999`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Operation {
     Find,
@@ -326,7 +326,7 @@ impl ClassLevelPermissions {
 
     /// The class's declared default ACL, if it has one that upstream would stamp on a create.
     ///
-    /// `None` covers three cases that upstream's condition collapses (`RestWrite.js:379-384`):
+    /// `None` covers three cases that upstream's condition collapses (`RestWrite.js:439-444`):
     /// the `ACL` key is absent; its value is falsy, which is `schema?.classLevelPermissions?.ACL`
     /// failing its own truthiness test; or it is exactly the public ACL, which upstream skips
     /// because stamping `{"*": {"read": true, "write": true}}` on a row would only reproduce what
@@ -350,7 +350,7 @@ impl ClassLevelPermissions {
 
     /// Every pointer field that applies to an operation, per-op first then class-wide, deduped.
     ///
-    /// Order is upstream's (`DatabaseController.js:1749-1764`) and matters, because the clauses
+    /// Order is upstream's (`DatabaseController.js:1750-1765`) and matters, because the clauses
     /// are composed into an `$or` whose element order is observable in a compiled query.
     pub fn applicable_pointer_fields(&self, operation: Operation) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -373,7 +373,7 @@ impl ClassLevelPermissions {
 /// Is this value what `JSON.stringify` would render as `{"*":{"read":true,"write":true}}`?
 ///
 /// The one comparison upstream makes by stringifying both sides
-/// (`RestWrite.js:382-383`), which makes it **sensitive to key order**: a block spelled
+/// (`RestWrite.js:442-443`), which makes it **sensitive to key order**: a block spelled
 /// `{"*":{"write":true,"read":true}}` stringifies differently and is therefore not the public ACL,
 /// so upstream stamps it onto every new object. The observable result is the same permissions
 /// either way, but the row carries `_rperm` and `_wperm` in one case and neither in the other, and

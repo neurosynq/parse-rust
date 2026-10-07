@@ -768,7 +768,7 @@ async fn delete_fields_removes_the_column_and_the_schema_entry() {
 /// The `_Role.name` index, and specifically its **name**.
 ///
 /// Upstream creates it with `ensureUniqueness('_Role', requiredRoleFields, ['name'])`
-/// (`DatabaseController.js:2033-2038`) and passes no index name, so MongoDB auto-generates
+/// (`DatabaseController.js:2045-2050`) and passes no index name, so MongoDB auto-generates
 /// `name_1`. That string is contract rather than cosmetic: both adapters recover
 /// `duplicated_field` by regex over the index name, and the Mongo regex
 /// (`MongoStorageAdapter.js:582`) matches only the auto-generated `<field>_1` form. Naming the

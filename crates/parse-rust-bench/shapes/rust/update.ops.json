@@ -1,0 +1,4 @@
+[
+  "find _SCHEMA {}",
+  "findAndModify BenchCounter {_id:string,_wperm:{$in:[null,string]}}"
+]

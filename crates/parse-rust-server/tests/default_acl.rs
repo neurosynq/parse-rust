@@ -80,7 +80,7 @@ async fn create_object(host: &str, class: &str, token: &str) -> String {
 ///
 /// It is the only way the caller learns what permissions its object got: on a private class it
 /// cannot read the row back to find out, and nothing else in the response mentions the ACL.
-/// Upstream marks the field as changed by the server and returns it (`RestWrite.js:394`), measured
+/// Upstream marks the field as changed by the server and returns it (`RestWrite.js:454`), measured
 /// at the pin. Asserted separately from the read-back tests because those pass whether or not the
 /// response says anything.
 #[tokio::test]

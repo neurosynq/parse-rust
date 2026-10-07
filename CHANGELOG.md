@@ -11,6 +11,99 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
+## Unreleased (0.3.0)
+
+The conformance milestone. parse-rust is now measured against parse-server's own test suite rather
+than only against tests this project wrote for itself, and the reference is parse-server **9.10.3**,
+a release, where 0.2.x was measured against a 9.10.1 alpha.
+
+**Two authorization fixes apply to 0.2.0 and 0.2.1, and they are the reason to take this release
+promptly.** A `_User` update now checks that the caller may write the target account before it
+reads anything about it, as parse-server 9.10.3 does (GHSA-p49q-9w65-f9p7). And `ACL` values on a
+create are now lowered exactly as parse-server lowers them, so the stored permissions match
+parse-server's for every shape a client can send.
+
+### Added
+
+- **The conformance harness**, `tools/conformance/run.mjs`. It runs upstream's spec files at the
+  pin against parse-rust, block by block, and proves its subject three ways: every request carries
+  the block that sent it and parse-rust counts them, the suite is run again with no server and the
+  blocks that still pass must be exactly the ones declared client-only, and the identical patched
+  suite must pass against parse-server built at the pin.
+- **Geo queries**: `$nearSphere` with `$maxDistance` and its radian, mile and kilometre spellings,
+  `$within` with `$box`, `$geoWithin` with `$polygon` or `$centerSphere`, and `$geoIntersects`, with
+  upstream's validation messages. A count rewrites `$nearSphere` the way upstream does, inside
+  `$or` too. A geo-near query on a field with no geo index builds a `2d` index and retries once,
+  as upstream does.
+- **`$text`** with `$search`, `$language`, `$caseSensitive` and `$diacriticSensitive`, building a
+  `<field>_text` index and recording it in `_SCHEMA` the first time a field is searched.
+- **`explain`, `hint` and `comment`** on find. `explain` requires the master key unless
+  `databaseOptions.allowPublicExplain` is set, which defaults to false, so a query plan is never
+  disclosed at the default.
+- **`defaultLimit` and `maxLimit`.** `maxLimit` caps the resolved row count.
+- **`accountLockout`**: the failed-login counter, the lock and its expiry, on the same
+  `_failed_login_count` and `_account_lockout_expires_at` columns parse-server uses, so a lock set by
+  either server in a mixed fleet is honored by the other. `unlockOnPasswordReset` is accepted and has
+  no effect, because there is no password reset yet.
+- **`_Installation` validation.** `/classes/_Installation` has been reachable since 0.2.0 with none
+  of upstream's write checks; 0.2.x listed installations among the absent subsystems, which was
+  wrong. 0.3.0 adds the checks that need no lookup: string types for the three id
+  fields, an id on every create from the body or the `X-Parse-Installation-Id` header, a
+  `deviceType` on every create, and lowercasing of a 64-character `deviceToken` and of
+  `installationId`. The deduplication that follows upstream is not implemented.
+- A `test-harness` cargo feature, off by default, that adds the harness's two control routes. A
+  release build has neither.
+- **A benchmark harness**, `parse-rust-bench`, which is not published, and a
+  `bench-instrumentation` cargo feature, off by default, that attributes database time to each
+  request. It times seven workloads against parse-server at three injected database latencies,
+  after checking both servers give the same answer, and four microbenchmark families over frozen
+  corpora. The report publishes distributions only, with no faster or slower verdict, until a noise
+  floor exists to justify one.
+
+### Changed
+
+- **`limit` and `skip` are read as JavaScript reads them**: `Number()` over the decoded value, then
+  the driver's truncation, as upstream reads them. `limit=0` answers an empty result
+  without asking the database, and so without asking for `find` permission, which is what lets a
+  class whose CLP grants only `count` be counted.
+- **`ACL` lowering follows parse-server's exactly.** An array's indices are principals, a flag is
+  tested for truthiness rather than for `true`, integer-like principals are stored first in
+  ascending order, a `null` entry is refused with a 500 and writes nothing, as is a `Batch`
+  operation as an `ACL`.
+- **`_User` signup refuses the `ACL` shapes parse-server refuses**, with its responses: a
+  non-`Delete` operation with 400, code -1, `ACL must be a Parse ACL.`; an entry that cannot be built
+  into a `Parse.ACL` with a 500. A truthy scalar `ACL` is 400, code -1, on signup and on update.
+- **A non-owner `_User` update that is not found answers 206 `Permission denied`**, as upstream's
+  does, not 101.
+- **An empty or non-string `username` or `password` on a `_User` update** is refused with 200 or
+  201, as 9.10.3 refuses it, master key included. A non-string `password` was 111.
+- **The create and update CLP gates run before the `addField` gate and the required-column check**,
+  as 9.10.3 orders them, so a write failing two checks names the operation.
+- **A `File` whose `name` is not a non-empty string is refused at any depth** with 111 `This is not
+  a valid File`, as 9.10.3 refuses it.
+- **An update response lists the operation results first and `updatedAt` last**, upstream's order.
+- **An `include` replaces each pointer where it stands** rather than moving it to the end of its
+  object, so an included object's keys keep upstream's order.
+- **A storage error on a find answers `{"code":1,"error":"An internal server error occurred"}`**,
+  upstream's body for that path.
+
+### Deliberate differences
+
+- A `_User` signup whose `ACL` parse-server refuses is refused before the insert, in both of
+  upstream's branches. Without an `email` on the body, parse-server inserts the row and then
+  refuses, leaving the username taken; parse-rust leaves nothing.
+- A truthy scalar `ACL` on `_User` is always 400, where parse-server answers 400 or 500 depending
+  on whether the body carries an `email`, and 500 on an update.
+- `objectId: {"__op":"Delete"}` under `allowCustomObjectId` stays refused with 107. parse-server
+  accepts it and stores the row under an id the client is never told.
+
+### Known limitations
+
+- `$select`, `$dontSelect`, `$inQuery`, `$notInQuery`, `$containedBy`, `$score` ordering,
+  `includeAll` and `redirectClassNameForKey` are still refused by name, and the conformance run
+  reports the blocks that need them as failures.
+- Cloud Code, triggers, LiveQuery, files, push, GraphQL and Postgres are unchanged from 0.2.0.
+
 ## 0.2.1
 
 A security patch. Three authorization decisions were broader in 0.2.0 than they are in

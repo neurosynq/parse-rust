@@ -11,8 +11,8 @@ use parse_rust_schema::storage_format::{
     field_type_to_storage, storage_to_field_type, NON_FIELD_KEYS,
 };
 use parse_rust_storage::{
-    join_table_name, AddFieldOutcome, ClassSchema, FieldType, Query, QueryOptions, Row,
-    SchemaIndex, SortDirection, StorageAdapter, Update, WriteResult,
+    join_table_name, AddFieldOutcome, ClassSchema, ExplainVerbosity, FieldType, Hint, Query,
+    QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update, WriteResult,
 };
 
 use crate::transform::{
@@ -57,7 +57,19 @@ pub struct MongoAdapter {
 
 impl MongoAdapter {
     pub async fn connect(uri: &str, database: &str) -> Result<Self, ParseError> {
+        #[cfg(not(feature = "bench-instrumentation"))]
         let client = Client::with_uri_str(uri).await.map_err(mongo_err)?;
+        // The benchmark build installs the command monitor; see `bench`.
+        #[cfg(feature = "bench-instrumentation")]
+        let client = {
+            let mut options = mongodb::options::ClientOptions::parse(uri)
+                .await
+                .map_err(mongo_err)?;
+            options.command_event_handler = Some(mongodb::event::EventHandler::callback(
+                crate::bench::on_command,
+            ));
+            Client::with_options(options).map_err(mongo_err)?
+        };
         Ok(Self {
             db: client.database(database),
         })
@@ -271,7 +283,7 @@ fn index_name(message: &str) -> Option<&str> {
 /// (`index: username_1`) the greedy leading class eats all but the last letter, so the capture is
 /// `e`, not `username`. It captures correctly only against the legacy `index: <db>.$username_1`
 /// spelling, where `$` is outside the class and stops the greed. Upstream therefore reaches 202
-/// and 203 through the fallback queries at `RestWrite.js:1718-1755` rather than through
+/// and 203 through the fallback queries at `RestWrite.js:1857-1894` rather than through
 /// `duplicated_field`, and the wire result is the same either way. This returns the whole field
 /// name, which is what the fast path was written to produce.
 fn duplicated_field(message: &str) -> Option<String> {
@@ -293,6 +305,63 @@ fn duplicated_field(message: &str) -> Option<String> {
         return Some(name.to_string());
     }
     None
+}
+
+/// The sort document for a read, or `None` when the read is unordered.
+fn sort_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
+    if options.order.is_empty() {
+        return None;
+    }
+    let mut sort = Document::new();
+    for (key, dir) in &options.order {
+        let dir = match dir {
+            SortDirection::Ascending => 1,
+            SortDirection::Descending => -1,
+        };
+        sort.insert(storage_key(schema, key), dir);
+    }
+    Some(sort)
+}
+
+/// The projection for a read, or `None` for every field.
+fn projection_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
+    let keys = options.keys.as_ref()?;
+    let mut projection = Document::new();
+    for k in keys {
+        projection.insert(storage_key(schema, k), 1);
+    }
+    // Always projected regardless of `keys`:
+    //  - the permission columns, because ACL filtering happens after the read and projecting them
+    //    away would make every row look public;
+    //  - the timestamps, which Parse returns on every object whether asked for or not.
+    for always in ["_rperm", "_wperm", "_created_at", "_updated_at"] {
+        projection.insert(always, 1);
+    }
+    Some(projection)
+}
+
+/// A hint as the driver takes it. A key pattern's values pass through as numbers or strings,
+/// untranslated, which is what upstream hands its driver.
+fn hint_doc(hint: &Hint) -> mongodb::options::Hint {
+    match hint {
+        Hint::Name(name) => mongodb::options::Hint::Name(name.clone()),
+        Hint::Keys(keys) => {
+            let mut doc = Document::new();
+            for (key, value) in keys {
+                let value = match value {
+                    &ParseValue::Number(n) if n.fract() == 0.0 && n.abs() < f64::from(i32::MAX) => {
+                        Bson::Int32(n as i32)
+                    }
+                    &ParseValue::Number(n) => Bson::Double(n),
+                    ParseValue::String(s) => Bson::String(s.clone()),
+                    &ParseValue::Bool(b) => Bson::Boolean(b),
+                    _ => Bson::Null,
+                };
+                doc.insert(key.clone(), value);
+            }
+            mongodb::options::Hint::Keys(doc)
+        }
+    }
 }
 
 fn mongo_err(e: mongodb::error::Error) -> ParseError {
@@ -333,6 +402,177 @@ fn merge_over_empty_clps(stored: &Document) -> Result<ParseMap, ParseError> {
         out.insert(key.clone(), crate::transform::bson_to_parse_value(value)?);
     }
     Ok(out)
+}
+
+impl MongoAdapter {
+    /// One find against the collection, every option applied, every document read.
+    async fn raw_find(
+        &self,
+        schema: &ClassSchema,
+        filter: Document,
+        options: &QueryOptions,
+    ) -> Result<Vec<Document>, mongodb::error::Error> {
+        // Bind the collection first: the driver's fluent builder borrows it, so building directly
+        // off a temporary would drop it while still in use.
+        let collection = self.db.collection::<Document>(&schema.class_name);
+        let mut find = collection.find(filter);
+        if options.case_insensitive {
+            // `{caseInsensitive: true}` resolves to this collation (`MongoStorageAdapter.js:801-803`,
+            // `MongoCollection.js:134-136`). Applied to the find rather than approximated in the
+            // filter, because strength 2 normalizes as well as folding case, which no regex over
+            // the stored value can reproduce.
+            find = find.collation(
+                mongodb::options::Collation::builder()
+                    .locale("en_US".to_string())
+                    .strength(mongodb::options::CollationStrength::Secondary)
+                    .build(),
+            );
+        }
+        if let Some(limit) = options.limit {
+            find = find.limit(i64::from(limit));
+        }
+        if let Some(skip) = options.skip {
+            find = find.skip(u64::from(skip));
+        }
+        if let Some(sort) = sort_doc(schema, options) {
+            find = find.sort(sort);
+        }
+        if let Some(projection) = projection_doc(schema, options) {
+            find = find.projection(projection);
+        }
+        if let Some(hint) = &options.hint {
+            find = find.hint(hint_doc(hint));
+        }
+        if let Some(comment) = &options.comment {
+            find = find.comment(Bson::String(comment.clone()));
+        }
+        let mut cursor = find.await?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await? {
+            out.push(doc);
+        }
+        Ok(out)
+    }
+}
+
+impl MongoAdapter {
+    /// `createTextIndexesIfNeeded` (`MongoStorageAdapter.js:1214-1243`): a `$text` search on a field
+    /// no recorded index covers builds `<field>_text` and records it in `_metadata.indexes`, which
+    /// is what a parse-server node reading the same class expects to find. Upstream acts on the
+    /// first such field and stops, so this does too.
+    ///
+    /// A conflicting index, code 85, is left as it stands: Mongo allows one text index per
+    /// collection and searches it whichever field it covers.
+    async fn create_text_indexes_if_needed(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+    ) -> Result<(), ParseError> {
+        let Some(field) = crate::transform::text_search_fields(query)
+            .into_iter()
+            .next()
+        else {
+            return Ok(());
+        };
+        let mut existing = schema.indexes.clone().unwrap_or_default();
+        let covered = existing
+            .values()
+            .any(|index| matches!(index, ParseValue::Object(keys) if keys.contains_key(&field)));
+        if covered {
+            return Ok(());
+        }
+        // `setIndexesWithSchemaFormat` refuses an index on a field the class does not have
+        // (`MongoStorageAdapter.js:377-389`). Without this, a `$text` on any name builds an index and
+        // records it in `_SCHEMA`, and Mongo's one-text-index-per-collection rule then holds that
+        // slot for every server on the database.
+        if !schema.fields.contains_key(&field) {
+            return Err(ParseError::new(
+                ErrorCode::InvalidQuery,
+                format!("Field {field} does not exist, cannot add index."),
+            ));
+        }
+        if existing.is_empty() {
+            let mut id = ParseMap::new();
+            id.insert("_id".into(), ParseValue::Number(1.0));
+            existing.insert("_id_".into(), ParseValue::Object(id));
+        }
+        let name = format!("{field}_text");
+        let created = self
+            .create_indexes(
+                &schema.class_name,
+                &[SchemaIndex {
+                    name: name.clone(),
+                    keys: vec![(field.clone(), ParseValue::String("text".into()))],
+                }],
+            )
+            .await;
+        match created {
+            Ok(()) => {
+                let mut keys = ParseMap::new();
+                keys.insert(field, ParseValue::String("text".into()));
+                existing.insert(name, ParseValue::Object(keys));
+                self.set_indexes(&schema.class_name, &existing).await
+            }
+            Err(e)
+                if e.message.contains("IndexOptionsConflict") || e.message.contains("code 85") =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Mongo's "no geo index" refusal: code 17007, or the message on servers that dropped the code.
+fn is_missing_geo_index(e: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Command(c) = e.kind.as_ref() {
+        if c.code == 17007 {
+            return true;
+        }
+    }
+    driver_message(e).is_some_and(|m| {
+        m.contains("unable to find index for $geoNear")
+            || m.contains("unable to find index for geoNear")
+    })
+}
+
+/// `field=<name> `, which servers before 8.3 embed in that error.
+fn geo_index_field_from_message(e: &mongodb::error::Error) -> Option<String> {
+    let message = driver_message(e)?;
+    let rest = &message[message.find("field=")? + "field=".len()..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty() && rest[name.len()..].starts_with(' ')).then_some(name)
+}
+
+/// `findGeoIndexField` (`MongoCollection.js:19-44`): the field a geo-near operator constrains, at
+/// the top level or inside `$and`, which are the only places Mongo allows one.
+fn find_geo_index_field(query: &Document) -> Option<String> {
+    for (field, value) in query {
+        if field == "$and" {
+            if let Bson::Array(items) = value {
+                for item in items {
+                    if let Bson::Document(sub) = item {
+                        if let Some(found) = find_geo_index_field(sub) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if let Bson::Document(constraint) = value {
+            if ["$nearSphere", "$near", "$geoNear"]
+                .iter()
+                .any(|op| constraint.contains_key(op))
+            {
+                return Some(field.clone());
+            }
+        }
+    }
+    None
 }
 
 impl StorageAdapter for MongoAdapter {
@@ -692,7 +932,7 @@ impl StorageAdapter for MongoAdapter {
             .map_err(mongo_err)?;
 
         // Every join collection belonging to the class goes with it
-        // (`DatabaseController.js:1631-1638`). Note that the join collections have no `_SCHEMA`
+        // (`DatabaseController.js:1632-1639`). Note that the join collections have no `_SCHEMA`
         // row, so there is nothing else to remove for them.
         for join in joins {
             if let Err(e) = self.db.collection::<Document>(&join).drop().await {
@@ -775,7 +1015,7 @@ impl StorageAdapter for MongoAdapter {
         row: &Row,
     ) -> Result<(), ParseError> {
         // Upstream hands the same document to `transformUpdate`, which lifts plain values onto
-        // `$set` (`DatabaseController.js:794-806` calling `upsertOneObject`). A join membership is
+        // `$set` (`DatabaseController.js:795-807` calling `upsertOneObject`). A join membership is
         // exactly `{relatedId, owningId}`, so adding a user to a role twice is one row.
         //
         // Nothing here writes to `_SCHEMA`. Join collections have no schema document upstream, and
@@ -802,72 +1042,91 @@ impl StorageAdapter for MongoAdapter {
         query: &Query,
         options: &QueryOptions,
     ) -> Result<Vec<Row>, ParseError> {
-        let filter = transform_where(schema, query)?;
-        // Bind the collection first: the driver's fluent builder borrows it, so building
-        // directly off a temporary would drop it while still in use.
-        let collection = self.db.collection::<Document>(&schema.class_name);
-        let mut find = collection.find(filter);
-
-        if options.case_insensitive {
-            // `{caseInsensitive: true}` resolves to this collation
-            // (`MongoStorageAdapter.js:801-803`, `MongoCollection.js:134-136`). Applied to the
-            // find rather than approximated in the filter, because strength 2 normalizes as well
-            // as folding case, which no regex over the stored value can reproduce.
-            find = find.collation(
-                mongodb::options::Collation::builder()
-                    .locale("en_US".to_string())
-                    .strength(mongodb::options::CollationStrength::Secondary)
-                    .build(),
-            );
+        // The driver reads 0 as "no limit", which is the opposite of what a caller asking for zero
+        // rows means. Short-circuit instead.
+        if options.limit == Some(0) {
+            return Ok(Vec::new());
         }
-
-        if let Some(limit) = options.limit {
-            // The driver reads 0 as "no limit", which is the opposite of what a caller asking for
-            // zero rows means. Short-circuit instead.
-            if limit == 0 {
-                return Ok(Vec::new());
+        let filter = transform_where(schema, query)?;
+        self.create_text_indexes_if_needed(schema, query).await?;
+        let docs = match self.raw_find(schema, filter.clone(), options).await {
+            Ok(docs) => docs,
+            // **A geo-near query on a field with no geo index is answered by building one and
+            // retrying, once** (`MongoCollection.js:91-127`). Upstream never creates the index
+            // ahead of time for a GeoPoint field, so a database parse-server populated may have
+            // none, and refusing the query would be a regression against it. The field comes from
+            // the error message on servers that still include it and from the query otherwise.
+            Err(e) if is_missing_geo_index(&e) => {
+                let field =
+                    geo_index_field_from_message(&e).or_else(|| find_geo_index_field(&filter));
+                let Some(field) = field else {
+                    return Err(mongo_err(e));
+                };
+                self.db
+                    .collection::<Document>(&schema.class_name)
+                    .create_index(IndexModel::builder().keys(doc! { field: "2d" }).build())
+                    .await
+                    .map_err(mongo_err)?;
+                self.raw_find(schema, filter, options)
+                    .await
+                    .map_err(mongo_err)?
             }
-            find = find.limit(limit as i64);
+            Err(e) => return Err(mongo_err(e)),
+        };
+        docs.iter()
+            .map(|doc| mongo_object_to_parse(schema, doc))
+            .collect()
+    }
+
+    async fn explain(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        options: &QueryOptions,
+        verbosity: ExplainVerbosity,
+    ) -> Result<serde_json::Value, ParseError> {
+        // The same find the driver would run, as a command, inside `explain`. Upstream asks the
+        // Node driver's cursor for `.explain(verbosity)` (`MongoCollection.js:176`), which sends
+        // exactly this.
+        let mut find = doc! {
+            "find": schema.class_name.as_str(),
+            "filter": transform_where(schema, query)?,
+        };
+        if let Some(limit) = options.limit {
+            find.insert("limit", i64::from(limit));
         }
         if let Some(skip) = options.skip {
-            find = find.skip(skip as u64);
+            find.insert("skip", i64::from(skip));
         }
-        if !options.order.is_empty() {
-            let mut sort = Document::new();
-            for (key, dir) in &options.order {
-                let dir = match dir {
-                    SortDirection::Ascending => 1,
-                    SortDirection::Descending => -1,
-                };
-                sort.insert(storage_key(schema, key), dir);
-            }
-            find = find.sort(sort);
+        if let Some(sort) = sort_doc(schema, options) {
+            find.insert("sort", sort);
         }
-        if let Some(keys) = &options.keys {
-            let mut projection = Document::new();
-            for k in keys {
-                projection.insert(storage_key(schema, k), 1);
-            }
-            // Always projected regardless of `keys`:
-            //  - the permission columns, because ACL filtering happens after the read and
-            //    projecting them away would make every row look public;
-            //  - the timestamps, which Parse returns on every object whether asked for or not.
-            for always in ["_rperm", "_wperm", "_created_at", "_updated_at"] {
-                projection.insert(always, 1);
-            }
-            find = find.projection(projection);
+        if let Some(projection) = projection_doc(schema, options) {
+            find.insert("projection", projection);
         }
-
-        let mut cursor = find.await.map_err(mongo_err)?;
-        let mut out = Vec::new();
-        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            out.push(mongo_object_to_parse(schema, &doc)?);
+        if let Some(hint) = &options.hint {
+            find.insert(
+                "hint",
+                match hint_doc(hint) {
+                    mongodb::options::Hint::Name(n) => Bson::String(n),
+                    mongodb::options::Hint::Keys(k) => Bson::Document(k),
+                    _ => Bson::Null,
+                },
+            );
         }
-        Ok(out)
+        if let Some(comment) = &options.comment {
+            find.insert("comment", comment.as_str());
+        }
+        let explained = self
+            .db
+            .run_command(doc! { "explain": find, "verbosity": verbosity.as_str() })
+            .await
+            .map_err(mongo_err)?;
+        Ok(Bson::Document(explained).into_relaxed_extjson())
     }
 
     async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
-        let filter = transform_where(schema, query)?;
+        let filter = crate::transform::transform_where_for_count(schema, query)?;
         self.db
             .collection::<Document>(&schema.class_name)
             .count_documents(filter)

@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod features;
 pub mod health;
 pub mod http;
+pub mod installations;
 pub mod schemas;
 pub mod sessions;
 pub mod users;

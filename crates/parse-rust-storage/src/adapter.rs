@@ -185,7 +185,7 @@ pub trait StorageAdapter: Send + Sync {
     /// Insert a row, or do nothing if one already matches.
     ///
     /// Exists for join tables, whose membership rows carry no objectId and must be idempotent:
-    /// adding a user to a role twice is one membership (`DatabaseController.js:794-806`).
+    /// adding a user to a role twice is one membership (`DatabaseController.js:795-807`).
     fn upsert_one(
         &self,
         schema: &ClassSchema,
@@ -200,6 +200,19 @@ pub trait StorageAdapter: Send + Sync {
         query: &Query,
         options: &QueryOptions,
     ) -> impl Future<Output = Result<Vec<Row>, ParseError>> + Send;
+
+    /// Describe how the database would run a find, rather than running it.
+    ///
+    /// The result is the database's own explain document, returned to the client verbatim as
+    /// `results` (`MongoStorageAdapter.js:774-776`). It is not a Parse value and nothing reads it
+    /// back, so it is plain JSON rather than a [`Row`].
+    fn explain(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        options: &QueryOptions,
+        verbosity: crate::ExplainVerbosity,
+    ) -> impl Future<Output = Result<serde_json::Value, ParseError>> + Send;
 
     /// Count rows matching the query.
     fn count(
@@ -225,7 +238,7 @@ pub trait StorageAdapter: Send + Sync {
     ///
     /// Needed because an update carrying an op has to tell the client the resulting value:
     /// `_sanitizeDatabaseResult` reads it off the document the adapter returns
-    /// (`DatabaseController.js:2129-2157`), and upstream gets it from `findOneAndUpdate` with
+    /// (`DatabaseController.js:2141-2169`), and upstream gets it from `findOneAndUpdate` with
     /// `returnDocument: 'after'` (`MongoStorageAdapter.js:660-665`). `Ok(None)` means nothing
     /// matched.
     fn update_one_returning(

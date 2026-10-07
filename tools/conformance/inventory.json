@@ -1,0 +1,2483 @@
+{
+  "pin": "4ec73c57725d0157157e2a918ca518e5853c98ea",
+  "files": {
+    "ParseObject.spec.js": {
+      "floor": 82,
+      "upstream_hash": "3b5ad71ce733b5ad",
+      "blocks": {
+        "3127bb5f3191a0c2": {
+          "name": "Parse.Object testing cannot save object with invalid field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dd6d36f7f94e0fbc": {
+          "name": "Parse.Object testing fetchAll User attributes get merged",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "3caee2025772ff54": {
+          "name": "Parse.Object testing invalid class name",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the save fails; a refused connection satisfies it"
+        },
+        "e2b4e52193110a8c": {
+          "name": "Parse.Object testing removes with object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5bdb508b9fe1cc91": {
+          "name": "Parse.Object testing can increment array nested fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f196e591c58c11e0": {
+          "name": "Parse.Object testing should create nested keys with _",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8e7109c79e854776": {
+          "name": "Parse.Object testing many saves after a failure",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "204fd0bfc2608341": {
+          "name": "Parse.Object testing unknown attribute clear then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "464baeddf9b78813": {
+          "name": "Parse.Object testing new attribute clear then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "49b315651caca3d1": {
+          "name": "Parse.Object testing createdAt is reasonable",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "18b44cb019cf6d09": {
+          "name": "Parse.Object testing old attribute unset then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "266bef032cd7815d": {
+          "name": "Parse.Object testing fetchAll error on multiple classes",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a302198b9b977af4": {
+          "name": "Parse.Object testing relation deletion",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "659bc86e545dd368": {
+          "name": "Parse.Object testing dirty attributes",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "799da2025dabc0f9": {
+          "name": "Parse.Object testing dictionary fetched pointers do not lose data on fetch",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e0b525dd41f166b0": {
+          "name": "Parse.Object testing fetchAllIfNeeded",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "53d80b8fb2d5a6b2": {
+          "name": "Parse.Object testing updatedAt gets updated",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "099d3da97873f17e": {
+          "name": "Parse.Object testing dirty keys",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "69616d67b78c09a2": {
+          "name": "Parse.Object testing fetchAll error on unsaved object",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "8878f3a0ac938ed2": {
+          "name": "Parse.Object testing destroyAll new objects only",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "9de35421a6fd3a5c": {
+          "name": "Parse.Object testing field deletion before first save",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "04b73abd9075d8f3": {
+          "name": "Parse.Object testing old attribute clear then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f2d1ebe1aca00690": {
+          "name": "Parse.Object testing should have undefined includes when object is missing on deeper path",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "12e6db0f9d1d1e9e": {
+          "name": "Parse.Object testing saving children in an array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "42834e64dd9abad0": {
+          "name": "Parse.Object testing can set boolean",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e73fdf34e6703e39": {
+          "name": "Parse.Object testing acl attribute",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2224ec6ffd1cdace": {
+          "name": "Parse.Object testing two saves at the same time",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "53a0a994351d914b": {
+          "name": "Parse.Object testing fetchAll",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7f02a0421f30bfc4": {
+          "name": "Parse.Object testing should have undefined includes when object is missing",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d5e37242af121915": {
+          "name": "Parse.Object testing unknown attribute unset then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "334c7f27376fb8b2": {
+          "name": "Parse.Object testing fetchAll error on deleted object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "928a2347f8adc67d": {
+          "name": "Parse.Object testing remove object from array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ef875105a7a7ca5d": {
+          "name": "Parse.Object testing should handle select and include #2786",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d0b627150521278d": {
+          "name": "Parse.Object testing fetchAllIfNeeded unsaved object",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "0dea04e83ffde8f1": {
+          "name": "Parse.Object testing fetchAll no objects",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "abc4a44bd67c4572": {
+          "name": "Parse.Object testing delete",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4cceb2b9feafcc9b": {
+          "name": "Parse.Object testing should handle includes on null arrays #2752",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "510b4e9c0ea6ec0e": {
+          "name": "Parse.Object testing unknown attribute clear then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9cbb566ec5a00d52": {
+          "name": "Parse.Object testing fetchAllIfNeeded error on multiple classes",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8a1f9f2e99eadd5a": {
+          "name": "Parse.Object testing addUnique",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "76594239234c0ddc": {
+          "name": "Parse.Object testing can set authData when not user class",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b1b8ce697baeb64f": {
+          "name": "Parse.Object testing new attribute unset then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7e93a735df5086e9": {
+          "name": "Parse.Object testing fetchAll updates dates",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8aa94cfb17125083": {
+          "name": "Parse.Object testing find",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6da01411470583b0": {
+          "name": "Parse.Object testing should not change the json field to array in afterSave",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "470839b70158b81d": {
+          "name": "Parse.Object testing add with an object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "49e58e8cf4b5efc6": {
+          "name": "Parse.Object testing cannot set invalid date",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "d797c243568e7442": {
+          "name": "Parse.Object testing increment",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6a10b16d8cf4bef3": {
+          "name": "Parse.Object testing new attribute clear then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c8ce76573656543e": {
+          "name": "Parse.Object testing old attribute clear then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0986390a124cefe2": {
+          "name": "Parse.Object testing toJSON saved object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0ba2726e9898eb02": {
+          "name": "Parse.Object testing should include ACLs with select",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ce6b13d1ea503289": {
+          "name": "Parse.Object testing fetchAllIfNeeded backbone-style callbacks",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "6d2b28259fa28215": {
+          "name": "Parse.Object testing beforeSave doesn't make object dirty with existing field",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "7474525671f85ecf": {
+          "name": "Parse.Object testing fetchAllIfNeeded no objects",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "f3ee2c3e79c4b660": {
+          "name": "Parse.Object testing createdAt and updatedAt exposed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f5a38229a8ed6111": {
+          "name": "Parse.Object testing save adds no data keys (other than createdAt and updatedAt)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "01dc24ba38c7152c": {
+          "name": "Parse.Object testing simple field deletion",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "fe8672e3e771d621": {
+          "name": "Parse.Object testing isNew in cloud code",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "22dcc131c8117020": {
+          "name": "Parse.Object testing beforeSave doesn't make object dirty with new field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f2d447880ea4e177": {
+          "name": "Parse.Object testing unknown attribute unset then unset",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c7a13029fef284cf": {
+          "name": "Parse.Object testing bytes work",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0dc4bd9360f76e4f": {
+          "name": "Parse.Object testing is not dirty after save",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0659d0ef4d207d60": {
+          "name": "Parse.Object testing createdAt doesn't change",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "83645e62b3a3690a": {
+          "name": "Parse.Object testing invalid __type",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "67d776071ec68d54": {
+          "name": "Parse.Object testing relational fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5af9375dc360f436": {
+          "name": "Parse.Object testing can increment array nested fields missing index",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f818479640381c64": {
+          "name": "Parse.Object testing Update object field should store exactly same sent object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "375f6177853d9ba1": {
+          "name": "Parse.Object testing async methods",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "faaf3fa587786f14": {
+          "name": "Parse.Object testing save without null",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f8b05fa516bab9cb": {
+          "name": "Parse.Object testing destroyAll no objects",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "0840a385de77a219": {
+          "name": "Parse.Object testing remove from new field creates array key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "72805d37aff0aa5b": {
+          "name": "Parse.Object testing update",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ddca9d128abad297": {
+          "name": "Parse.Object testing fail validation with promise",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f8bbb1d68c5473b9": {
+          "name": "Parse.Object testing increment with type conflict fails",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b9572ec1fc209d8f": {
+          "name": "Parse.Object testing setting after deleting",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7f6b3a40d29e4995": {
+          "name": "Parse.Object testing get",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4b96a986fcf6cad5": {
+          "name": "Parse.Object testing deleted keys get cleared",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7126cf4e714ccf42": {
+          "name": "Parse.Object testing Objects with className User",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c41a99a809698646": {
+          "name": "Parse.Object testing old attribute unset then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "04ee3579f76e2099": {
+          "name": "Parse.Object testing save cycle",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "abbe515d2e724596": {
+          "name": "Parse.Object testing can set null",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bf6f1d3b64ffffe6": {
+          "name": "Parse.Object testing invalid key name",
+          "subject": "client-only",
+          "upstream": "pass"
+        },
+        "428ef729c0ab80f5": {
+          "name": "Parse.Object testing increment update with type conflict fails",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "585b694b61961f6c": {
+          "name": "Parse.Object testing returns correct field values",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9b43b0dc16c554ea": {
+          "name": "Parse.Object testing can query array nested fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d3783ae51d7f3096": {
+          "name": "Parse.Object testing fetch",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f6c487d3880ba2b4": {
+          "name": "Parse.Object testing create without data",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3e4915d3ae962374": {
+          "name": "Parse.Object testing new attribute unset then clear",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d004d8cdaa2262ab": {
+          "name": "Parse.Object testing increment with empty field solidifies type",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1091d5c377082f6a": {
+          "name": "Parse.Object testing addUnique with object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "906a9ff7aaf761e6": {
+          "name": "Parse.Object testing fetchAll backbone-style callbacks",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "35a18bca78e38281": {
+          "name": "Parse.Object testing recursive save",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4faa07350d46aad1": {
+          "name": "Parse.Object testing create",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    },
+    "ParseGeoPoint.spec.js": {
+      "floor": 34,
+      "upstream_hash": "adc828d094308390",
+      "blocks": {
+        "99c1edd7b2fcbd82": {
+          "name": "Parse.GeoPoint testing invalid geoPoint withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "84c113b5825d2d84": {
+          "name": "Parse.GeoPoint testing geo line",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e69cbe494259fcf4": {
+          "name": "Parse.GeoPoint testing invalid input withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a02eea6139efb944": {
+          "name": "Parse.GeoPoint testing updating geo point exception two fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "39429e8f6f57db50": {
+          "name": "Parse.GeoPoint testing out of bounds Polygon object withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bedde7fdfc8e7044": {
+          "name": "Parse.GeoPoint testing geo max distance in km mid peninsula",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f390be331de7571d": {
+          "name": "Parse.GeoPoint testing supports withinPolygon closed path",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "44515e06155474af": {
+          "name": "Parse.GeoPoint testing creating geo point exception two fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "023f328a15e54462": {
+          "name": "Parse.GeoPoint testing withinKilometers complex supports count",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0b411aa4c3575cb6": {
+          "name": "Parse.GeoPoint testing geo max distance large",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "04a36db7e8d13a49": {
+          "name": "Parse.GeoPoint testing geo max distance in miles mid peninsula",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "aef0ccbd5f2c7c7b": {
+          "name": "Parse.GeoPoint testing geo max distance in km california",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "69b8c9d71b1e0ce0": {
+          "name": "Parse.GeoPoint testing returns nearest location",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "505b325d9083ce1f": {
+          "name": "Parse.GeoPoint testing geo max distance in km bay area",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dcba7c863a950bde": {
+          "name": "Parse.GeoPoint testing works with geobox queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "177f3816dcc0d9e3": {
+          "name": "Parse.GeoPoint testing geo max distance medium",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f00c7a57ff3eaa0b": {
+          "name": "Parse.GeoPoint testing geo max distance in km everywhere",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "fbf2c549e764a5c7": {
+          "name": "Parse.GeoPoint testing invalid latitude withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1d69105e08ded792": {
+          "name": "Parse.GeoPoint testing geo max distance in miles bay area",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ab723369ac14de4b": {
+          "name": "Parse.GeoPoint testing supports array of geo points",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7f4c471f1643c52d": {
+          "name": "Parse.GeoPoint testing equalTo geopoint",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ab50287384c6f095": {
+          "name": "Parse.GeoPoint testing geo max distance small",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "37e5485d78c34ecc": {
+          "name": "Parse.GeoPoint testing has the correct __type field in the json response",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b84a498c91adbe55": {
+          "name": "Parse.GeoPoint testing geo max distance in miles everywhere",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b1f1cd0c48ae84d5": {
+          "name": "Parse.GeoPoint testing fails to fetch geopoints that are specifically not at (0,0)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c6f9fcbe3f2cba3a": {
+          "name": "Parse.GeoPoint testing supports withinPolygon open path",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "781dc279c593aa86": {
+          "name": "Parse.GeoPoint testing update geopoint",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "527475db5a5aafa2": {
+          "name": "Parse.GeoPoint testing geo max distance in miles california",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7376d0c6e77132ca": {
+          "name": "Parse.GeoPoint testing supports withinPolygon Polygon object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "27c3bc42a85729b0": {
+          "name": "Parse.GeoPoint testing geo point roundtrip",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e16ffefa8d63db61": {
+          "name": "Parse.GeoPoint testing withinKilometers supports count",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "44ef49baf663c42d": {
+          "name": "Parse.GeoPoint testing invalid Polygon object withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0afa66353ce96560": {
+          "name": "Parse.GeoPoint testing minimum 3 points withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7e21763266345655": {
+          "name": "Parse.GeoPoint testing invalid longitude withinPolygon",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "99a3beb8688c3a23": {
+          "name": "Parse.GeoPoint testing supports a sub-object with a geo point",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    },
+    "ParseRelation.spec.js": {
+      "floor": 19,
+      "upstream_hash": "c0ec70589a634ce4",
+      "blocks": {
+        "68ed3856b4025841": {
+          "name": "Parse.Relation testing compound add and remove relation",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "cef5e1a92583bebb": {
+          "name": "Parse.Relation testing relations are constructed right from query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6549d362c91403f8": {
+          "name": "Parse.Relation testing can query roles in Cloud Code (regession test #1489)",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "5fd1b8d4c5f7f556": {
+          "name": "Parse.Relation testing or queries with base constraint on relation field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eed3054ba66d8c5a": {
+          "name": "Parse.Relation testing ensures beforeFind on relation doesnt side effect",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "ac9aa7dec8507af4": {
+          "name": "Parse.Relation testing relations are not bidirectional (regression test for #871)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0cf05c473cb298f2": {
+          "name": "Parse.Relation testing query on pointer and relation fields with equal bis",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "931c595e37448867": {
+          "name": "Parse.Relation testing Get query on relation using un-fetched parent object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5e321a96e6a21d6d": {
+          "name": "Parse.Relation testing Find query on relation using un-fetched parent object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4558401cd9424550": {
+          "name": "Parse.Relation testing query on pointer and relation fields with equal",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "64661c18d38247b6": {
+          "name": "Parse.Relation testing or queries on pointer and relation fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2d43e50f2b642b84": {
+          "name": "Parse.Relation testing can be saved without error",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3691fb4dbab5cb4b": {
+          "name": "Parse.Relation testing simple add and remove relation",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "32656a261342ecb4": {
+          "name": "Parse.Relation testing queries with relations",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5281ddac806b71a7": {
+          "name": "Parse.Relation testing should properly get related objects with unfetched queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e495d645e452dfef": {
+          "name": "Parse.Relation testing Find objects with a related object using equalTo",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eb315dfb2fa96fc7": {
+          "name": "Parse.Relation testing related at ordering optimizations",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "52964bbcf5c211d0": {
+          "name": "Parse.Relation testing queries on relation fields with multiple containedIn (regression test for #1271)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3385f8b24fb70512": {
+          "name": "Parse.Relation testing dontSelect query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6f3efc5c04d75e09": {
+          "name": "Parse.Relation testing select query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d0e82315f99e1625": {
+          "name": "Parse.Relation testing queries on relation fields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4dfddba5074e8d2b": {
+          "name": "Parse.Relation testing query relation without schema",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    },
+    "PointerPermissions.spec.js": {
+      "floor": 90,
+      "upstream_hash": "1823eee7a90d7efd",
+      "blocks": {
+        "29f838c8858b0e87": {
+          "name": "Pointer Permissions Granular  on single-pointer fields delete action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3c6cc8890c1cbd2c": {
+          "name": "Pointer Permissions Granular  on single-pointer fields delete action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d0ad3c8505e178f9": {
+          "name": "Pointer Permissions Granular  on single-pointer fields delete action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2ac7b1a4462b2850": {
+          "name": "Pointer Permissions Granular  on single-pointer fields get action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2805e5d202af23de": {
+          "name": "Pointer Permissions Granular  on single-pointer fields get action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ad9804f20f09f69f": {
+          "name": "Pointer Permissions Granular  on single-pointer fields get action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8bddc844af1a6396": {
+          "name": "Pointer Permissions Granular  on single-pointer fields find action should be limited to objects where user is listed in field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a22eea6a625e885d": {
+          "name": "Pointer Permissions Granular  on single-pointer fields find action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f8aee9ffebaecfac": {
+          "name": "Pointer Permissions Granular  on single-pointer fields find action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "aa1fe8aef6282446": {
+          "name": "Pointer Permissions Granular  on single-pointer fields count action should be limited to objects where user is listed in field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3932a9dfb1eb2520": {
+          "name": "Pointer Permissions Granular  on single-pointer fields count action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "708b17af3d5783a8": {
+          "name": "Pointer Permissions Granular  on single-pointer fields count action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bf0e09610ff9381c": {
+          "name": "Pointer Permissions Granular  on single-pointer fields update action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7c4be7b4adf1ff46": {
+          "name": "Pointer Permissions Granular  on single-pointer fields update action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "71961b968125a204": {
+          "name": "Pointer Permissions Granular  on single-pointer fields update action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b90f554853a4b4d3": {
+          "name": "Pointer Permissions Granular  on single-pointer fields create action should be denied (writelock) when no other permissions on class",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "fe0777a465c3cbd7": {
+          "name": "Pointer Permissions Granular  on single-pointer fields addField action should be allowed when updating object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "53d4b8824b7ad5e9": {
+          "name": "Pointer Permissions Granular  on single-pointer fields addField action should be denied when creating object (and no explicit permission)",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "950a9913c4465ae4": {
+          "name": "Pointer Permissions Granular  on single-pointer fields addField action should have no effect when creating object (and allowed by explicit userid permission)",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "2d840bf222ceaa85": {
+          "name": "Pointer Permissions Granular  on single-pointer fields addField action should be denied when updating object for user without addField permission",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f45eabe360ef4cda": {
+          "name": "Pointer Permissions Granular  combined with grouped should not limit the scope of grouped read permissions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "96684a6c4cf64a48": {
+          "name": "Pointer Permissions Granular  combined with grouped should not limit the scope of grouped write permissions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3f39287675a75fe4": {
+          "name": "Pointer Permissions Granular  combined with grouped should not inherit scope of grouped read permissions from another field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f63527ef25088f20": {
+          "name": "Pointer Permissions Granular  combined with grouped should not inherit scope of grouped write permissions from another field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6eeb7194b4c115ea": {
+          "name": "Pointer Permissions Granular  using pointer-fields and queries with keys projection should be enforced regardless of pointer-field being included in keys (select)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f2cdd36ad33b2d15": {
+          "name": "Pointer Permissions Granular  on array of pointers create action should be denied (writelock) when no other permissions on class",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "17132587ed12bbf0": {
+          "name": "Pointer Permissions Granular  on array of pointers update action should be allowed (1 user in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1bc9a4f81376b3a3": {
+          "name": "Pointer Permissions Granular  on array of pointers update action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d4f7706d9199086f": {
+          "name": "Pointer Permissions Granular  on array of pointers update action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "aba59a3d4bb04ef5": {
+          "name": "Pointer Permissions Granular  on array of pointers update action should be allowed (multiple users in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "43cdc1f4ee2d1f8b": {
+          "name": "Pointer Permissions Granular  on array of pointers delete action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "75fc71b915570274": {
+          "name": "Pointer Permissions Granular  on array of pointers delete action should be allowed (1 user in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eab95ff4e2f67491": {
+          "name": "Pointer Permissions Granular  on array of pointers delete action should be allowed (multiple users in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a4874209c82c0a9d": {
+          "name": "Pointer Permissions Granular  on array of pointers delete action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8b35188b4a913bea": {
+          "name": "Pointer Permissions Granular  on array of pointers find action should be allowed (multiple users in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c0c0a9a837dc8305": {
+          "name": "Pointer Permissions Granular  on array of pointers find action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "717937f324fe6992": {
+          "name": "Pointer Permissions Granular  on array of pointers find action should be limited to objects where user is listed in field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "70c04b0634c7a14c": {
+          "name": "Pointer Permissions Granular  on array of pointers find action should be allowed (1 user in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "43bc8153076ff45e": {
+          "name": "Pointer Permissions Granular  on array of pointers count action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "21f26a19c68e4856": {
+          "name": "Pointer Permissions Granular  on array of pointers count action should be limited to objects where user is listed in field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "69498a201b8a1a0d": {
+          "name": "Pointer Permissions Granular  on array of pointers count action should be allowed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "52ee161f26ff6a74": {
+          "name": "Pointer Permissions Granular  on array of pointers addField action should be restricted when updating object without addField permission",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "95899972447dbbc3": {
+          "name": "Pointer Permissions Granular  on array of pointers addField action should be denied when creating object (and no explicit permission)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "239e3bf58f018f84": {
+          "name": "Pointer Permissions Granular  on array of pointers addField action should be allowed when updating object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c79ccb02757d76d7": {
+          "name": "Pointer Permissions Granular  on array of pointers addField action should have no effect on create (allowed by explicit userid)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5b099d1636d857e1": {
+          "name": "Pointer Permissions Granular  on array of pointers get action should fail for user not listed",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a3a7ef41a41965a9": {
+          "name": "Pointer Permissions Granular  on array of pointers get action should be allowed (multiple users in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "baf939d4c1ba2b10": {
+          "name": "Pointer Permissions Granular  on array of pointers get action should be allowed (1 user in array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "72e7df72c77c8b78": {
+          "name": "Pointer Permissions Granular  on array of pointers get action should not allow other actions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ca07904e07a2ea7f": {
+          "name": "Pointer Permissions using arrays of user-pointers should prevent creating pointer permission on bad field (non-existing)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bb373188720bcdb1": {
+          "name": "Pointer Permissions using arrays of user-pointers should let master key update objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7e9463466ef2b495": {
+          "name": "Pointer Permissions using arrays of user-pointers should prevent creating pointer permission on bad field (of wrong type)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "cdf6d3a346c97ee3": {
+          "name": "Pointer Permissions using arrays of user-pointers should let a proper user find",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6e19c6b1cd50b46a": {
+          "name": "Pointer Permissions using arrays of user-pointers should query on pointer permission enabled column",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9d71dc3f2ecb57d0": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL read (PP/ACL OK)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "529318dffc48fc06": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL read (PP locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6e7cb7c5ac7d06f2": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL write (ACL/PP OK)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "84b828647d5790c5": {
+          "name": "Pointer Permissions using arrays of user-pointers should work with write",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6fcae81fa64d4b76": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL write (ACL Locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d47f49b2e30eed96": {
+          "name": "Pointer Permissions using arrays of user-pointers should handle multiple writeUserFields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ac35fef6500e897c": {
+          "name": "Pointer Permissions using arrays of user-pointers should work with find",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1b0bb221aa10d672": {
+          "name": "Pointer Permissions using arrays of user-pointers should fail with invalid pointer perms (not array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "03671dcf21057660": {
+          "name": "Pointer Permissions using arrays of user-pointers should let master key delete objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "701d7b5480533009": {
+          "name": "Pointer Permissions using arrays of user-pointers should not allow creating objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "00aec8bb32803815": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL read (ACL locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "17f99de04efa29cc": {
+          "name": "Pointer Permissions using arrays of user-pointers should fail with invalid pointer perms (non-existing field)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8887f8f50e012334": {
+          "name": "Pointer Permissions using arrays of user-pointers should prevent creating pointer permission on missing field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "528776aef4b12fb0": {
+          "name": "Pointer Permissions using arrays of user-pointers should let master key get objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a12928d1a83f2238": {
+          "name": "Pointer Permissions using arrays of user-pointers tests CLP / Pointer Perms / ACL write (PP Locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "09a850695ff0ccd7": {
+          "name": "Pointer Permissions using arrays of user-pointers should not query using arrays on pointer permission enabled column",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7170d9825cf26350": {
+          "name": "Pointer Permissions using arrays of user-pointers should let master key find objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3c35ce6e708085ed": {
+          "name": "Pointer Permissions using arrays of user-pointers should work with arrays containing valid & invalid elements",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8f5e29879066cfa4": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL read (PP/ACL OK)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6b11448add156e61": {
+          "name": "Pointer Permissions using single user-pointers should fail with invalid pointer perms (not array)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5f921354a556603b": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL read (ACL locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "23d3bb9f77112520": {
+          "name": "Pointer Permissions using single user-pointers should fail with invalid pointer perms (non-existing field)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "df61c7415ddde6b5": {
+          "name": "Pointer Permissions using single user-pointers should let master key find objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bbc9de7656546173": {
+          "name": "Pointer Permissions using single user-pointers should let master key get objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dba1f9cb3cfd4d7a": {
+          "name": "Pointer Permissions using single user-pointers should let master key update objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ca097cb0444cbe8f": {
+          "name": "Pointer Permissions using single user-pointers should let master key delete objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eb10a092b0a63cba": {
+          "name": "Pointer Permissions using single user-pointers should work with find",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "505ac76c84db5b46": {
+          "name": "Pointer Permissions using single user-pointers should work with write",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "65b05445184d85a9": {
+          "name": "Pointer Permissions using single user-pointers should let a proper user find",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7be43cd855fe76d9": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL write (ACL/PP OK)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "501f9928ac29d917": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL write (ACL Locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f178eb456397f08c": {
+          "name": "Pointer Permissions using single user-pointers should prevent creating pointer permission on bad field (of wrong type)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "68cdd8a0cd094407": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL read (PP locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0aa09a5b0bb1321e": {
+          "name": "Pointer Permissions using single user-pointers should prevent creating pointer permission on bad field (non-user pointer)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "470290d0929e5c70": {
+          "name": "Pointer Permissions using single user-pointers tests CLP / Pointer Perms / ACL write (PP Locked)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "922b2db6e7a296a9": {
+          "name": "Pointer Permissions using single user-pointers should prevent creating pointer permission on bad field (non-existing)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "667c0398b47e1ce5": {
+          "name": "Pointer Permissions using single user-pointers should query on pointer permission enabled column",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4e6676b1904058e9": {
+          "name": "Pointer Permissions using single user-pointers should not allow creating objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a8beed4c6d476b78": {
+          "name": "Pointer Permissions using single user-pointers should handle multiple writeUserFields",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ae22932929ccaa64": {
+          "name": "Pointer Permissions using single user-pointers should prevent creating pointer permission on missing field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    },
+    "ParseQuery.spec.js": {
+      "floor": 223,
+      "upstream_hash": "4fc1810878c1b3e9",
+      "blocks": {
+        "2930778530e8aa13": {
+          "name": "Parse.Query testing should query with distinct within eachBatch and direct access enabled",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "b0d7478489d2c567": {
+          "name": "Parse.Query testing exclude keys (strings)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8552631b11b52141": {
+          "name": "Parse.Query testing todo: exclude keys with select key (sdk query get)",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "1c205185a33ca3ff": {
+          "name": "Parse.Query testing properly nested array of mixed objects with bad ids",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "668391d4c0e528b8": {
+          "name": "Parse.Query testing multiple dontSelect query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7d7da6dfe002e7f7": {
+          "name": "Parse.Query testing query should not match on array when searching for null",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "943157af2b8fd805": {
+          "name": "Parse.Query testing matches string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7c6a42e556cbf319": {
+          "name": "Parse.Query testing select nested keys (issue #1567)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c9fbeef0a7754ddc": {
+          "name": "Parse.Query testing include pointer and pointer array (keys switched)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8fb5ed7f4646f937": {
+          "name": "Parse.Query testing dontSelect query without conditions",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "408e22ddab97ce5a": {
+          "name": "Parse.Query testing exclude keys (arrays)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "66e173bc6eb0649d": {
+          "name": "Parse.Query testing contains",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b54d5b477a1cd75f": {
+          "name": "Parse.Query testing matches query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "586f9753a9ada6b1": {
+          "name": "Parse.Query testing should properly interpret a query v1",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0c04762153a7a9ce": {
+          "name": "Parse.Query testing notEqualTo object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "16e59b952dfa7631": {
+          "name": "Parse.Query testing select keys for specific object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5b38b201a1a1f8d9": {
+          "name": "Parse.Query testing objectId equalTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e8a9a4be64dae8b9": {
+          "name": "Parse.Query testing containedBy pointer array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "99ca3950cdc8f806": {
+          "name": "Parse.Query testing or complex queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8cd1f7c3a3b3d5ab": {
+          "name": "Parse.Query testing lessThan greaterThan queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ed940c6d6dba99c4": {
+          "name": "Parse.Query testing should not depend on parameter order #3169",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0964da4d0ba5c94b": {
+          "name": "Parse.Query testing time lessThan",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "531fcf926c359f4f": {
+          "name": "Parse.Query testing Regular expression constructor includes modifiers inline",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c5936a2bbaa23233": {
+          "name": "Parse.Query testing include relation",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6221610a2870def8": {
+          "name": "Parse.Query testing lessThan queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d5ada1d0685531c1": {
+          "name": "Parse.Query testing should not interfere with has when using select on field with undefined value #3999",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d754ee20c2268167": {
+          "name": "Parse.Query testing include for specific object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "aab9cda0ea8eae48": {
+          "name": "Parse.Query testing include with *",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "90bf941aa6229e5a": {
+          "name": "Parse.Query testing $nor invalid query - wrong type",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0d60132581e480d0": {
+          "name": "Parse.Query testing include pointer and pointer array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d8f2f221235ec2e9": {
+          "name": "Parse.Query testing find no elements",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a1522feb6314d6b8": {
+          "name": "Parse.Query testing notEqualTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "067c6375e5495bac": {
+          "name": "Parse.Query testing can update mixed array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "019441b8a78d771b": {
+          "name": "Parse.Query testing skip",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0b292cc264be5004": {
+          "name": "Parse.Query testing exclude keys with include same key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5f7f8201776ec7ff": {
+          "name": "Parse.Query testing containedIn with pointers should work with string array, with many objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1002fa70d183696e": {
+          "name": "Parse.Query testing equalTo undefined",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "99dd99b3f6c71874": {
+          "name": "Parse.Query testing properly fetches nested pointers",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3fe588c981e09399": {
+          "name": "Parse.Query testing exclude nested keys 2 level",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "257e58af16f3bc48": {
+          "name": "Parse.Query testing regexes with invalid options fail",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7e9943e8c3da9888": {
+          "name": "Parse.Query testing can update numeric array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e0aa4185d3d3bc6a": {
+          "name": "Parse.Query testing include user",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "21efddb888e905c6": {
+          "name": "Parse.Query testing equalTo on same column as $dontSelect should not break $dontSelect functionality (#3678)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "50e6af7d4441252b": {
+          "name": "Parse.Query testing include relation array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6fe55d390f248d01": {
+          "name": "Parse.Query testing notEqualTo zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "67cd25851e0e4f88": {
+          "name": "Parse.Query testing select nested keys 2 level includeAll",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ff978aef5f1793cd": {
+          "name": "Parse.Query testing containsAllStartingWith single regex value should return corresponding matching results",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eb788a5d7d0cda0b": {
+          "name": "Parse.Query testing skip doesn't affect count",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2ba7223a79a585fd": {
+          "name": "Parse.Query testing query without limit respects default limit",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8332311ac983d1aa": {
+          "name": "Parse.Query testing select keys (arrays)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dcb0e9987164fdc9": {
+          "name": "Parse.Query testing objectId containedIn queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "546c86b8b4459571": {
+          "name": "Parse.Query testing should match complex structure with dot notation when using doesNotMatchKeyInQuery",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "46a3daa66b7f5a05": {
+          "name": "Parse.Query testing dontSelect query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a01d284315a89a78": {
+          "name": "Parse.Query testing query nested keys queries nested key using matchesQuery",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "66a3dc3bf76a2897": {
+          "name": "Parse.Query testing query nested keys queries nested key using containedIn",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "605419e6e8122536": {
+          "name": "Parse.Query testing query nested keys queries nested key using equalTo",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "60c0b49c288c8a0a": {
+          "name": "Parse.Query testing properly includes array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7205b07240a270ba": {
+          "name": "Parse.Query testing order by non-existing string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f3193ea739e3aa83": {
+          "name": "Parse.Query testing can set object type key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "cba87f36399abef3": {
+          "name": "Parse.Query testing can update mixed array more than 100 elements",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "518e92fb5f2b5b43": {
+          "name": "Parse.Query testing doesNotExist relation",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f0ae7f25d3f66dc4": {
+          "name": "Parse.Query testing query containedIn on empty array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5faf478b477483ec": {
+          "name": "Parse.Query testing containsAllStartingWith single invalid regex returns empty results",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "414eb501441cce5c": {
+          "name": "Parse.Query testing properly handles nested ors",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "06aadc19a36c154c": {
+          "name": "Parse.Query testing order by descending number then ascending string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7db2298cc4c39516": {
+          "name": "Parse.Query testing query match on array with single object",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "42733be617b9ad25": {
+          "name": "Parse.Query testing can query regex with unicode",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f5c8f77c4812b857": {
+          "name": "Parse.Query testing allowPublicExplain explain works with and without master key when allowPublicExplain is true",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d203fc643cdf7fa7": {
+          "name": "Parse.Query testing allowPublicExplain explain requires master key when allowPublicExplain is false",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "61e8bed1d5f423e6": {
+          "name": "Parse.Query testing allowPublicExplain explain requires master key by default",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "420064bdb626a697": {
+          "name": "Parse.Query testing don't include by default",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e7b4c2d16ae4698a": {
+          "name": "Parse.Query testing query notContainedIn on empty array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "43a160eb19f03b51": {
+          "name": "Parse.Query testing order by descending number and string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "52d70aac781391f5": {
+          "name": "Parse.Query testing can order on an object number field (level 2)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b10c3dc183ae076c": {
+          "name": "Parse.Query testing query match on array with multiple objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d6302bcfd7b0e88b": {
+          "name": "Parse.Query testing containedIn with pointers should work with string array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f1d09047f35b8d9d": {
+          "name": "Parse.Query testing can add new config to existing config",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "caee39a66bd56bac": {
+          "name": "Parse.Query testing notContainedIn false queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3dd9a196d670eb22": {
+          "name": "Parse.Query testing $nor invalid query - empty array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b15108fe8aad024d": {
+          "name": "Parse.Query testing can use explain on User class",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f1ded5b35aa5e57c": {
+          "name": "Parse.Query testing nested include",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ee626c5e06bdb058": {
+          "name": "Parse.Query testing query within dictionary",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7516f7fda5af4151": {
+          "name": "Parse.Query testing should properly interpret a query v2",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3bcc4342cfd984f8": {
+          "name": "Parse.Query testing equalTo zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1754b5b1aee2abb0": {
+          "name": "Parse.Query testing notEqualTo with Relation is working",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "448f3321760807a2": {
+          "name": "Parse.Query testing query input type validation malformed where parameter still accepts valid JSON in where parameter",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0a1d4878e5a686b4": {
+          "name": "Parse.Query testing query input type validation malformed where parameter rejects invalid JSON in where parameter with proper error instead of 500",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f90c9422d850a949": {
+          "name": "Parse.Query testing query input type validation malformed where parameter rejects invalid JSON in where parameter for roles endpoint",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "45613fab43c6f5b0": {
+          "name": "Parse.Query testing query input type validation malformed where parameter rejects invalid JSON in where parameter for users endpoint",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "62747e4d86bcaed4": {
+          "name": "Parse.Query testing query input type validation malformed where parameter rejects invalid JSON in where parameter for sessions endpoint",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4b2a4ef5ef5c46bd": {
+          "name": "Parse.Query testing query input type validation $regex type validation rejects array $regex in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c8c56cd95893a903": {
+          "name": "Parse.Query testing query input type validation $regex type validation still accepts valid string $regex in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "090f620ea3c64177": {
+          "name": "Parse.Query testing query input type validation $regex type validation rejects numeric $regex in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1f9c08f69dfb6f8d": {
+          "name": "Parse.Query testing query input type validation $regex type validation rejects object $regex in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8b1444b9b0a821fa": {
+          "name": "Parse.Query testing query input type validation $options type validation still accepts valid string $options in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a384e14cc4f0c0a7": {
+          "name": "Parse.Query testing query input type validation $options type validation rejects numeric $options in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "59d9add3e2399dc6": {
+          "name": "Parse.Query testing query input type validation $options type validation rejects object $options in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "531305be570744c7": {
+          "name": "Parse.Query testing query input type validation $options type validation rejects boolean $options in query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4814e64130758488": {
+          "name": "Parse.Query testing query input type validation $in type validation on text fields still accepts matching type in $in for text field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e08f72917136d979": {
+          "name": "Parse.Query testing query input type validation $in type validation on text fields rejects non-matching type in $in for text field with proper error instead of 500",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "df35ca67f33dde6f": {
+          "name": "Parse.Query testing select keys query JS SDK",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3332685f2ed8f9ee": {
+          "name": "Parse.Query testing doesNotExist",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "344b196cc45977b8": {
+          "name": "Parse.Query testing includeAll handles self-referencing pointer",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2da9de69899744c6": {
+          "name": "Parse.Query testing notContainedIn queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f6eed28c742e9e59": {
+          "name": "Parse.Query testing $nor valid query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4fa0385791400f4e": {
+          "name": "Parse.Query testing should match a key in an array (#3195)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3578e9a4de6f5590": {
+          "name": "Parse.Query testing properly includes array of mixed objects",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ebc3906857fd3ba0": {
+          "name": "Parse.Query testing withJSON with geoWithin.centerSphere fails with invalid geo point",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the find fails; a refused connection satisfies it"
+        },
+        "fd9c9ef68e2d8c1b": {
+          "name": "Parse.Query testing supports include on the wrong key type (#2262)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "82f872678ff605e2": {
+          "name": "Parse.Query testing number equalTo boolean queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b4b8652b51758d61": {
+          "name": "Parse.Query testing time createdAt",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1fa79abf2f9094f3": {
+          "name": "Parse.Query testing containedIn queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c757ca06ad19d39a": {
+          "name": "Parse.Query testing exists relation",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0effd762fe8b6b3e": {
+          "name": "Parse.Query testing should handle relative times correctly",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d9524e76156f0d8c": {
+          "name": "Parse.Query testing order by descending number and string, with array arg",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ced5db14b2e586fd": {
+          "name": "Parse.Query testing order by ascending number then descending string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "03bd1b67be4589cd": {
+          "name": "Parse.Query testing exclude keys with includeAll",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a382dfc428b826eb": {
+          "name": "Parse.Query testing withJSON with geoWithin.centerSphere fails with invalid coordinate",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the find fails; a refused connection satisfies it"
+        },
+        "bb8199552ef853d3": {
+          "name": "Parse.Query testing includeAll handles circular pointer references",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "99d4909c9047cc7d": {
+          "name": "Parse.Query testing query.each fails with order",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the iteration fails; a refused save satisfies it"
+        },
+        "f4b856cd74ac9575": {
+          "name": "Parse.Query testing query with limit equal to maxlimit",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f030b558bdd16b67": {
+          "name": "Parse.Query testing equalTo false queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c3891d3cb2cabad1": {
+          "name": "Parse.Query testing searching for not null",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bed714af61462ffd": {
+          "name": "Parse.Query testing containedIn false queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ade78501a16f3e14": {
+          "name": "Parse.Query testing order by descending number and string, with space",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c31be34cb806c7de": {
+          "name": "Parse.Query testing can order on an object string field (level 2)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "fbcfac16c6a6772d": {
+          "name": "Parse.Query testing include with [\"*\"] overrides",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "54bf42711be0b6ce": {
+          "name": "Parse.Query testing querying for null value",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "df9550c46706da17": {
+          "name": "Parse.Query testing select keys (strings)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8426494b88736ff8": {
+          "name": "Parse.Query testing nested contains",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c645c4f03224c25a": {
+          "name": "Parse.Query testing endsWith",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d9e66d224f58bef7": {
+          "name": "Parse.Query testing withJSON with geoWithin.centerSphere fails with invalid distance",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "8402a8e1c021d7da": {
+          "name": "Parse.Query testing query with limit overrides default limit",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a9b07493bed3d81f": {
+          "name": "Parse.Query testing query.each async",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "198f364a716baa6f": {
+          "name": "Parse.Query testing does not run afterFind on explain results",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "e2eb1c19b77cc74f": {
+          "name": "Parse.Query testing query with limit",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e5f65be3836a22b0": {
+          "name": "Parse.Query testing searching for null",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "97241eaef1a9324e": {
+          "name": "Parse.Query testing include doesn't make dirty wrong",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a0928e5ee333d4b5": {
+          "name": "Parse.Query testing containsAll object array queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "660a801f822e1330": {
+          "name": "Parse.Query testing withJSON supports geoWithin.centerSphere",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a0dde647bfaca81a": {
+          "name": "Parse.Query testing can order on an object number field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "577b92b77171b514": {
+          "name": "Parse.Query testing where $eq false queries (rest)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a15b704f00821189": {
+          "name": "Parse.Query testing get",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dd0e045c008fb7e4": {
+          "name": "Parse.Query testing supports valid explain values",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b6755d6f766fc081": {
+          "name": "Parse.Query testing should not throw error with undefined dot notation when using matchesKeyInQuery",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9cc8669f39e3ea64": {
+          "name": "Parse.Query testing query.each fails with limit",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the iteration fails; a refused save satisfies it"
+        },
+        "beddfe5aae0392e0": {
+          "name": "Parse.Query testing containedIn object array queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f7cc002b0952d424": {
+          "name": "Parse.Query testing exists",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7a323ffefd322ad2": {
+          "name": "Parse.Query testing startsWith",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5d97fcf766d8d317": {
+          "name": "Parse.Query testing can't order by password",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "eae377dd1a1020a2": {
+          "name": "Parse.Query testing objectId containedIn with multiple large array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bb163fbeee64ae3b": {
+          "name": "Parse.Query testing order by descending number",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6876466c933a1bfb": {
+          "name": "Parse.Query testing withJSON with geoWithin.centerSphere fails without parameters",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3e2a9246428ace27": {
+          "name": "Parse.Query testing where $eq null queries (rest)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5d51d327ef075b6f": {
+          "name": "Parse.Query testing containsAllStartingWith should match all strings that starts with string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bad5845c2992cc8f": {
+          "name": "Parse.Query testing select keys with each query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "488ba6471c49c908": {
+          "name": "Parse.Query testing query.each fails with skip",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the iteration fails; a refused save satisfies it"
+        },
+        "682bd61b2da8e72d": {
+          "name": "Parse.Query testing get undefined",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b95a31fdc6754bd5": {
+          "name": "Parse.Query testing order by descending number and string, with multiple args",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bd4853013ab79ed9": {
+          "name": "Parse.Query testing query with limit exceeding maxlimit",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f039362f542609b1": {
+          "name": "Parse.Query testing containsAll string array queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3e1dd31b8e645e5d": {
+          "name": "Parse.Query testing exclude keys query JS SDK",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "dc21a695d2cf0963": {
+          "name": "Parse.Query testing nested equalTo string with single quote",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c99f7480a79a6d62": {
+          "name": "Parse.Query testing containedBy number array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "252cd4a430faacf0": {
+          "name": "Parse.Query testing gracefully handles invalid explain values",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bf8a239dfbe93207": {
+          "name": "Parse.Query testing get error",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3212256a3becb478": {
+          "name": "Parse.Query testing containsAll number array queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1030c95cbf4388d4": {
+          "name": "Parse.Query testing can order on an object string field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d10e3f627785787a": {
+          "name": "Parse.Query testing should not throw error with undefined dot notation when using doesNotMatchKeyInQuery",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9f03793558fd8b0c": {
+          "name": "Parse.Query testing select nested keys 2 level without include (issue #3185)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6c159e93e0228d1b": {
+          "name": "Parse.Query testing includeAll pointer and pointer array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bf57e7633b078560": {
+          "name": "Parse.Query testing greaterThanOrEqualTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2887618e910258de": {
+          "name": "Parse.Query testing exclude keys with select same key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "821d5d6e71c45b7c": {
+          "name": "Parse.Query testing containedIn null array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "fbebe422e36d9b79": {
+          "name": "Parse.Query testing basic query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "9589d05cbaecb52c": {
+          "name": "Parse.Query testing containedBy empty array",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "1e33c7d9580dc81d": {
+          "name": "Parse.Query testing select query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d09c4fde3dbd77b0": {
+          "name": "Parse.Query testing containsAll date array queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a6c98670f334032a": {
+          "name": "Parse.Query testing greaterThan queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "e82c487a4c71cf34": {
+          "name": "Parse.Query testing Use a regex that requires all modifiers",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0b311c8082285af8": {
+          "name": "Parse.Query testing nested containedIn number",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "498b334288d4287e": {
+          "name": "Parse.Query testing order by _created_at",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7a030bc60f63a119": {
+          "name": "Parse.Query testing count",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4c17adc00dfc9ae8": {
+          "name": "Parse.Query testing exclude nested keys",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "52519544c1da6cfa": {
+          "name": "Parse.Query testing include with * overrides",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "09a7dc5e414a6f93": {
+          "name": "Parse.Query testing exclude keys with include different key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "68a826624ade03a7": {
+          "name": "Parse.Query testing first",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "d4f7dc52a4db00c6": {
+          "name": "Parse.Query testing containedBy invalid query",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5d84f70fefd0f768": {
+          "name": "Parse.Query testing order by _updated_at",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bc1fa061ba73f8bb": {
+          "name": "Parse.Query testing should error when using $relativeTime on non-Date field",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bb5e55b1a1065aac": {
+          "name": "Parse.Query testing should find objects with array of pointers",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "392923089ab0d13d": {
+          "name": "Parse.Query testing regex with unicode option",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "974cd1f056a8b6df": {
+          "name": "Parse.Query testing nested containedIn string",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "14804df1a30a2b1c": {
+          "name": "Parse.Query testing order by ascending number",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a8dda2ead6c2ccc9": {
+          "name": "Parse.Query testing select nested keys 2 level (issue #1567)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5141bf54c6266910": {
+          "name": "Parse.Query testing first no result",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "741bc36bae882659": {
+          "name": "Parse.Query testing query with two OR subqueries (regression test #1259)",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "22ebe23d3de31295": {
+          "name": "Parse.Query testing result object creation uses current extension",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a2cd8382f47215aa": {
+          "name": "Parse.Query testing equalTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ea74833b3b6c3620": {
+          "name": "Parse.Query testing containsAllStartingWith single empty value returns empty results",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2831c5d0594aded7": {
+          "name": "Parse.Query testing query.each",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c0948ed686c8001b": {
+          "name": "Parse.Query testing or queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c43e486989d2fdef": {
+          "name": "Parse.Query testing notEqual with array of pointers",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "223c3b37d3e640b9": {
+          "name": "Parse.Query testing order by createdAt",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b1b07bef259155e0": {
+          "name": "Parse.Query testing should match complex structure with dot notation when using matchesKeyInQuery",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "4f8f2e0d07307e5d": {
+          "name": "Parse.Query testing nested containedIn string with single quote",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "568b8b71614f97b5": {
+          "name": "Parse.Query testing matches regex",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "781f747002cb04ba": {
+          "name": "Parse.Query testing include with [\"*\"]",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b454a25daf2c1f68": {
+          "name": "Parse.Query testing lessThanOrEqualTo zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "a97e245f79e1c910": {
+          "name": "Parse.Query testing greaterThan zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "08d1b169452ae002": {
+          "name": "Parse.Query testing async methods",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bea20fe218e5c670": {
+          "name": "Parse.Query testing exclude keys with select different key",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "58187f64174a0461": {
+          "name": "Parse.Query testing should error on invalid relative time",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6eed2fa78e09c08a": {
+          "name": "Parse.Query testing find with error",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "2d0d3bb6aaec728f": {
+          "name": "Parse.Query testing first with two results",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "b75b9dc3c666f9a6": {
+          "name": "Parse.Query testing $select inside $or",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "3097bb1bc46e49d1": {
+          "name": "Parse.Query testing case insensitive regex success",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c6d9e7331995d887": {
+          "name": "Parse.Query testing time equality",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7902e9f7d2bf3445": {
+          "name": "Parse.Query testing includeAll",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "26e8eebe8854b8a4": {
+          "name": "Parse.Query testing lessThan zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "14d361a7927001a9": {
+          "name": "Parse.Query testing containsAllStartingWith values must be all of type starting with regex",
+          "subject": "server-dependent",
+          "upstream": "pass",
+          "passes_without_server": "asserts only that the request fails; a refused save satisfies it"
+        },
+        "33614775f9d3bf9a": {
+          "name": "Parse.Query testing greaterThanOrEqualTo zero queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "02bf836ccc278ad5": {
+          "name": "Parse.Query testing first with error",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "c4a3b860e41326f9": {
+          "name": "Parse.Query testing order by updatedAt",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "7f34024659c6922b": {
+          "name": "Parse.Query testing lessThanOrEqualTo greaterThanOrEqualTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "6b58c8d2fccd15c9": {
+          "name": "Parse.Query testing lessThanOrEqualTo queries",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5ebe4b82f4e15e96": {
+          "name": "Parse.Query testing containsAllStartingWith empty array values should return empty results",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    },
+    "ParseQuery.FullTextSearch.spec.js": {
+      "floor": 11,
+      "upstream_hash": "c4446e4023facc95",
+      "blocks": {
+        "5b527fbf697f2f06": {
+          "name": "[mongodb] Parse.Query Full Text Search testing fullTextSearch: $diacriticSensitive - false",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "bf95772b6d8095aa": {
+          "name": "[mongodb] Parse.Query Full Text Search testing fullTextSearch: does not create text index if schema compound index exist",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "1fbe8f007e6518d8": {
+          "name": "[mongodb] Parse.Query Full Text Search testing fullTextSearch: $caseSensitive",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "db22948e0d881ea3": {
+          "name": "[mongodb] Parse.Query Full Text Search testing fullTextSearch: does not create text index if compound index exist",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "7f11fcdafde03a70": {
+          "name": "[postgres] Parse.Query Full Text Search testing fullTextSearch: $diacriticSensitive - false",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "9b5e74e42474c593": {
+          "name": "[postgres] Parse.Query Full Text Search testing fullTextSearch: $caseSensitive",
+          "subject": "not-run",
+          "upstream": "not-run"
+        },
+        "285434a95a3c8ea8": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $language",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5352e01997a3e649": {
+          "name": "Parse.Query Full Text Search testing fulltext descending by $score",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "cd9e942578b00d02": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $diacriticSensitive, invalid input",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "5ce1a1608d64ed2b": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $language, invalid input",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "24535cd3154ad720": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $search, sort",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "ac9a9e5c9321c8f1": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $search",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "f0b6db5b2126b3e4": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $search, invalid input",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "69029d0cbb5ec6e4": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $diacriticSensitive",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        },
+        "0406c85c7defe19d": {
+          "name": "Parse.Query Full Text Search testing fullTextSearch: $caseSensitive, invalid input",
+          "subject": "server-dependent",
+          "upstream": "pass"
+        }
+      }
+    }
+  }
+}

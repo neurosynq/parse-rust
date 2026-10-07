@@ -1,5 +1,8 @@
 /*
- * Gate E of the 0.2.1 milestone: three authorization decisions at stock server configuration.
+ * Gate E of the 0.2.1 milestone, and Gate I of 0.3.0, in one runner because both boot the same
+ * four servers and compare them.
+ *
+ * Gate E: three authorization decisions at stock server configuration.
  *
  * 0.2.0 shipped all three open, and all three are reachable on a deployment nobody has configured:
  *
@@ -53,6 +56,9 @@ const require = createRequire(import.meta.url);
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PS_ROOT = path.resolve(REPO, process.env.PARSE_SERVER_ROOT || '../parse-server');
 const { ParseServer } = require(`${PS_ROOT}/lib/index.js`);
+// The driver upstream itself depends on, so the two servers and this runner agree on one version.
+// Several Gate I conditions are about what is stored, which no response shows.
+const { MongoClient } = require(`${PS_ROOT}/node_modules/mongodb`);
 
 const [, , MONGO_URI, APP_ID = 'test', MASTER_KEY = 'test'] = process.argv;
 if (!MONGO_URI) {
@@ -74,9 +80,22 @@ const EXPECTED = {
   'default ACL': 104,
   'user identity': 40,
   'custom objectId': 16,
+  'I1 explain': 24,
+  'I2 lockout': 18,
+  'I3 installation': 16,
+  'I4 limit': 10,
+  'I5-6 user ACL refusals': 24,
+  'I7 ACL arrays': 16,
+  'I8 permission order': 4,
+  'I9 objectId operation': 3,
+  'I10 user update authorization': 24,
+  'I11 ACL operations': 28,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
+// Gate I condition 2. A short duration, so the run does not have to wait out a real lock.
+const LOCKOUT = { duration: 5, threshold: 2 };
+let mongo = null;
 const PASSWORD = 'correct horse battery staple';
 
 let passed = 0;
@@ -145,8 +164,10 @@ async function chooseSecondPeer() {
  * servers bind `0.0.0.0` in that case precisely so both destinations reach the same process. An
  * earlier draft used one destination for both and every loopback request died with ECONNRESET.
  */
-function request(server, { method = 'GET', path: p, from, headers = {}, body, appId }) {
-  const payload = body === undefined ? undefined : JSON.stringify(body);
+function request(server, { method = 'GET', path: p, from, headers = {}, body, raw, appId }) {
+  // `raw` is a body string sent exactly as written. Gate I condition 8 needs one, because an object
+  // literal reorders integer-like keys before `JSON.stringify` sees them.
+  const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
   const all = {
     'X-Parse-Application-Id': appId ?? server.appId,
     ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -293,21 +314,38 @@ async function main() {
     await start('rustDefault', () => bootRust(bind, {}));
     // The configured pair also enables `allowCustomObjectId`, which the objectId condition needs
     // and which nothing else in this gate reads. Reusing it beats booting a fifth and sixth server.
+    // Gate I adds `accountLockout` to the configured pair. Nothing else on it fails a login.
     await start('rustConfigured', () => bootRust(bind, {
       PARSE_SERVER_MASTER_KEY_IPS: allowlist,
       PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID: 'true',
+      PARSE_SERVER_ACCOUNT_LOCKOUT: JSON.stringify(LOCKOUT),
     }));
     await start('upstreamDefault', () => bootUpstream(bind, `${APP_ID}_d_${TAG}`, {}));
     await start('upstreamConfigured', () => bootUpstream(bind, `${APP_ID}_c_${TAG}`, {
       masterKeyIps: ['127.0.0.1', '::1', peer],
       allowCustomObjectId: true,
+      accountLockout: LOCKOUT,
     }));
 
     await masterKeySourceAddress(servers, peer);
     await declaredDefaultAcl([servers.rustDefault, servers.upstreamDefault]);
     await userIdentity([servers.rustDefault, servers.upstreamDefault]);
     await customObjectId([servers.rustConfigured, servers.upstreamConfigured]);
+
+    mongo = await MongoClient.connect(MONGO_URI);
+    const defaults = [servers.rustDefault, servers.upstreamDefault];
+    await gateI1Explain(defaults);
+    await gateI2Lockout(servers.rustConfigured, servers.upstreamConfigured);
+    await gateI3Installation(defaults);
+    await gateI4Limit(defaults);
+    await gateI5And6UserAclRefusals(defaults);
+    await gateI7AclArrays(defaults);
+    await gateI8PermissionOrder(defaults);
+    await gateI9ObjectIdOperation([servers.rustConfigured, servers.upstreamConfigured]);
+    await gateI10UserUpdateAuthorization(defaults);
+    await gateI11AclOperations(defaults);
   } finally {
+    if (mongo) { await mongo.close(); }
     for (const s of started) {
       if (s.child) { s.child.kill(); } else if (s.close) { await s.close(); }
     }
@@ -442,7 +480,7 @@ async function declaredDefaultAcl(servers) {
     // 6b. **The create response carries the resolved ACL.** It is the only way the caller learns
     //     what permissions its object got, because on a private class it cannot read the row back
     //     to find out. Upstream marks the field server-changed and returns it
-    //     (`RestWrite.js:394`). Every other condition here inspects a later request, so all of
+    //     (`RestWrite.js:454`). Every other condition here inspects a later request, so all of
     //     them pass against a server that says nothing in the response.
     eq(`${who}: the create response names the ACL it generated`,
       J(created.body?.ACL), J({ [a.id]: { read: true, write: true } }));
@@ -505,7 +543,7 @@ async function declaredDefaultAcl(servers) {
       (await findAll(server, Shared, b.token)).length, 1);
 
     // 11. **A falsy `ACL` on signup is "no ACL", not "leave it alone".** Upstream's test is
-    //     `if (!ACL)` (`RestWrite.js:1676-1686`), so all four falsy values produce the owner-only
+    //     `if (!ACL)` (`RestWrite.js:1815-1825`), so all four falsy values produce the owner-only
     //     ACL that an absent one produces. 0.2.0 left them in place, `lower_acl` then dropped them
     //     without writing permission columns, and an absent `_rperm` is public: the `_User` row was
     //     readable by every anonymous caller. This is a third stock-configuration failure and it
@@ -604,7 +642,7 @@ async function declaredDefaultAcl(servers) {
 // The failure here is the opposite of the rest of this gate: not disclosure but denial. A `_User`
 // whose permission columns come back empty is a row its owner can no longer read, write or log in
 // with, and any principal permitted to write that row could do it. Upstream forces the owner entry
-// back in for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1590-1599`), and
+// back in for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1729-1738`), and
 // parse-rust handled a principal map and `{"__op":"Delete"}` and nothing else.
 // -------------------------------------------------------------------------------------------
 
@@ -619,10 +657,8 @@ async function userIdentity(servers) {
       ['op-Delete', { __op: 'Delete' }],
       ['array', [1, 2]],
       ['tagged-Date', { __type: 'Date', iso: '2020-01-01T00:00:00.000Z' }],
-      // **A truthy scalar is deliberately not here.** Upstream answers 500 to that update, so no
-      // assertion about it can hold against both servers, and this gate may only carry assertions
-      // that do. parse-rust answers 200 and keeps the owner, which is covered by a unit test and
-      // recorded as a Tier 3 row with the create-side case it belongs to.
+      // **A truthy scalar is deliberately not here.** Upstream answers 500 to that update and
+      // parse-rust 400, a chosen difference that Gate I condition 6 asserts per server.
     ]) {
       const u = await signUp(server, `ui_${label.replace(/\W/g, '')}`);
       const updated = await request(server, {
@@ -707,6 +743,362 @@ async function customObjectId(servers) {
   }
 }
 
+// ===========================================================================================
+// Gate I of 0.3.0: the security defaults and the parity closures, two servers compared.
+//
+// **Several conditions assert a recorded difference rather than agreement**, and each says so: the
+// `ACL` refusals parse-rust makes before an insert, the truthy-scalar choice, and the operation as
+// an `objectId`. `CHANGELOG.md` lists them as deliberate differences; an assertion here that expects the same
+// answer from both would be encoding a behavior the milestone chose not to reproduce.
+// ===========================================================================================
+
+const isRust = server => server.kind === 'parse-rust';
+const suffixOf = server => `${TAG}_${isRust(server) ? 'rust' : 'upstream'}`;
+const stored = (collection, filter) => mongo.db().collection(collection).findOne(filter);
+
+// -------------------------------------------------------------------------------------------
+// I1. `explain` requires the master key at the default configuration
+// -------------------------------------------------------------------------------------------
+
+async function gateI1Explain(servers) {
+  enter('I1 explain');
+  for (const server of servers) {
+    const who = server.kind;
+    const cls = `I1_${suffixOf(server)}`;
+    const made = await request(server, {
+      method: 'POST', path: `/classes/${cls}`, from: 'loopback', headers: master(), body: { n: 1 },
+    });
+    eq(`${who}: an object to explain`, made.status, 201);
+
+    // The boundary. `databaseOptions.allowPublicExplain` defaults to false.
+    for (const value of ['true', 'queryPlanner']) {
+      const anon = await request(server, { path: `/classes/${cls}?explain=${value}`, from: 'loopback' });
+      eq(`${who}: an anonymous explain=${value} is refused`, anon.status, 400);
+      eq(`${who}: as INVALID_QUERY`, anon.body?.code, 102);
+      eq(`${who}: naming the master key`, anon.body?.error,
+        'Using the explain query parameter requires the master key');
+    }
+    // The control: the master key gets the database's document, not rows.
+    const explained = await request(server, {
+      path: `/classes/${cls}?explain=true`, from: 'loopback', headers: master(),
+    });
+    eq(`${who}: the master key may explain`, explained.status, 200);
+    check(`${who}: and gets a plan rather than rows`,
+      explained.body?.results && !Array.isArray(explained.body.results)
+        && 'queryPlanner' in explained.body.results, J(explained.body).slice(0, 200));
+    const bogus = await request(server, {
+      path: `/classes/${cls}?explain=bogus`, from: 'loopback', headers: master(),
+    });
+    eq(`${who}: an unknown verbosity is refused`, bogus.body?.code, 102);
+    eq(`${who}: by name`, bogus.body?.error, 'Invalid value for explain');
+    // And the same query without explain is an ordinary read, so the refusal is the parameter's.
+    const plain = await request(server, { path: `/classes/${cls}`, from: 'loopback' });
+    eq(`${who}: the query itself is public`, plain.body?.results?.length, 1);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I2. Account lockout, configured identically, counted across the fleet
+//
+// Both servers share one database, so this is the mixed-fleet condition: failures through one node
+// must lock the account on the other. Both orders, because a counter only one side writes passes
+// one order and fails the other.
+// -------------------------------------------------------------------------------------------
+
+async function gateI2Lockout(rust, upstream) {
+  enter('I2 lockout');
+  const login = (server, username, password) => request(server, {
+    method: 'POST', path: '/login', from: 'loopback', body: { username, password },
+  });
+  for (const [first, second] of [[rust, upstream], [upstream, rust]]) {
+    const label = `${first.kind} then ${second.kind}`;
+    const username = `i2_${isRust(first) ? 'r' : 'u'}_${TAG}`;
+    const made = await request(first, {
+      method: 'POST', path: '/users', from: 'loopback', body: { username, password: PASSWORD },
+    });
+    eq(`${label}: signed up`, made.status, 201);
+    for (let i = 1; i <= LOCKOUT.threshold; i++) {
+      const bad = await login(first, username, 'wrong');
+      eq(`${label}: failure ${i} is an ordinary failure`, bad.body?.error, 'Invalid username/password.');
+    }
+    const row = await stored('_User', { username });
+    eq(`${label}: the counter both nodes read`, row?._failed_login_count, LOCKOUT.threshold);
+    check(`${label}: and the lock expiry is set`, row?._account_lockout_expires_at instanceof Date);
+    const locked = await login(second, username, PASSWORD);
+    eq(`${label}: the other node refuses the right password`, locked.status, 404);
+    eq(`${label}: as locked`, locked.body?.error,
+      `Your account is locked due to multiple failed login attempts. Please try again after ${LOCKOUT.duration} minute(s)`);
+  }
+  // The control: lockout is configured and an unlocked account still logs in on both.
+  for (const server of [rust, upstream]) {
+    const username = `i2_ok_${suffixOf(server)}`;
+    await request(server, {
+      method: 'POST', path: '/users', from: 'loopback', body: { username, password: PASSWORD },
+    });
+    const ok = await login(server, username, PASSWORD);
+    eq(`${server.kind}: an unlocked account logs in`, ok.status, 200);
+    eq(`${server.kind}: and a success leaves the counter at 0`,
+      (await stored('_User', { username }))?._failed_login_count, 0);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I3. `_Installation` validation
+// -------------------------------------------------------------------------------------------
+
+async function gateI3Installation(servers) {
+  enter('I3 installation');
+  for (const server of servers) {
+    const who = server.kind;
+    const create = body => request(server, {
+      method: 'POST', path: '/classes/_Installation', from: 'loopback', body,
+    });
+    const none = await create({ deviceType: 'ios' });
+    eq(`${who}: no id is refused`, none.body?.code, 135);
+    eq(`${who}: with upstream's message`, none.body?.error,
+      'at least one ID field (deviceToken, installationId) must be specified in this operation');
+    const noType = await create({ installationId: `i3-${suffixOf(server)}-a` });
+    eq(`${who}: a create with no deviceType is refused`, noType.body?.code, 135);
+    eq(`${who}: by name`, noType.body?.error, 'deviceType must be specified in this operation');
+    const typed = await create({ deviceType: 'ios', deviceToken: { $ne: null } });
+    eq(`${who}: an operator as deviceToken is a type error`, typed.body?.code, 111);
+    // The control and the normalization. Distinct tokens per server, because upstream deduplicates
+    // on the token across the shared database.
+    const token = (isRust(server) ? 'ABCD' : 'EF01').repeat(16);
+    const made = await create({ deviceType: 'ios', deviceToken: token, installationId: `I3-${suffixOf(server)}` });
+    eq(`${who}: a valid installation is created`, made.status, 201);
+    const row = await stored('_Installation', { _id: made.body?.objectId });
+    eq(`${who}: a 64-character deviceToken is lowercased`, row?.deviceToken, token.toLowerCase());
+    eq(`${who}: the installationId is lowercased`, row?.installationId, `i3-${suffixOf(server)}`.toLowerCase());
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I4. A negative limit
+// -------------------------------------------------------------------------------------------
+
+async function gateI4Limit(servers) {
+  enter('I4 limit');
+  const counts = {};
+  for (const server of servers) {
+    const cls = `I4_${suffixOf(server)}`;
+    for (let n = 0; n < 3; n++) {
+      await request(server, { method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { n } });
+    }
+    counts[server.kind] = {};
+    for (const limit of ['-1', '-2', '1.5', '0', 'abc']) {
+      const r = await request(server, { path: `/classes/${cls}?limit=${limit}`, from: 'loopback' });
+      counts[server.kind][limit] = r.body?.results?.length;
+    }
+  }
+  for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3]]) {
+    for (const server of servers) {
+      eq(`${server.kind}: limit=${limit} returns ${expected}`, counts[server.kind][limit], expected);
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I5 and I6. `ACL` values a signup refuses
+// -------------------------------------------------------------------------------------------
+
+async function gateI5And6UserAclRefusals(servers) {
+  enter('I5-6 user ACL refusals');
+  for (const server of servers) {
+    const who = server.kind;
+    for (const [label, acl] of [['an operation', { __op: 'Increment', amount: 1 }], ['a truthy scalar', 'nonsense']]) {
+      for (const withEmail of [true, false]) {
+        const username = `i5_${label.length}_${withEmail ? 'e' : 'n'}_${suffixOf(server)}`;
+        const body = { username, password: PASSWORD, ACL: acl };
+        if (withEmail) { body.email = `${username}@example.com`; }
+        const r = await request(server, { method: 'POST', path: '/users', from: 'loopback', body });
+        const branch = `${label}, ${withEmail ? 'with' : 'without'} an email`;
+        // The response. Upstream's own answer splits on the email for a scalar; the choice made
+        // for 0.3.0 is the 400 in both branches.
+        const upstream500 = !isRust(server) && label === 'a truthy scalar' && !withEmail;
+        eq(`${who}: ${branch} is refused`, r.status, upstream500 ? 500 : 400);
+        eq(`${who}: ${branch} answers`, r.body?.code, upstream500 ? 1 : -1);
+        // The state. Upstream inserts before it refuses an operation without an email; parse-rust
+        // refuses before the insert in every branch, a recorded deliberate difference.
+        const leavesRow = !isRust(server) && label === 'an operation' && !withEmail;
+        eq(`${who}: ${branch} ${leavesRow ? 'leaves' : 'does not leave'} a row`,
+          Boolean(await stored('_User', { username })), leavesRow);
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I7. An `ACL` array grants the principals its indices name, on all three paths
+// -------------------------------------------------------------------------------------------
+
+async function gateI7AclArrays(servers) {
+  enter('I7 ACL arrays');
+  for (const server of servers) {
+    const who = server.kind;
+    const acl = [{ read: true }];
+    const signup = await request(server, {
+      method: 'POST', path: '/users', from: 'loopback',
+      body: { username: `i7_s_${suffixOf(server)}`, password: PASSWORD, ACL: acl },
+    });
+    eq(`${who}: signup with an array ACL succeeds`, signup.status, 201);
+    eq(`${who}: and grants index 0 beside the owner`,
+      J((await stored('_User', { _id: signup.body?.objectId }))?._rperm), J(['0', signup.body?.objectId]));
+
+    const u = await signUp(server, 'i7_u');
+    const updated = await request(server, {
+      method: 'PUT', path: `/classes/_User/${u.id}`, from: 'loopback', headers: as(u.token), body: { ACL: acl },
+    });
+    eq(`${who}: a _User update with an array ACL succeeds`, updated.status, 200);
+    eq(`${who}: and grants index 0 beside the owner`,
+      J((await stored('_User', { _id: u.id }))?._rperm), J(['0', u.id]));
+
+    const cls = `I7_${suffixOf(server)}`;
+    await declareClass(server, cls, acl);
+    const made = await request(server, { method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { title: 'x' } });
+    eq(`${who}: a create under an array default ACL succeeds`, made.status, 201);
+    eq(`${who}: and grants index 0`, J((await stored(cls, { _id: made.body?.objectId }))?._rperm), J(['0']));
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I8. Permission columns enumerate as JavaScript does
+// -------------------------------------------------------------------------------------------
+
+async function gateI8PermissionOrder(servers) {
+  enter('I8 permission order');
+  for (const server of servers) {
+    const who = server.kind;
+    const cls = `I8_${suffixOf(server)}`;
+    // Hand-built, so the keys reach the server in this order. See `request`.
+    const raw = '{"title":"x","ACL":{"zzz":{"read":true},"10":{"read":true},"2":{"read":true},"aaa":{"read":true}}}';
+    const made = await request(server, { method: 'POST', path: `/classes/${cls}`, from: 'loopback', raw });
+    eq(`${who}: created`, made.status, 201);
+    eq(`${who}: array-index keys first, ascending, then insertion order`,
+      J((await stored(cls, { _id: made.body?.objectId }))?._rperm), J(['2', '10', 'zzz', 'aaa']));
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I9. An operation as `objectId`, under `allowCustomObjectId`. A recorded difference.
+// -------------------------------------------------------------------------------------------
+
+async function gateI9ObjectIdOperation(servers) {
+  enter('I9 objectId operation');
+  for (const server of servers) {
+    const who = server.kind;
+    const r = await request(server, {
+      method: 'POST', path: '/users', from: 'loopback',
+      body: { objectId: { __op: 'Delete' }, username: `i9_${suffixOf(server)}`, password: PASSWORD },
+    });
+    // Upstream accepts it and stores the row under an id nobody was told; parse-rust refuses, as
+    // chosen in 0.3.0 section 7 (parse-community/parse-server#10639).
+    eq(`${who}: ${isRust(server) ? 'refuses' : 'accepts'} an operation as objectId`,
+      r.status, isRust(server) ? 400 : 201);
+    if (isRust(server)) { eq(`${who}: as 107`, r.body?.code, 107); }
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I10. A `_User` update is authorized before anything reads the target account
+// -------------------------------------------------------------------------------------------
+
+async function gateI10UserUpdateAuthorization(servers) {
+  enter('I10 user update authorization');
+  for (const server of servers) {
+    const who = server.kind;
+    const a = await signUp(server, 'i10_a');
+    const b = await signUp(server, 'i10_b');
+    const taken = `taken_${suffixOf(server)}`;
+    await request(server, {
+      method: 'POST', path: '/users', from: 'loopback',
+      body: { username: taken, password: PASSWORD, email: `${taken}@example.com` },
+    });
+    const put = (id, body) => request(server, {
+      method: 'PUT', path: `/classes/_User/${id}`, from: 'loopback', headers: as(a.token), body,
+    });
+    for (const [label, body] of [
+      ['a taken username', { username: taken }],
+      ['a free username', { username: `free_${suffixOf(server)}` }],
+      ['a taken email', { email: `${taken}@example.com` }],
+      ['a free email', { email: `free_${suffixOf(server)}@example.com` }],
+      ['a retargeting objectId', { objectId: a.id, username: 'x' }],
+    ]) {
+      const r = await put(b.id, body);
+      eq(`${who}: proposing ${label} for another user answers 206`, r.body?.code, 206);
+    }
+    // The controls: the checks still run for the owner, and for a row the caller may write.
+    eq(`${who}: the owner proposing a taken username gets 202`, (await put(a.id, { username: taken })).body?.code, 202);
+    await request(server, {
+      method: 'PUT', path: `/classes/_User/${b.id}`, from: 'loopback', headers: master(),
+      body: { ACL: { '*': { read: true, write: true } } },
+    });
+    eq(`${who}: a publicly writable row gets 202 too`, (await put(b.id, { username: taken })).body?.code, 202);
+
+    // The owner still passes the class-level `update` gate before the uniqueness checks run
+    // (`RestWrite.js:134` before `:144`). With `update` restricted to a role the caller lacks, every
+    // proposal answers 119, taken or free, on both servers.
+    const schemaPath = '/schemas/_User';
+    const before = (await request(server, { method: 'GET', path: schemaPath, from: 'loopback', headers: master() })).body;
+    const restricted = { ...before.classLevelPermissions, update: { 'role:I10Admins': true } };
+    await request(server, {
+      method: 'PUT', path: schemaPath, from: 'loopback', headers: master(),
+      body: { classLevelPermissions: restricted },
+    });
+    for (const [label, body] of [
+      ['a taken username', { username: taken }],
+      ['a taken email', { email: `${taken}@example.com` }],
+      ['a free username', { username: `free2_${suffixOf(server)}` }],
+    ]) {
+      eq(`${who}: under a restricted update CLP, the owner proposing ${label} answers 119`,
+        (await put(a.id, body)).body?.code, 119);
+    }
+    await request(server, {
+      method: 'PUT', path: schemaPath, from: 'loopback', headers: master(),
+      body: { classLevelPermissions: before.classLevelPermissions },
+    });
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I11. An operation as `ACL` on an ordinary create, and the rest of `transformObjectACL`
+// -------------------------------------------------------------------------------------------
+
+async function gateI11AclOperations(servers) {
+  enter('I11 ACL operations');
+  for (const server of servers) {
+    const who = server.kind;
+    const cls = `I11_${suffixOf(server)}`;
+    const pointer = { __type: 'Pointer', className: '_User', objectId: 'nobody' };
+    for (const [label, acl] of [
+      ['Delete', { __op: 'Delete' }],
+      ['AddRelation', { __op: 'AddRelation', objects: [pointer] }],
+      ['RemoveRelation', { __op: 'RemoveRelation', objects: [pointer] }],
+    ]) {
+      const made = await request(server, {
+        method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { title: label, ACL: acl },
+      });
+      eq(`${who}: an ACL ${label} create succeeds`, made.status, 201);
+      const row = await stored(cls, { _id: made.body?.objectId });
+      eq(`${who}: and stores two empty permission columns`, J([row?._rperm, row?._wperm]), J([[], []]));
+      const anon = await request(server, { path: `/classes/${cls}/${made.body?.objectId}`, from: 'loopback' });
+      eq(`${who}: so the object is not public`, anon.status, 404);
+    }
+    for (const [label, acl] of [['a null entry', { '*': null }], ['a Batch operation', { __op: 'Batch', ops: [] }]]) {
+      const r = await request(server, {
+        method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { title: label, ACL: acl },
+      });
+      eq(`${who}: ${label} is a bare 500`, r.status, 500);
+      eq(`${who}: ${label} writes nothing`, Boolean(await stored(cls, { title: label })), false);
+    }
+    const truthy = await request(server, {
+      method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { title: 'truthy', ACL: { '*': { read: 1 } } },
+    });
+    const anon = await request(server, { path: `/classes/${cls}/${truthy.body?.objectId}`, from: 'loopback' });
+    eq(`${who}: a truthy non-boolean flag grants`, anon.status, 200);
+  }
+}
+
 // -------------------------------------------------------------------------------------------
 
 function report() {
@@ -727,10 +1119,10 @@ function report() {
   }
   if (failures.length === 0) {
     const breakdown = [...counts].map(([k, v]) => `${k} ${v}`).join(', ');
-    console.log(`gate E: ${passed} assertions passed (${breakdown})`);
+    console.log(`gates E and I: ${passed} assertions passed (${breakdown})`);
     process.exit(0);
   }
-  console.error(`gate E: ${failures.length} failed, ${passed} passed`);
+  console.error(`gates E and I: ${failures.length} failed, ${passed} passed`);
   for (const f of failures) { console.error(`  - ${f}`); }
   process.exit(1);
 }

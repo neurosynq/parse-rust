@@ -1,0 +1,7 @@
+[
+  "find BenchHolder {_rperm:{$in:[null,string,string]}}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}}"
+]

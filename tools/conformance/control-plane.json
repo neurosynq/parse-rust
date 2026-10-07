@@ -1,0 +1,6 @@
+{
+  "index.spec.js": {
+    "server mail adapter throws if you initialize email adapter incorrectly": "expects any rejection from reconfigureServer; parse-rust refusing the unmapped option satisfies it, so its pass measures the refusal and nothing else",
+    "server fails if you try to set revokeSessionOnPasswordReset to non-boolean": "expects any rejection from reconfigureServer; parse-rust refusing the unmapped option satisfies it, so its pass measures the refusal and nothing else"
+  }
+}

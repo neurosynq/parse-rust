@@ -32,7 +32,7 @@
  *
  * `--detailed` says the target server was booted with `enableSanitizedErrorResponse: false`, and
  * boots the upstream half the same way. Without it both sides run at the upstream default, which
- * is `true` (`Options/Definitions.js:253-258`) and is therefore the configuration a real
+ * is `true` (`Options/Definitions.js:259-264`) and is therefore the configuration a real
  * deployment has. The two regimes carry different messages on the wire and both are contract, so
  * `tools/test.sh` runs the gate once each way rather than picking one.
  */
@@ -391,7 +391,7 @@ async function casePointerPermissions(r, tag) {
   // **The client naming the permission field itself.** Both predicates have to survive, and
   // upstream is explicit about it: `addPointerPermissions` tests whether the query already
   // constrains the key and conjoins under `$and` when it does
-  // (`DatabaseController.js:1807-1811`). Appending the permission constraint beside the client's
+  // (`DatabaseController.js:1808-1812`). Appending the permission constraint beside the client's
   // instead produces two equalities on one field, which answers `INVALID_QUERY` rather than the
   // row. This is the ordinary case for an owner-scoped app, not an edge case.
   for (const [who, user] of [['a', a], ['b', b]]) {
@@ -436,7 +436,7 @@ async function casePointerPermissions(r, tag) {
 
   // The two servers report the same emptiness in two shapes, so the assertion names both rather
   // than picking one and going red. Upstream's deny-all branch distinguishes `get` from everything
-  // else and falls through to `return []` (`DatabaseController.js:1509-1514`), so a denied count
+  // else and falls through to `return []` (`DatabaseController.js:1510-1515`), so a denied count
   // answers `{"results":[],"count":[]}` instead of `count: 0`. parse-rust answers `0`. Neither
   // discloses anything, and the difference is unrecorded rather than deliberate, so it is a
   // reported finding rather than a rule this file gets to settle.

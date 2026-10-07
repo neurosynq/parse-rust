@@ -12,7 +12,7 @@
 //!
 //! 0.2.0 turned the flat constraint list into a tree. That was not a generalization for its own
 //! sake: pointer permissions compose **disjunctively** across fields
-//! (`DatabaseController.js:1815`), so a class permitting `{find: {pointerFields: ['owner',
+//! (`DatabaseController.js:1816`), so a class permitting `{find: {pointerFields: ['owner',
 //! 'editor']}}` cannot be expressed without `$or`. A flat list would have forced either a wrong
 //! conjunction, which under-returns, or no constraint at all, which is the breach.
 
@@ -38,7 +38,7 @@ pub enum Comparison {
     /// rewrite one layer below where it was applied.
     ///
     /// It also must not pin an objectId. `ParsedWhere::pinned_object_id` reads the shorthand form
-    /// only, matching upstream's direct `query.objectId` read (`DatabaseController.js:1838`), and
+    /// only, matching upstream's direct `query.objectId` read (`DatabaseController.js:1839`), and
     /// a separate variant is what keeps `{"objectId": {"$eq": "x"}}` out of that path.
     EqualOperator(ParseValue),
     NotEqual(ParseValue),
@@ -62,7 +62,33 @@ pub enum Comparison {
         pattern: String,
         options: Option<String>,
     },
+    /// Every geo operator one field's constraint document carries, as `(key, operand)` pairs in
+    /// the order they arrived, operands raw.
+    ///
+    /// **One variant for all of them, because upstream lowers them as one loop**
+    /// (`MongoTransform.js:670-675`, `:812-955`): the keys are visited in reverse alphabetical
+    /// order so `$nearSphere` precedes `$maxDistance`, a count rewrites `$nearSphere` into
+    /// `$geoWithin` using its sibling's raw `$maxDistance`, and three spellings of a distance all
+    /// write the same output key with the last one visited winning. Splitting them into separate
+    /// comparisons would scatter that ordering across a merge that knows nothing about it.
+    Geo(Vec<(String, ParseValue)>),
+    /// `$text`, the operand raw: `{"$search": {"$term": .., "$language": .., ..}}`. Lowered to the
+    /// top level of the filter, where Mongo requires it, rather than under the field
+    /// (`MongoTransform.js:332-334`); the field still decides which text index is built.
+    Text(ParseValue),
 }
+
+/// The constraint keys that belong to [`Comparison::Geo`].
+pub const GEO_OPERATORS: [&str; 8] = [
+    "$nearSphere",
+    "$maxDistance",
+    "$maxDistanceInRadians",
+    "$maxDistanceInMiles",
+    "$maxDistanceInKilometers",
+    "$within",
+    "$geoWithin",
+    "$geoIntersects",
+];
 
 impl Comparison {
     /// Map a Parse `$` operator onto a comparison.
@@ -195,7 +221,7 @@ impl Query {
     /// spliced in beside the existing constraint. Upstream does the same thing and for the same
     /// reason: `addPointerPermissions` tests `hasOwnProperty(query, key)` and falls back to
     /// `reduceAndOperation({$and: [queryClause, query]})` when it holds
-    /// (`DatabaseController.js:1807-1811`).
+    /// (`DatabaseController.js:1808-1812`).
     ///
     /// Splicing instead is not a cosmetic difference. A client that queries `owner` explicitly on
     /// a class whose `find` CLP names `owner` as a pointer field produces two equalities on one
@@ -226,7 +252,7 @@ impl Query {
     }
 
     /// A disjunction of alternatives, simplified the way `reduceOrOperation` does
-    /// (`DatabaseController.js:1657-1724`): an `$or` with a single element collapses into that
+    /// (`DatabaseController.js:1658-1725`): an `$or` with a single element collapses into that
     /// element rather than staying wrapped.
     pub fn any_of(alternatives: Vec<Query>) -> Query {
         let mut alternatives: Vec<Query> =
@@ -300,7 +326,7 @@ impl UpdateValue {
     /// Does applying this need the post-image read back?
     ///
     /// Only ops do. A `Set` tells the client nothing it did not already know, which is why
-    /// `_sanitizeDatabaseResult` returns only op keys (`DatabaseController.js:2129-2157`).
+    /// `_sanitizeDatabaseResult` returns only op keys (`DatabaseController.js:2141-2169`).
     pub fn echoes_result(&self) -> bool {
         !matches!(self, UpdateValue::Set(_) | UpdateValue::Unset)
     }
@@ -346,6 +372,11 @@ pub struct QueryOptions {
     /// identities upstream treats as duplicates. It does not fold diacritics: `Café` and `Cafe`
     /// remain different identities under it.
     pub case_insensitive: bool,
+    /// `hint`, handed to the driver untouched (`MongoStorageAdapter.js:766`). An index that does
+    /// not exist is the driver's error, not a validation here.
+    pub hint: Option<Hint>,
+    /// `comment`, attached to the operation for the database's profiler and logs.
+    pub comment: Option<String>,
 }
 
 impl Default for QueryOptions {
@@ -356,6 +387,40 @@ impl Default for QueryOptions {
             order: Vec::new(),
             keys: None,
             case_insensitive: false,
+            hint: None,
+            comment: None,
+        }
+    }
+}
+
+/// An index hint: a name, or a key pattern.
+///
+/// Upstream accepts a string or any object (`ClassesRouter.js:221-223`) and passes it on, so the
+/// key pattern is kept as the client sent it, field names included. It is not translated to
+/// storage names, because upstream does not translate it either.
+#[derive(Debug, Clone)]
+pub enum Hint {
+    Name(String),
+    Keys(parse_rust_core::ParseMap),
+}
+
+/// The verbosity of an `explain`. `explain=true` is [`ExplainVerbosity::AllPlansExecution`], which
+/// is what the Node driver sends for a boolean (`MongoCollection.js:176`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainVerbosity {
+    QueryPlanner,
+    QueryPlannerExtended,
+    ExecutionStats,
+    AllPlansExecution,
+}
+
+impl ExplainVerbosity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QueryPlanner => "queryPlanner",
+            Self::QueryPlannerExtended => "queryPlannerExtended",
+            Self::ExecutionStats => "executionStats",
+            Self::AllPlansExecution => "allPlansExecution",
         }
     }
 }

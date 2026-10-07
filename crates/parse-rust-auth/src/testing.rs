@@ -331,6 +331,18 @@ impl StorageAdapter for FakeStorage {
         Ok(rows)
     }
 
+    /// A fixed document naming the verbosity. Only the plumbing is under test here; what a real
+    /// database says is the adapter integration test's business.
+    async fn explain(
+        &self,
+        _schema: &ClassSchema,
+        _query: &Query,
+        _options: &QueryOptions,
+        verbosity: parse_rust_storage::ExplainVerbosity,
+    ) -> Result<serde_json::Value, ParseError> {
+        Ok(serde_json::json!({ "fake": verbosity.as_str() }))
+    }
+
     async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
         let state = self.lock();
         Ok(state

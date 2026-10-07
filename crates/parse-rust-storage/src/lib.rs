@@ -23,7 +23,7 @@ pub mod schema;
 
 pub use adapter::{AddFieldOutcome, Row, SchemaIndex, StorageAdapter, WriteResult};
 pub use query::{
-    Clause, Comparison, Constraint, Query, QueryOptions, SortDirection, Update, UpdateValue,
-    DEFAULT_LIMIT,
+    Clause, Comparison, Constraint, ExplainVerbosity, Hint, Query, QueryOptions, SortDirection,
+    Update, UpdateValue, DEFAULT_LIMIT, GEO_OPERATORS,
 };
 pub use schema::{join_schema, join_table_name, ClassSchema, FieldType};

@@ -9,6 +9,7 @@ members = [
   "crates/parse-rust-mongo",
   "crates/parse-rust-server",
   "crates/parse-rust-cli",
+  "crates/parse-rust-bench",
 ]
 
 [workspace.package]

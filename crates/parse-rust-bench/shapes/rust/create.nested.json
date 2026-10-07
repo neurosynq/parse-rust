@@ -1,0 +1,4 @@
+[
+  "find _SCHEMA {}",
+  "insert BenchItem "
+]

@@ -4,7 +4,7 @@
 //!
 //! - **One schema snapshot per request.** Upstream threads a `validSchemaController` down through
 //!   every controller entry point so one request cannot evaluate half its work under one schema
-//!   and half under another (`DatabaseController.js:553`). A `/batch` of twenty writes therefore
+//!   and half under another (`DatabaseController.js:554`). A `/batch` of twenty writes therefore
 //!   loads schemas once, and every sub-request sees the same table. Doing it per operation is not
 //!   a performance bug, it is a correctness bug.
 //! - **One role expansion per request.** Roles are uncached in 0.2.0, so expanding them per
@@ -41,7 +41,7 @@ pub struct RequestContext {
     pub user_id: Option<String>,
     /// `X-Parse-Installation-Id`. Read by session creation and nothing else.
     pub installation_id: Option<String>,
-    /// `protectedFieldsSaveResponseExempt` (`Options/Definitions.js:507-512`).
+    /// `protectedFieldsSaveResponseExempt` (`Options/Definitions.js:513-518`).
     pub save_response_exempt: bool,
     /// Authenticated with the maintenance key rather than the master key.
     pub is_maintenance: bool,

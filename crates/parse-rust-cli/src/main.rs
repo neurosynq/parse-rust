@@ -99,6 +99,22 @@ async fn run() -> std::io::Result<()> {
     if let Some(v) = env("PARSE_SERVER_ALLOW_HEADERS") {
         config.allow_headers = list(&v);
     }
+    // Both must be positive (`Config.js:674-690`). Upstream refuses to boot otherwise, and so does
+    // this.
+    if let Some(v) = env("PARSE_SERVER_DEFAULT_LIMIT") {
+        config.default_limit = positive(&v, "PARSE_SERVER_DEFAULT_LIMIT")?;
+    }
+    if let Some(v) = env("PARSE_SERVER_MAX_LIMIT") {
+        config.max_limit = Some(positive(&v, "PARSE_SERVER_MAX_LIMIT")?);
+    }
+    // Stringified JSON, `{"duration": minutes, "threshold": attempts}`, as upstream's
+    // `objectParser` takes it, and refused at boot with upstream's messages when out of range.
+    if let Some(v) = env("PARSE_SERVER_ACCOUNT_LOCKOUT") {
+        config.account_lockout = Some(account_lockout(&v)?);
+    }
+    if let Some(v) = env("PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN") {
+        config.allow_public_explain = boolean(&v, "PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN")?;
+    }
     if let Some(v) = env("PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION") {
         config.allow_client_class_creation =
             boolean(&v, "PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION")?;
@@ -112,7 +128,7 @@ async fn run() -> std::io::Result<()> {
     //
     // **`maintenanceKeyIps` deliberately has no variable here, and upstream does define one.**
     // The pin declares both `PARSE_SERVER_MAINTENANCE_KEY` and `PARSE_SERVER_MAINTENANCE_KEY_IPS`
-    // (`Options/Definitions.js:381`, `:386`), so this is a parse-rust CLI limitation rather than a
+    // (`Options/Definitions.js:387`, `:386`), so this is a parse-rust CLI limitation rather than a
     // gap on upstream's side, and an earlier version of this comment claimed the opposite.
     //
     // The key itself is not exposed by this binary, so its allowlist is not either: a variable
@@ -158,7 +174,7 @@ async fn run() -> std::io::Result<()> {
     let port: u16 = env("PORT").and_then(|p| p.parse().ok()).unwrap_or(27800);
 
     // `PARSE_SERVER_HOST` is upstream's option name, but the default is deliberately different:
-    // upstream defaults to `0.0.0.0` (`Options/Definitions.js:320-322`) and this defaults to
+    // upstream defaults to `0.0.0.0` (`Options/Definitions.js:326-328`) and this defaults to
     // loopback. parse-rust is not production software yet, and a default that only listens
     // locally cannot expose a half-built server to a network by accident. Set the variable to
     // `0.0.0.0` to publish it, which is what a container needs.
@@ -229,6 +245,44 @@ fn number(value: &str, name: &str) -> std::io::Result<i64> {
         .map_err(|_| std::io::Error::other(format!("{name} must be a number, got {value:?}")))
 }
 
+/// `accountLockout` from its environment variable.
+fn account_lockout(value: &str) -> std::io::Result<parse_rust_server::lockout::AccountLockout> {
+    let parsed: serde_json::Value = serde_json::from_str(value).map_err(|e| {
+        std::io::Error::other(format!("PARSE_SERVER_ACCOUNT_LOCKOUT must be JSON: {e}"))
+    })?;
+    let duration = parsed.get("duration").and_then(serde_json::Value::as_f64);
+    let threshold = parsed
+        .get("threshold")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|t| u32::try_from(t).ok());
+    let unlock = match parsed.get("unlockOnPasswordReset") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(std::io::Error::other(
+                "Parse Server option accountLockout.unlockOnPasswordReset must be a boolean.",
+            ))
+        }
+    };
+    let policy = parse_rust_server::lockout::AccountLockout {
+        duration: duration.unwrap_or(f64::NAN),
+        threshold: threshold.unwrap_or(0),
+        unlock_on_password_reset: unlock,
+    };
+    policy.validate().map_err(std::io::Error::other)?;
+    Ok(policy)
+}
+
+/// A positive whole number of rows, for `defaultLimit` and `maxLimit`.
+fn positive(value: &str, name: &str) -> std::io::Result<u32> {
+    match value.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(std::io::Error::other(format!(
+            "{name} must be a whole number greater than 0, got {value:?}"
+        ))),
+    }
+}
+
 /// `parsers.objectParser`: stringified JSON, `{"ClassName": {"entity": ["field", ...]}}`.
 fn protected_fields(value: &str) -> std::io::Result<parse_rust_server::ProtectedFieldsConfig> {
     let parsed: parse_rust_server::ProtectedFieldsConfig =
@@ -245,7 +299,7 @@ fn protected_fields(value: &str) -> std::io::Result<parse_rust_server::Protected
 ///
 /// **Upstream refuses a malformed entry too, and this is the same refusal.** `arrayParser` only
 /// splits on commas (`Options/parsers.js:42-50`), and `Config.validateIps` then rejects any entry
-/// whose address portion is not an IP, naming it (`Config.js:627-636`). So neither server trims,
+/// whose address portion is not an IP, naming it (`Config.js:632-641`). So neither server trims,
 /// and an empty value fails to boot on both.
 ///
 /// The one difference is the mask, which upstream strips before validating: `127.0.0.1/999` boots

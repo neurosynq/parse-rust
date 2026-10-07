@@ -219,7 +219,7 @@ impl Op {
     /// Does the update response echo this op's resulting value back to the client?
     ///
     /// Exactly the five ops in `_sanitizeDatabaseResult`'s allow-list
-    /// (`DatabaseController.js:2140`). `Delete` is not one of them, which is why deleting a field
+    /// (`DatabaseController.js:2152`). `Delete` is not one of them, which is why deleting a field
     /// produces `{updatedAt}` and nothing else.
     pub fn echoes_result(&self) -> bool {
         matches!(

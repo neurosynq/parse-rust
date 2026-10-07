@@ -30,10 +30,15 @@
 )]
 
 pub mod auth;
+#[cfg(feature = "bench-instrumentation")]
+pub mod bench;
 pub mod body_credentials;
 pub mod config;
 pub mod cors;
+#[cfg(feature = "test-harness")]
+pub mod harness;
 pub mod ip_allowlist;
+pub mod lockout;
 pub mod params;
 pub mod request;
 pub mod response;
@@ -104,6 +109,8 @@ pub fn router(state: AppState) -> Router {
     let mount = state.config().mount_path.clone();
     // Cloned before `with_state` consumes it below, so the CORS layer can read the same config.
     let cors_state = state.clone();
+    #[cfg(feature = "test-harness")]
+    let harness_config = state.config_arc();
 
     // The 0.2.0 surface, and nothing else: anything not registered here is a 404. Every route
     // that a client can reach through a `_method` override also accepts `POST`, because the
@@ -194,9 +201,16 @@ pub fn router(state: AppState) -> Router {
     // middleware on the router (`ParseServer.ts:312`). Outermost is what makes the headers appear
     // on error responses too, and what lets an `OPTIONS` preflight be answered before anything
     // downstream can reject it for lacking credentials it is not allowed to send yet.
-    Router::new()
-        .nest(&mount, api)
-        .layer(axum::middleware::from_fn(body_credentials::extract))
+    let app = Router::new().nest(&mount, api);
+    // The conformance control plane, in a harness build only. See `harness` for the two stages.
+    #[cfg(feature = "test-harness")]
+    let app = app
+        .merge(harness::routes(harness_config))
+        .layer(axum::middleware::from_fn(harness::count_tagged));
+    // Innermost of the outer layers, so the timing covers the request's own work only.
+    #[cfg(feature = "bench-instrumentation")]
+    let app = app.layer(axum::middleware::from_fn(bench::instrument));
+    app.layer(axum::middleware::from_fn(body_credentials::extract))
         .layer(axum::middleware::from_fn_with_state(
             cors_state,
             cors::layer,

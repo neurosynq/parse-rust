@@ -497,7 +497,7 @@ async fn allowing_custom_object_ids_honors_the_id_and_refuses_an_empty_one() {
 
 /// A falsy objectId at the default setting is generated, not used.
 ///
-/// Upstream's generation test is `if (!this.data.objectId)` (`RestWrite.js:429-431`), so an empty
+/// Upstream's generation test is `if (!this.data.objectId)` (`RestWrite.js:489-491`), so an empty
 /// string reaches it as falsy and is replaced. It gets that far because
 /// `enforce_object_id_policy` refuses only *truthy* client ids when the option is off, which is
 /// the same truthiness test one step earlier.

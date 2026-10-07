@@ -13,7 +13,7 @@
 //! role names.
 //!
 //! **No cache, on purpose.** Upstream caches the expanded list per user with a 5 second TTL and
-//! clears the whole role cache on any `_Role` write (`RestWrite.js:1565-1570`). The invalidation
+//! clears the whole role cache on any `_Role` write (`RestWrite.js:1704-1709`). The invalidation
 //! is the load-bearing half: a cache that keeps the TTL and drops the invalidation serves stale
 //! *authorization* for up to five seconds after a role membership is revoked, which is worse than
 //! not caching at all. Adding one is 0.3.0 work and it lands with the invalidation or not at all.
@@ -122,7 +122,7 @@ pub async fn expand_roles<S: StorageAdapter>(
     // Direct membership: `getRolesForUser` queries `_Role` for `{users: <user pointer>}`
     // (`Auth.js:267-294`). An equal-to-pointer constraint on a Relation field is not a column
     // read; `reduceInRelation` turns it into `owningIds(className, key, [userId])`
-    // (`DatabaseController.js:1050`, `:1036-1044`), which is a read of the join collection.
+    // (`DatabaseController.js:1051`, `:1036-1044`), which is a read of the join collection.
     let direct_ids = owning_ids(storage, USERS_KEY, &[user_object_id.to_string()]).await?;
     if direct_ids.is_empty() {
         return Ok(Vec::new());
@@ -216,6 +216,7 @@ async fn owning_ids<S: StorageAdapter>(
         order: Vec::new(),
         keys: Some(vec!["owningId".to_string()]),
         case_insensitive: false,
+        ..QueryOptions::default()
     };
 
     let rows = storage.find(&schema, &query, &options).await?;
@@ -263,6 +264,7 @@ async fn fetch_roles<S: StorageAdapter>(
         order: Vec::new(),
         keys: None,
         case_insensitive: false,
+        ..QueryOptions::default()
     };
 
     let rows = storage.find(schema, &query, &options).await?;

@@ -445,7 +445,7 @@ async fn a_multi_object_include_of_installations_is_refused_and_a_single_one_is_
 /// The same split at the top level: a `find` request stays a `find` however narrow its `where` is.
 ///
 /// `rest.js:136` names the method literally rather than deriving it, so pinning one objectId in a
-/// `where` narrows what the CLP is asked about (`DatabaseController.js:1412-1413`) and changes
+/// `where` narrows what the CLP is asked about (`DatabaseController.js:1413-1414`) and changes
 /// nothing about `enforceRoleSecurity`.
 #[tokio::test]
 #[ignore = "needs MongoDB on 127.0.0.1:27017"]
@@ -714,7 +714,9 @@ async fn a_user_can_save_their_own_row() {
     let me = get(host, "/users/me", &As::user(&token)).await;
     assert_eq!(me.body["nickname"], json!("Sav"), "{}", me.raw);
 
-    // Another user's row is still refused, by the ACL rather than by the class guard.
+    // Another user's row is still refused, by the ACL rather than by the class guard, and reported
+    // as a missing session the way `handleSessionMissingError` reports it (`rest.js:320-331`):
+    // 206, not the 101 the write itself produced.
     let (other_id, _) = signup(host, "other", "pw").await;
     let intruder = put(
         host,
@@ -725,7 +727,7 @@ async fn a_user_can_save_their_own_row() {
     .await;
     assert_eq!(
         intruder.code(),
-        Some(101),
+        Some(206),
         "one user may not save another's row: {}",
         intruder.raw
     );
@@ -733,7 +735,7 @@ async fn a_user_can_save_their_own_row() {
 
 /// A password change through `user.save()` revokes every session and issues a replacement.
 ///
-/// `RestWrite.js:1192-1211`. Both halves matter: revoking is what makes changing a password mean
+/// `RestWrite.js:1284-1303`. Both halves matter: revoking is what makes changing a password mean
 /// anything, and the new token is what stops the caller logging themselves out by changing their
 /// own password.
 #[tokio::test]
@@ -862,7 +864,7 @@ async fn creating_or_deleting_a_user_through_classes_is_still_refused() {
 /// A `_User` row whose ACL grants public write was therefore updatable by an anonymous request,
 /// and because a password change mints a replacement session, an anonymous caller could take the
 /// account. Upstream refuses an unauthenticated `_User` update before the ACL is consulted
-/// (`RestWrite.js:1572-1576`).
+/// (`RestWrite.js:1711-1715`).
 #[tokio::test]
 #[ignore = "needs MongoDB on 127.0.0.1:27017"]
 async fn an_unauthenticated_user_update_is_refused_even_with_a_public_write_acl() {
@@ -999,7 +1001,16 @@ async fn a_non_string_password_is_refused_and_changes_nothing() {
     let host = &server.host;
     let (object_id, token) = signup(host, "nuller", "pw").await;
 
-    for bad in [json!(null), json!(7), json!(true), json!({"a": 1})] {
+    // 201 `password is required` for every present non-string and for the empty string, as of
+    // 9.10.3 (`RestWrite.js:528-538`). Before it, upstream crashed into a 500 on these and parse-rust
+    // answered 111.
+    for bad in [
+        json!(null),
+        json!(7),
+        json!(true),
+        json!({"a": 1}),
+        json!(""),
+    ] {
         let r = put(
             host,
             &format!("/classes/_User/{object_id}"),
@@ -1007,7 +1018,8 @@ async fn a_non_string_password_is_refused_and_changes_nothing() {
             &json!({ "password": bad }),
         )
         .await;
-        assert_eq!(r.code(), Some(111), "{bad}: {}", r.raw);
+        assert_eq!(r.code(), Some(201), "{bad}: {}", r.raw);
+        assert_eq!(r.error(), "password is required", "{bad}");
         assert!(r.body.get("sessionToken").is_none(), "{}", r.raw);
     }
 
@@ -1123,7 +1135,7 @@ async fn a_non_user_duplicate_is_not_relabelled_as_a_username_error() {
 /// Signup runs the same identity validation an update does.
 ///
 /// `transformUser` is one function and does not branch on create versus update for these checks
-/// (`RestWrite.js:803-807`). Validating on the update path alone left signup admitting exactly the
+/// (`RestWrite.js:895-899`). Validating on the update path alone left signup admitting exactly the
 /// identities the update path refuses.
 #[tokio::test]
 #[ignore = "needs MongoDB on 127.0.0.1:27017"]
@@ -1332,7 +1344,7 @@ async fn uniqueness_folds_unicode_normalization_not_just_case() {
     );
 }
 
-/// `checkRestrictedFields` covers create as well as update upstream (`RestWrite.js:116`), and
+/// `checkRestrictedFields` covers create as well as update upstream (`RestWrite.js:119`), and
 /// applying it only to the update path left signup able to set both fields on its own new row.
 ///
 /// `emailVerified` is upstream's restriction verbatim. `authData` is parse-rust's addition, because
@@ -1610,7 +1622,7 @@ async fn a_read_of_an_absent_class_is_refused_when_client_class_creation_is_off(
     assert_eq!(as_master.body["results"], json!([]));
 
     // **Maintenance is not master here.** The write path exempts both
-    // (`RestWrite.js:200-202`); the read path exempts master alone (`RestQuery.js:486-489`). The
+    // (`RestWrite.js:206-208`); the read path exempts master alone (`RestQuery.js:486-489`). The
     // two share one predicate in parse-rust, and `AclScope::Unrestricted` covers both keys, so
     // maintenance silently inherited the write path's exemption until this case was written. The
     // earlier version of this test checked a user and master and omitted maintenance, which is
@@ -1689,8 +1701,9 @@ async fn a_login_for_a_missing_user_costs_what_a_real_one_does() {
 ///
 /// `validate_user_identity` queries `_User` and the password is then hashed, so checking the
 /// `create` permission after them answers 202 in milliseconds for a name that exists and 119 after
-/// a bcrypt-length pause for one that does not. Upstream checks the permission first for exactly
-/// this reason, and says so at `RestWrite.js:730-746`.
+/// a bcrypt-length pause for one that does not. Upstream checks the permission first: since 9.10.3
+/// `validateWritePermission` runs ahead of `validateSchema` and `transformUser` (`RestWrite.js:134`,
+/// defined at `:793-804`).
 #[tokio::test]
 #[ignore = "needs MongoDB on 127.0.0.1:27017"]
 async fn a_refused_signup_does_not_disclose_whether_the_account_exists() {
@@ -1779,7 +1792,7 @@ async fn a_master_user_create_validates_identity() {
 
 /// A created `_User` must carry a username and a password, master included.
 ///
-/// Upstream's guard is `!this.query && !hasAuthData` (`RestWrite.js:468-473`) and is not gated on
+/// Upstream's guard is `!this.query && !hasAuthData` (`RestWrite.js:528`) and is not gated on
 /// the caller, so the dashboard's own route is subject to it. Without it that route admitted a row
 /// with no username, and a passwordless row that no login can ever match.
 #[tokio::test]
@@ -1933,8 +1946,8 @@ async fn deleting_an_acl_keeps_the_owner_and_leaves_the_account_usable() {
 /// A `Delete` on `username` is refused; a `Delete` on `email` is allowed.
 ///
 /// The asymmetry is upstream's: `_validateEmail` returns early on a `Delete`
-/// (`RestWrite.js:886`), `_validateUserName` has no such branch and reaches its uniqueness query
-/// with the op object as a value. Matching only the string form let `user.unset("username").save()`
+/// (`RestWrite.js:978`), while a present `username` must be a non-empty string
+/// (`RestWrite.js:531-535`). Matching only the string form let `user.unset("username").save()`
 /// remove the username with no validation.
 #[tokio::test]
 #[ignore = "needs MongoDB on 127.0.0.1:27017"]
@@ -1965,11 +1978,19 @@ async fn deleting_a_username_is_refused_and_deleting_an_email_is_not() {
         &json!({ "username": { "__op": "Delete" } }),
     )
     .await;
-    assert_eq!(refused.code(), Some(107), "{}", refused.raw);
-    assert_eq!(
-        refused.error(),
-        "You cannot use [object Object] as a query parameter."
-    );
+    // 200 `bad or missing username` as of 9.10.3 (`RestWrite.js:531-535`), which superseded the 107
+    // that came from the uniqueness query being built with the op object.
+    assert_eq!(refused.code(), Some(200), "{}", refused.raw);
+    assert_eq!(refused.error(), "bad or missing username");
+
+    let emptied = put(
+        host,
+        &format!("/classes/_User/{object_id}"),
+        &As::user(&token),
+        &json!({ "username": "" }),
+    )
+    .await;
+    assert_eq!(emptied.code(), Some(200), "{}", emptied.raw);
 
     // And the username is still there.
     let me = get(host, "/users/me", &As::user(&token)).await;

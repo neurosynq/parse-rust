@@ -7,7 +7,7 @@
 //! `POST /sessions`, `PUT /sessions/:objectId` and `POST /upgradeToRevocableSession` are out of
 //! scope for 0.2.0 and are **absent** rather than answering 501. They exist to let a client mint
 //! or migrate a session directly, which is a legacy path and a set of `OPERATION_FORBIDDEN`
-//! special cases (`RestWrite.js:1221-1292`) with no bearing on the milestone claim.
+//! special cases (`RestWrite.js:1313-1386`) with no bearing on the milestone claim.
 
 use parse_rust_auth::resolve_session;
 use parse_rust_core::{ErrorCode, ParseError, ParseValue};

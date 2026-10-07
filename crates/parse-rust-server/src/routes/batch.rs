@@ -1,15 +1,15 @@
 //! `POST /batch`.
 //!
 //! Upstream: `src/batch.js`. The body is `{requests: [{method, path, body}, ...]}` and the
-//! response is the results **array itself**, not an object wrapping it (`batch.js:194`).
+//! response is the results **array itself**, not an object wrapping it (`batch.js:195`).
 //!
 //! Sub-requests share one auth, one role expansion and one schema snapshot with the request that
-//! carried them, which is upstream's `request.auth = req.auth` (`batch.js:167`) plus the fact that
+//! carried them, which is upstream's `request.auth = req.auth` (`batch.js:168`) plus the fact that
 //! everything downstream takes the schema controller it was handed. Twenty writes in one batch
 //! therefore cannot see two different schemas mid-flight.
 //!
 //! **`transaction: true` is refused rather than accepted and ignored.** Upstream opens a real
-//! transactional session for it (`batch.js:155-156`) and rolls the whole batch back on any error.
+//! transactional session for it (`batch.js:156-157`) and rolls the whole batch back on any error.
 //! parse-rust has no transaction support, and a client that asked for all-or-nothing and silently
 //! got per-operation semantics is the failure mode this milestone names by name.
 
@@ -98,7 +98,7 @@ pub async fn handle(
     Ok(Json::Array(results))
 }
 
-/// One sub-request, rendered as `{success: ...}` or `{error: {code, error}}` (`batch.js:171-178`).
+/// One sub-request, rendered as `{success: ...}` or `{error: {code, error}}` (`batch.js:172-179`).
 async fn run_one(
     state: &AppState,
     rc: &RequestContext,
@@ -137,13 +137,10 @@ async fn run_one(
     };
     match dispatch::dispatch(state, rc, authority, &incoming).await {
         Ok(response) => json!({ "success": response.body }),
-        // A batch renders whatever was thrown as `{code, error}` and never reaches
-        // `handleParseErrors`, so upstream's third branch does not apply and a bare `Error`
-        // arrives here with `code` undefined (`batch.js:175-177`).
-        //
-        // parse-rust withholds the detail of an internal error on every path, inside a batch as
-        // well as outside one, under the security carve-out. The shape stays upstream's, meaning
-        // no `code` key, and only the message becomes the generic one.
+        // A sub-request's failure is rendered as `{code, error}` (`batch.js:176-178`). parse-rust
+        // withholds the detail of an internal error on every path, inside a batch as well as
+        // outside one. The shape stays upstream's, meaning no `code` key, and only the message is
+        // the generic one.
         Err(RouteError::Parse(e)) if e.origin == ErrorOrigin::Internal => {
             json!({ "error": { "error": crate::response::INTERNAL_SERVER_ERROR_MESSAGE }})
         }
@@ -152,7 +149,7 @@ async fn run_one(
             "error": e.message,
         }}),
         // UPSTREAM-QUIRK: the batch error branch reads `error.code` off whatever was thrown
-        // (`batch.js:176`), and an HTTP-level rejection has none. `JSON.stringify` drops the
+        // (`batch.js:177`), and an HTTP-level rejection has none. `JSON.stringify` drops the
         // resulting `undefined`, so the master-key gate answers a `code`-less error object inside
         // a batch and a `code`-less body outside one. Reproduced rather than given a code, because
         // a client branching on the key's presence would see an invented one.

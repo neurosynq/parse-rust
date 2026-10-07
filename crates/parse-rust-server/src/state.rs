@@ -32,6 +32,11 @@ impl AppState {
         &self.config
     }
 
+    /// The shared config handle, for a router piece that outlives a borrow of this state.
+    pub fn config_arc(&self) -> Arc<ServerConfig> {
+        Arc::clone(&self.config)
+    }
+
     pub fn storage(&self) -> &MongoAdapter {
         &self.storage
     }
@@ -45,7 +50,7 @@ impl AppState {
     /// would silently change the error a client sees.
     ///
     /// Upstream gates each of these behind a `databaseOptions.createIndex*` flag
-    /// (`DatabaseController.js:1981-2038`). Only `createIndexRoleName` is modeled; the two
+    /// (`DatabaseController.js:1993-2050`). Only `createIndexRoleName` is modeled; the two
     /// `_User` indexes are unconditional here, which is what their flags default to.
     pub async fn ensure_indexes(&self) -> Result<(), ParseError> {
         use parse_rust_storage::StorageAdapter;
@@ -56,7 +61,7 @@ impl AppState {
             .ensure_index("_User", &["email"], None, true, false)
             .await?;
         // **The case-insensitive pair, and note they are not unique**
-        // (`DatabaseController.js:1988-2005`). Upstream's `ensureIndex` never sets `unique`, so
+        // (`DatabaseController.js:2000-2017`). Upstream's `ensureIndex` never sets `unique`, so
         // these exist to make the collated uniqueness *query* fast, not to enforce anything. The
         // enforcement is the query in `validate_user_identity`.
         //
@@ -85,7 +90,7 @@ impl AppState {
             )
             .await?;
         // `_Role.name`, `ensureUniqueness('_Role', requiredRoleFields, ['name'])`
-        // (`DatabaseController.js:2033-2038`). Upstream passes no index name, so Mongo
+        // (`DatabaseController.js:2045-2050`). Upstream passes no index name, so Mongo
         // auto-generates `name_1`, which is the form the `duplicated_field` regex matches.
         //
         // Without it two `_Role` rows can share a name, and an ACL entry of `role:X` then grants

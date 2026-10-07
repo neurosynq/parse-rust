@@ -105,7 +105,7 @@ impl fmt::Display for ErrorCode {
 /// fixed one and the detail goes only to the log. So the same detail is a disclosure or not
 /// depending on which of the two it travelled in, and the code alone cannot tell them apart:
 /// upstream throws `Parse.Error(INTERNAL_SERVER_ERROR, ...)` deliberately in several places
-/// (`Auth.js:195`, `DatabaseController.js:1590-1595`) and those keep their messages.
+/// (`Auth.js:195`, `DatabaseController.js:1591-1596`) and those keep their messages.
 ///
 /// **No `Default` impl, deliberately.** A forgotten field would select the disclosing variant,
 /// which is the failure this enum exists to prevent. Every value is chosen by a constructor.
@@ -195,7 +195,7 @@ impl ParseError {
 
 /// Whether a denial tells the client *why* it was denied.
 ///
-/// `enableSanitizedErrorResponse` (`Options/Definitions.js:253-258`). Upstream's default is
+/// `enableSanitizedErrorResponse` (`Options/Definitions.js:259-264`). Upstream's default is
 /// `true`, and its check is `config?.enableSanitizedErrorResponse !== false` (`Error.js:21`), so
 /// an absent config withholds too. [`ErrorDetail::Withheld`] is therefore what a stock deployment
 /// runs, and it is the message every unmodified SDK sees.
@@ -247,7 +247,7 @@ impl ParseError {
     /// call here means finding the matching `createSanitizedError` at the pin first.
     ///
     /// `generic` is upstream's `sanitizedMessage` parameter, which defaults to `Permission
-    /// denied` and is overridden at exactly one call site (`DatabaseController.js:1590-1595`).
+    /// denied` and is overridden at exactly one call site (`DatabaseController.js:1591-1596`).
     /// It is required here rather than defaulted, because the two upstream spellings are
     /// different strings on the wire and picking the wrong one silently is the failure this
     /// argument exists to prevent.

@@ -42,6 +42,14 @@ impl ParseDate {
         self.0.timestamp_millis()
     }
 
+    /// This date moved by a whole number of milliseconds, as `new Date(t + ms)` moves it. Saturates
+    /// at the representable range rather than failing, for the same reason as above.
+    #[must_use]
+    pub fn plus_millis(&self, ms: i64) -> Self {
+        let target = self.0.timestamp_millis().saturating_add(ms);
+        Self(DateTime::from_timestamp_millis(target).unwrap_or(self.0))
+    }
+
     pub fn as_datetime(&self) -> DateTime<Utc> {
         self.0
     }

@@ -1,7 +1,7 @@
 //! One route table, two entry points.
 //!
 //! Upstream's `/batch` re-enters its own router: `handleBatch` calls
-//! `router.tryRouteRequest(method, routablePath, request)` (`batch.js:171`) against the same
+//! `router.tryRouteRequest(method, routablePath, request)` (`batch.js:172`) against the same
 //! `PromiseRouter` every HTTP request goes through, so a sub-request and a top-level request are
 //! the same code. That includes the route middlewares, because `PromiseRouter.route` folds them
 //! into the handler (`PromiseRouter.js:66-84`), which is why a `/schemas` sub-request still needs
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn the_literal_me_routes_win_over_the_parameterized_ones() {
-        // The trap upstream depends on registration order for (`UsersRouter.js:827-832`,
+        // The trap upstream depends on registration order for (`UsersRouter.js:838-843`,
         // `SessionsRouter.js:113-121`). Here it is spelled out, so it cannot depend on the order
         // axum happens to try patterns in.
         assert_eq!(route_of("/users/me"), Some(Route::UsersMe));

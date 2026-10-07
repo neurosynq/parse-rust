@@ -220,6 +220,12 @@ fn matches_constraint(
                 "the in-memory adapter does not implement $regex",
             ))
         }
+        Comparison::Geo(_) | Comparison::Text(_) => {
+            return Err(ParseError::new(
+                ErrorCode::CommandUnavailable,
+                "the in-memory adapter does not implement geo or text queries",
+            ))
+        }
     })
 }
 
@@ -577,6 +583,18 @@ impl StorageAdapter for FakeStorage {
             out = out.iter().map(|row| project(row, keys)).collect();
         }
         Ok(out)
+    }
+
+    /// A fixed document naming the verbosity. Only the plumbing is under test here; what a real
+    /// database says is the adapter integration test's business.
+    async fn explain(
+        &self,
+        _schema: &ClassSchema,
+        _query: &Query,
+        _options: &QueryOptions,
+        verbosity: parse_rust_storage::ExplainVerbosity,
+    ) -> Result<serde_json::Value, ParseError> {
+        Ok(serde_json::json!({ "fake": verbosity.as_str() }))
     }
 
     async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {

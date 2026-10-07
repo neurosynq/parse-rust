@@ -76,7 +76,7 @@ impl ParsedWhere {
 
     /// The objectId this query is pinned to, if it is pinned by a top-level equality.
     ///
-    /// Upstream reads `query.objectId` directly (`DatabaseController.js:1838`), which is a string
+    /// Upstream reads `query.objectId` directly (`DatabaseController.js:1839`), which is a string
     /// only for the shorthand equality form. Deliberately does not look inside a logical clause:
     /// inside an `$or` no such pinning exists.
     pub fn pinned_object_id(&self) -> Option<&str> {
@@ -294,8 +294,24 @@ fn parse_operators(
         });
     }
 
+    // The geo operators travel together, raw, in arrival order; see `Comparison::Geo`.
+    let geo: Vec<(String, ParseValue)> = inner
+        .iter()
+        .filter(|(op, _)| parse_rust_storage::GEO_OPERATORS.contains(&op.as_str()))
+        .map(|(op, operand)| Ok((op.clone(), parse_rust_core::classify_raw(operand.clone())?)))
+        .collect::<Result<_, ParseError>>()?;
+    if !geo.is_empty() {
+        out.push(Constraint {
+            field: field.to_string(),
+            comparison: Comparison::Geo(geo),
+        });
+    }
+
     for (op, operand) in inner {
-        if op == "$regex" || op == "$options" {
+        if op == "$regex"
+            || op == "$options"
+            || parse_rust_storage::GEO_OPERATORS.contains(&op.as_str())
+        {
             continue;
         }
         // **A query operand is compared, not stored, so it keeps what the client sent, and the
@@ -316,9 +332,14 @@ fn parse_operators(
         // So the operand stays raw and `parse-rust-mongo` recognizes it against the field, which is
         // where upstream decides too.
         let operand = parse_rust_core::classify_raw(operand.clone())?;
+        let comparison = if op == "$text" {
+            Comparison::Text(operand)
+        } else {
+            Comparison::from_operator(op, operand)?
+        };
         out.push(Constraint {
             field: field.to_string(),
-            comparison: Comparison::from_operator(op, operand)?,
+            comparison,
         });
     }
     Ok(out)
@@ -370,7 +391,7 @@ pub const MASTER_QUERYABLE_INTERNAL_FIELDS: [&str; 10] = [
 ///
 /// A key must match `^[a-zA-Z][a-zA-Z0-9_\.]*$` or be one of the internal columns the caller's
 /// authority may name. `$relatedTo` is deliberately not in either list, and does not need to be:
-/// upstream deletes it from the query before this runs (`DatabaseController.js:1208`), and here it
+/// upstream deletes it from the query before this runs (`DatabaseController.js:1209`), and here it
 /// has already been resolved into an `objectId` constraint by the time the check happens.
 pub fn validate_query_keys(where_: &ParsedWhere, is_master: bool) -> Result<(), ParseError> {
     for key in where_.field_keys() {
@@ -416,7 +437,7 @@ pub const MAX_INCLUDE_PATHS: usize = 500;
 ///
 /// **The two limits are a deliberate difference from upstream's defaults, not from upstream.**
 /// The pin has `requestComplexity.includeDepth` and `requestComplexity.includeCount`
-/// (`Options/Definitions.js:751-762`), and **both default to `-1`, meaning unbounded**, with master
+/// (`Options/Definitions.js:757-768`), and **both default to `-1`, meaning unbounded**, with master
 /// and maintenance exempt. So upstream ships the unbounded configuration, which is the denial of
 /// service described below; these limits are fixed and always on instead. Tier 2 under the security
 /// carve-out, recorded with its blast radius.
@@ -540,10 +561,7 @@ mod tests {
             "$notInQuery",
             "$select",
             "$dontSelect",
-            "$text",
-            "$nearSphere",
             "$containedBy",
-            "$geoWithin",
         ] {
             let src = format!(r#"{{"title":{{"{op}":1}}}}"#);
             let e = parse_where(&j(&src)).unwrap_err();

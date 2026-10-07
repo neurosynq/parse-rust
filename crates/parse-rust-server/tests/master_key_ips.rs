@@ -37,7 +37,7 @@ fn excluding_loopback(mut config: ServerConfig) -> ServerConfig {
 ///
 /// **Not the same code path as the other 403 carrying this envelope**, which is worth stating
 /// because the two are easy to conflate and only one of them is `invalidRequest`. An appId or
-/// client-key rejection calls `invalidRequest` directly (`middlewares.js:829-832`). This one is a
+/// client-key rejection calls `invalidRequest` directly (`middlewares.js:845-848`). This one is a
 /// plain `Error` carrying `status` and `message` thrown out of `resolveKeyAuth`
 /// (`middlewares.js:453-462`); express 5 forwards the rejected promise, and `handleParseErrors`
 /// renders it from its `err.status && err.message` branch (`middlewares.js:629-631`). Same status
