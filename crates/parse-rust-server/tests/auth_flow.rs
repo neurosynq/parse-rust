@@ -1738,8 +1738,22 @@ async fn a_refused_signup_does_not_disclose_whether_the_account_exists() {
         (r, started.elapsed())
     };
 
-    let (existing, t_existing) = attempt("already_here").await;
-    let (fresh, t_fresh) = attempt("brand_new_name").await;
+    // The CLP write invalidates the schema cache, so the first request after it pays for the
+    // reload. Take that hit on a third name, then compare the fastest of alternating attempts, so
+    // neither side is measured cold.
+    attempt("warms_the_cache").await;
+    let (mut existing, mut t_existing) = attempt("already_here").await;
+    let (mut fresh, mut t_fresh) = attempt("brand_new_name").await;
+    for _ in 0..4 {
+        let (r, t) = attempt("already_here").await;
+        if t < t_existing {
+            (existing, t_existing) = (r, t);
+        }
+        let (r, t) = attempt("brand_new_name").await;
+        if t < t_fresh {
+            (fresh, t_fresh) = (r, t);
+        }
+    }
 
     // Both must be the permission refusal, not one of them a uniqueness error.
     assert_eq!(existing.code(), Some(119), "{}", existing.raw);

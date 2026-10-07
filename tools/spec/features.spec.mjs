@@ -15,7 +15,7 @@
  * Usage:  node tools/spec/features.spec.mjs http://127.0.0.1:27800/parse
  *
  * Point it at a real parse-server to check the harness itself. Every assertion here has been
- * verified to pass against parse-server 9.10.1-alpha.6, so a failure means parse-rust diverged,
+ * verified to pass against parse-server at the pin, so a failure means parse-rust diverged,
  * not that the expectation was invented.
  *
  * **That property is a constraint on what may be added to this file.** An assertion that holds

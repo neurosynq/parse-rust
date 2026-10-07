@@ -337,7 +337,7 @@ async fn an_index_request_builds_the_index_and_then_records_it() {
     assert_eq!(created.status, 200, "{}", created.raw);
     assert_eq!(created.body["indexes"]["by_tag"]["tag"], json!(1));
     // **No `_id_` on a create, and a create is the one case where there is none.** Measured
-    // against parse-server 9.10.1-alpha.6: `POST /schemas/Indexed` carrying an `indexes` block
+    // against parse-server at the pin: `POST /schemas/Indexed` carrying an `indexes` block
     // answers `{"by_tag":{"tag":1}}`, where a `PUT` onto a class with no recorded block answers
     // `{"_id_":{"_id":1},"by_tag":{"tag":1}}` and stores the same. The asymmetry is an ordering
     // detail rather than a rule: `setIndexesWithSchemaFormat` runs before `insertSchema` on the
@@ -847,7 +847,7 @@ async fn a_clp_survives_a_request_whose_indexes_are_refused() {
 /// default columns, and made a `PUT` a successful no-op, in response to a request that was trying
 /// to define fields.
 ///
-/// Upstream's outcome is decided by JSON type, measured against parse-server 9.10.1-alpha.6: a
+/// Upstream's outcome is decided by JSON type, measured against parse-server at the pin: a
 /// string or non-empty array answers 105 `invalid field name: 0`, a number, boolean or empty array
 /// answers 200 having created the class with no fields, and null answers a 500.
 #[tokio::test]
@@ -1009,7 +1009,7 @@ async fn a_default_value_containing_a_dollar_key_is_stored_verbatim() {
 /// `Pointer<_User>` and `Pointer<Other>` share a discriminant, so the "field exists, cannot update"
 /// gate lets them past. The full-type refusal was documented as happening at field reservation,
 /// which runs only for fields the request is creating, so a retarget answered 200 and kept the
-/// original target. Measured against parse-server 9.10.1-alpha.6.
+/// original target. Measured against parse-server at the pin.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn retargeting_an_existing_pointer_is_refused() {

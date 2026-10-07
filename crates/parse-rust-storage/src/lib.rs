@@ -21,7 +21,7 @@ pub mod adapter;
 pub mod query;
 pub mod schema;
 
-pub use adapter::{AddFieldOutcome, Row, SchemaIndex, StorageAdapter, WriteResult};
+pub use adapter::{AddFieldOutcome, IndexFields, Row, SchemaIndex, StorageAdapter, WriteResult};
 pub use query::{
     Clause, Comparison, Constraint, CountOptions, ExplainVerbosity, Hint, Query, QueryOptions,
     SortDirection, Update, UpdateValue, DEFAULT_LIMIT, GEO_OPERATORS,

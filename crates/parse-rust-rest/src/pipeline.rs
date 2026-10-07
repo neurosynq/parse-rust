@@ -36,7 +36,7 @@ use parse_rust_storage::{
 
 use crate::acl::{default_acl_for_create, lower_acl, raise_acl, AclScope};
 use crate::clp::{
-    adds_field, apply_pointer_permissions, deny_protected_fields, filter_sensitive_data,
+    self, adds_field, apply_pointer_permissions, deny_protected_fields, filter_sensitive_data,
     plan_protected_fields, validate_permission, PermissionOptions, PointerPermOutcome,
     ProtectedFieldPlan, WriteAction,
 };
@@ -108,7 +108,7 @@ impl<'a, S: StorageAdapter> Ctx<'a, S> {
 pub struct FindOptions {
     pub limit: Option<u32>,
     /// Signed, because a negative skip is refused by the database rather than by the parser, and
-    /// that position is what the client sees. See [`storage_skip`].
+    /// that position is what the client sees. See [`QueryOptions::skip`].
     pub skip: Option<i64>,
     pub order: Vec<(String, SortDirection)>,
     pub keys: Option<Vec<String>>,
@@ -173,44 +173,8 @@ pub async fn find<S: StorageAdapter>(
     where_: ParsedWhere,
     options: FindOptions,
 ) -> Result<Vec<ParseMap>, ParseError> {
-    // **`limit=0` asks the database nothing, and so asks no permission either**
-    // (`RestQuery.js:864-867`): `runFind` answers an empty result before `DatabaseController.find`,
-    // where the CLP gate lives. It is what `query.count()` sends, `limit=0&count=1`, so a class
-    // whose CLP grants `count` and not `find` is countable.
-    //
-    // What runs before `runFind` still runs, in upstream's order: the constructor's class
-    // security and `_Session` refusal (`RestQuery.js:54`, `:118-120`), the class-creation check
-    // in `buildRestWhere`, and `denyProtectedFields` (`RestQuery.js:287`). Skipping them let
-    // `GET /classes/_Session?limit=0` with no session answer 200 where upstream answers 209.
     if options.limit == Some(0) {
-        let master = ctx.scope.is_master();
-        crate::class_security::enforce_class_security(
-            class_name,
-            master,
-            ReadMethod::Find.as_str(),
-            ctx.options.error_detail,
-        )?;
-        let mut where_ = where_;
-        narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
-        if !ctx.snapshot.contains(class_name) {
-            validate_client_class_creation(ctx, class_name, false)?;
-        }
-        if !master {
-            let protected = plan_protected_fields(
-                class_name,
-                ctx.snapshot.clp(class_name),
-                ctx.scope,
-                where_.pinned_object_id(),
-                ctx.options,
-            );
-            deny_protected_fields(
-                protected.as_ref(),
-                class_name,
-                &where_,
-                &options.order,
-                ctx.options.error_detail,
-            )?;
-        }
+        zero_limit_checks(ctx, class_name, where_, &options)?;
         return Ok(Vec::new());
     }
 
@@ -231,6 +195,56 @@ pub async fn find<S: StorageAdapter>(
     .await?;
     expand_includes(ctx, &mut results, &options).await?;
     Ok(results)
+}
+
+/// What a `limit=0` find still checks before answering `[]`.
+///
+/// **`limit=0` asks the database nothing, and so asks no permission either**
+/// (`RestQuery.js:864-867`): `runFind` answers an empty result before `DatabaseController.find`,
+/// where the CLP gate lives. It is what `query.count()` sends, `limit=0&count=1`, so a class whose
+/// CLP grants `count` and not `find` is countable. An explain takes the same branch, because the
+/// explain is a find option that only `DatabaseController.find` reads, and the `include` pass that
+/// fails on an explain document walks an empty list instead.
+///
+/// What runs before `runFind` still runs, in upstream's order: the constructor's class security
+/// and `_Session` refusal (`RestQuery.js:54`, `:118-120`), the class-creation check in
+/// `buildRestWhere`, and `denyProtectedFields` (`RestQuery.js:287`). Skipping them let
+/// `GET /classes/_Session?limit=0` with no session answer 200 where upstream answers 209.
+fn zero_limit_checks<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    where_: ParsedWhere,
+    options: &FindOptions,
+) -> Result<(), ParseError> {
+    let master = ctx.scope.is_master();
+    crate::class_security::enforce_class_security(
+        class_name,
+        master,
+        ReadMethod::Find.as_str(),
+        ctx.options.error_detail,
+    )?;
+    let mut where_ = where_;
+    narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
+    if !ctx.snapshot.contains(class_name) {
+        validate_client_class_creation(ctx, class_name, false)?;
+    }
+    if !master {
+        let protected = plan_protected_fields(
+            class_name,
+            ctx.snapshot.clp(class_name),
+            ctx.scope,
+            where_.pinned_object_id(),
+            ctx.options,
+        );
+        deny_protected_fields(
+            protected.as_ref(),
+            class_name,
+            &where_,
+            &options.order,
+            ctx.options.error_detail,
+        )?;
+    }
+    Ok(())
 }
 
 /// Fetch one object by id.
@@ -258,10 +272,15 @@ pub async fn get<S: StorageAdapter>(
 }
 
 /// Count objects.
+///
+/// `order` is the find's. A count never sorts, but upstream's `runCount` sends the find's options
+/// through `DatabaseController.find` again (`RestQuery.js:917-925`), which validates every sort
+/// key, so `limit=0&count=1&order=$bad` is 105 there and must be here.
 pub async fn count<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     where_: ParsedWhere,
+    order: &[(String, SortDirection)],
     options: &parse_rust_storage::CountOptions,
 ) -> Result<u64, ParseError> {
     let schema = ctx.snapshot.get_or_default(class_name);
@@ -271,12 +290,12 @@ pub async fn count<S: StorageAdapter>(
         class_name,
         &schema,
         where_,
-        &[],
+        order,
         Operation::Count,
         ReadMethod::Find,
     )
     .await?;
-    let query = match plan {
+    let (query, protected) = match plan {
         // A count denied by a pointer permission is zero.
         //
         // UPSTREAM-QUIRK, deliberately not reproduced: upstream returns the literal `[]` from the
@@ -285,11 +304,21 @@ pub async fn count<S: StorageAdapter>(
         // a behavior a client can depend on, and reproducing it would mean giving this function a
         // return type that can hold an array.
         ReadPlan::Denied => return Ok(0),
-        ReadPlan::Run { query, .. } => query,
+        ReadPlan::Run {
+            query, protected, ..
+        } => (query, protected),
     };
     if !ctx.snapshot.contains(class_name) {
         return Ok(0);
     }
+    deny_protected_index_fields(
+        ctx,
+        class_name,
+        protected.as_ref(),
+        &query,
+        options.hint.as_ref(),
+    )
+    .await?;
     ctx.storage.count(&schema, &query, options).await
 }
 
@@ -415,6 +444,71 @@ fn narrow_sessions(
     Ok(())
 }
 
+/// [`deny_protected_fields`] for a field a read reaches through an index rather than by name.
+///
+/// Held to the same rule, with the same refusals. Only a caller with something protected pays for
+/// listing the class's indexes.
+async fn deny_protected_index_fields<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    protected: Option<&ProtectedFieldPlan>,
+    query: &Query,
+    hint: Option<&parse_rust_storage::Hint>,
+) -> Result<(), ParseError> {
+    if protected.is_none_or(|p| p.strip.is_empty()) {
+        return Ok(());
+    }
+    let text = has_text_search(query);
+    if hint.is_none() && !text {
+        return Ok(());
+    }
+    let indexes = ctx.storage.index_fields(class_name).await?;
+    let refuse = |verb: &str, field: &str| {
+        ParseError::permission_denied(
+            ErrorCode::OperationForbidden,
+            format!("This user is not allowed to {verb} {field} on class {class_name}"),
+            ctx.options.error_detail,
+        )
+    };
+    if let Some(hint) = hint {
+        // A hint naming no index is the database's refusal, which reveals nothing protected.
+        let hinted = indexes.iter().find(|index| match hint {
+            parse_rust_storage::Hint::Name(name) => index.name == *name,
+            parse_rust_storage::Hint::Keys(keys) => {
+                index.columns.len() == keys.len()
+                    && index.columns.iter().zip(keys.keys()).all(|(c, k)| c == k)
+            }
+        });
+        if let Some(field) =
+            hinted.and_then(|index| clp::protected_index_field(protected, &index.fields))
+        {
+            return Err(refuse("sort by", field));
+        }
+    }
+    if text {
+        for index in indexes.iter().filter(|index| index.text) {
+            if let Some(field) = clp::protected_index_field(protected, &index.fields) {
+                return Err(refuse("query", field));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does the query carry a `$text` search anywhere?
+fn has_text_search(query: &Query) -> bool {
+    query.clauses.iter().any(|clause| match clause {
+        Clause::Field(Constraint {
+            comparison: Comparison::Text(_),
+            ..
+        }) => true,
+        Clause::Field(_) => false,
+        Clause::Or(subs) | Clause::And(subs) | Clause::Nor(subs) => {
+            subs.iter().any(has_text_search)
+        }
+    })
+}
+
 /// Steps 2 through 11 of the read ordering.
 fn plan_read<'a, S: StorageAdapter>(
     ctx: &'a Ctx<'a, S>,
@@ -443,6 +537,15 @@ fn plan_read<'a, S: StorageAdapter>(
             ctx.options.error_detail,
         )?;
         narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
+
+        // **The read path runs the same option the write path does**, from `buildRestWhere`
+        // (`RestQuery.js:485-500`), so before the protected-field, sort and CLP checks. Answering
+        // an empty result instead tells a client that cannot create classes that the class simply
+        // has no rows, which is a different statement from upstream's refusal and hides a
+        // misconfigured client behind a plausible-looking 200.
+        if !ctx.snapshot.contains(class_name) {
+            validate_client_class_creation(ctx, class_name, false)?;
+        }
 
         // 8 (computed early, because the denial below needs it). Master never reaches it.
         let protected = if master {
@@ -483,12 +586,14 @@ fn plan_read<'a, S: StorageAdapter>(
             )?;
         }
 
-        // 11. Query validation, hoisted above the resolution steps because the keys it inspects
-        //     are the client's. Upstream runs it after pointer rewriting, on a query that by then
-        //     also carries the server's own `_rperm`/`_wperm` and has had `$relatedTo` deleted;
-        //     both of those are keys it would allow anyway, so checking the client's keys here is
-        //     the same predicate over a smaller set.
-        crate::query_parse::validate_query_keys(&where_, master)?;
+        // 11. Query validation, computed over the client's keys before the resolution steps
+        //     consume them and raised at upstream's position, after pointer permissions. Upstream
+        //     runs it on a query that by then also carries the server's own `_rperm`/`_wperm` and
+        //     has had `$relatedTo` deleted; both of those are keys it would allow anyway, so
+        //     checking the client's keys is the same predicate over a smaller set. The position
+        //     matters: a query a pointer permission denies outright answers empty, whatever keys
+        //     it names (`DatabaseController.js:1510-1516` before `:1524`).
+        let keys_checked = crate::query_parse::validate_query_keys(&where_, master);
 
         // 5 and 6. `$relatedTo` and relation-field constraints, both join-table reads.
         let mut query = resolve_where(ctx, class_name, schema, where_).await?;
@@ -502,6 +607,7 @@ fn plan_read<'a, S: StorageAdapter>(
                 PointerPermOutcome::DenyAll => return Ok(ReadPlan::Denied),
             }
         }
+        keys_checked?;
 
         // 10. The ACL clause.
         //
@@ -556,21 +662,21 @@ fn find_core<'a, S: StorageAdapter>(
                 order,
             } => (query, protected, order),
         };
+        deny_protected_index_fields(
+            ctx,
+            class_name,
+            protected.as_ref(),
+            &query,
+            options.hint.as_ref(),
+        )
+        .await?;
 
-        if !ctx.snapshot.contains(class_name) {
-            // **The read path runs the same option the write path does**
-            // (`RestQuery.js:485-500`). Answering an empty result instead tells a client that
-            // cannot create classes that the class simply has no rows, which is a different
-            // statement from upstream's refusal and hides a misconfigured client behind a
-            // plausible-looking 200.
-            validate_client_class_creation(ctx, class_name, false)?;
-            return Ok(Vec::new());
-        }
-
+        // **A class that does not exist is still read.** Upstream reads it under `{fields: {}}`
+        // and asks the adapter anyway (`DatabaseController.js:1423-1433`, `:1561-1563`), so the
+        // query is built and its errors raised: a malformed `$within` is 107 on any class.
         let query_options = QueryOptions {
             limit: options.limit,
-            skip: storage_skip(options.skip)
-                .map_err(|e| find_failure(e, ctx.options.error_detail))?,
+            skip: options.skip,
             order,
             keys: projection(&schema, &options),
             case_insensitive: false,
@@ -627,20 +733,6 @@ fn find_failure(e: ParseError, detail: parse_rust_core::ErrorDetail) -> ParseErr
     )
 }
 
-/// A skip as storage takes it. A negative one is the database's refusal upstream, so it is a bare
-/// internal error here and the caller reports it as it reports any other storage failure: on a
-/// find, through [`find_failure`], which measured at the pin is `skip=-1` answering
-/// `{"code":1,"error":"An internal server error occurred"}`.
-fn storage_skip(skip: Option<i64>) -> Result<Option<u32>, ParseError> {
-    match skip {
-        None => Ok(None),
-        Some(n) if n < 0 => Err(ParseError::internal(format!(
-            "skip must be non-negative, got {n}"
-        ))),
-        Some(n) => Ok(Some(u32::try_from(n).unwrap_or(u32::MAX))),
-    }
-}
-
 /// Explain a find instead of running it.
 ///
 /// The query is planned exactly as [`find`] plans it, so the explained query carries the same
@@ -650,19 +742,21 @@ fn storage_skip(skip: Option<i64>) -> Result<Option<u32>, ParseError> {
 /// `RestQuery.js:1125`).
 ///
 /// Who may explain is decided by the route, before this is reached (`rest.js:39-48`).
+///
+/// **`verbosity` arrives unvalidated, as a result.** Upstream validates the value in the adapter's
+/// `find` (`MongoStorageAdapter.js:728`), so an invalid one is refused only once the query reaches
+/// storage: after the CLP gate, and never on a `limit=0` or pointer-denied read, which answer `[]`.
 pub async fn explain<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     where_: ParsedWhere,
     options: FindOptions,
-    verbosity: parse_rust_storage::ExplainVerbosity,
+    verbosity: Result<parse_rust_storage::ExplainVerbosity, ParseError>,
 ) -> Result<serde_json::Value, ParseError> {
-    // `include` walks `results` as rows, and an explain document is not rows, so upstream throws
-    // inside the include pass and answers a bare 500. Measured at the pin.
-    if !options.include.is_empty() {
-        return Err(ParseError::internal(
-            "include on an explain; upstream throws walking the explain document",
-        ));
+    // Before the CLP gate, the include pass and the database, as on a find.
+    if options.limit == Some(0) {
+        zero_limit_checks(ctx, class_name, where_, &options)?;
+        return Ok(serde_json::Value::Array(Vec::new()));
     }
     let op = derived_op(&where_);
     let schema = ctx.snapshot.get_or_default(class_name);
@@ -676,7 +770,7 @@ pub async fn explain<S: StorageAdapter>(
         ReadMethod::Find,
     )
     .await?;
-    let (query, _, order) = match plan {
+    let (query, protected, order) = match plan {
         ReadPlan::Denied => {
             return if op == Operation::Get {
                 Err(object_not_found())
@@ -690,30 +784,41 @@ pub async fn explain<S: StorageAdapter>(
             order,
         } => (query, protected, order),
     };
-    if !ctx.snapshot.contains(class_name) {
-        validate_client_class_creation(ctx, class_name, false)?;
-    }
-    // `limit === 0` answers an empty result before the database is asked (`RestQuery.js:864`),
-    // explain or not.
-    if options.limit == Some(0) {
-        return Ok(serde_json::Value::Array(Vec::new()));
-    }
+    deny_protected_index_fields(
+        ctx,
+        class_name,
+        protected.as_ref(),
+        &query,
+        options.hint.as_ref(),
+    )
+    .await?;
+    let verbosity = verbosity?;
     // **No [`find_failure`] here.** Upstream's explain branch returns `this.adapter.find(...)`
     // with no `.catch` (`DatabaseController.js:1561`); the sanitizing one belongs to the
     // non-explain branch beside it. So a refused explain, a `hint` naming no index or a negative
     // `skip`, answers the bare `{"code":1,"message":"Internal server error."}`.
     let query_options = QueryOptions {
         limit: options.limit,
-        skip: storage_skip(options.skip)?,
+        skip: options.skip,
         order,
         keys: projection(&schema, &options),
         case_insensitive: false,
         hint: options.hint,
         comment: options.comment,
     };
-    ctx.storage
+    let document = ctx
+        .storage
         .explain(&schema, &query, &query_options, verbosity)
-        .await
+        .await?;
+    // `include` walks `results` as rows, and an explain document is not rows, so upstream throws
+    // inside the include pass and answers a bare 500. Measured at the pin. It runs after the
+    // database answers (`RestQuery.js:298`), so a CLP refusal or a database error wins over it.
+    if !options.include.is_empty() {
+        return Err(ParseError::internal(
+            "include on an explain; upstream throws walking the explain document",
+        ));
+    }
+    Ok(document)
 }
 
 /// `keys` and `excludeKeys` folded into one positive projection.
@@ -975,7 +1080,19 @@ fn is_auth_data_id_path(field: &str) -> bool {
             && provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
-/// Expand every `include` path, one query per target class per level.
+/// Expand every `include` path, one query per target class per path.
+///
+/// **Concurrent the way upstream is.** `handleInclude` builds a tree of the paths and runs every
+/// sibling at once, a child only after its parent (`RestQuery.js:1057-1101`), and `includePath`
+/// queries its target classes at once (`RestQuery.js:1242-1266`). Here the paths arrive
+/// materialized and sorted by depth, so each depth is one wave: every path and class in it is
+/// queried together, then grafted in the original order before the next depth reads what was
+/// grafted. A child therefore waits for its whole depth rather than for its own parent, which costs
+/// time and changes nothing a client sees. Grafting in order keeps the key order of every result
+/// what the sequential version produced.
+///
+/// Which error a client sees when two of the queries fail is the first in path order here and the
+/// first to settle upstream; neither is a contract.
 async fn expand_includes<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     results: &mut [ParseMap],
@@ -986,70 +1103,110 @@ async fn expand_includes<S: StorageAdapter>(
     }
     let keys = options.keys.clone().unwrap_or_default();
     let exclude_keys = options.exclude_keys.clone().unwrap_or_default();
+    // `auth.isMaster`, which the maintenance key does not set (`middlewares.js:439`).
+    let master = ctx.scope.is_master() && !ctx.is_maintenance;
 
-    for path in &options.include {
-        let by_class = include::collect_pointers(results, path);
-        if by_class.is_empty() {
+    let mut remaining = options.include.as_slice();
+    while let Some(first) = remaining.first() {
+        let depth = first.len();
+        let level_len = remaining
+            .iter()
+            .take_while(|path| path.len() == depth)
+            .count();
+        let (level, rest) = remaining.split_at(level_len);
+        remaining = rest;
+
+        // Every query of this depth, collected before any of them runs. Same-depth paths cannot
+        // read what another one grafts, so collecting first is the same as collecting in turn.
+        let mut reads = Vec::new();
+        let mut has_pointers = vec![false; level.len()];
+        for (index, path) in level.iter().enumerate() {
+            for (target_class, ids) in include::collect_pointers(results, path) {
+                has_pointers[index] = true;
+                reads.push((index, target_class, ids));
+            }
+        }
+        if reads.is_empty() {
             continue;
         }
-        let mut fetched: IndexMap<String, ParseMap> = IndexMap::new();
-        for (target_class, ids) in by_class.iter() {
-            let mut where_ = ParsedWhere::default();
-            // One id is an equality, several are an `$in` (`RestQuery.js:1244-1249`), and the same
-            // count picks the method: `get` for one, `find` for several
-            // (`RestQuery.js:1250-1251`). The CLP operation does **not** follow it. Upstream pins
-            // that to `get` for every include regardless of how many ids it collected
-            // (`RestQuery.js:1259`), so a class granting `get` and denying `find` still serves an
-            // include of any size.
-            //
-            // What the method decides is `enforceRoleSecurity`: a multi-object include of
-            // `_Installation` is refused where a single-object one is allowed.
-            let method = if ids.len() == 1 {
-                ReadMethod::Get
-            } else {
-                ReadMethod::Find
-            };
-            let constraint = if ids.len() == 1 {
-                Constraint::equal("objectId", ParseValue::String(ids[0].clone()))
-            } else {
-                Constraint::one_of(
-                    "objectId",
-                    ids.iter()
-                        .map(|id| ParseValue::String(id.clone()))
-                        .collect(),
-                )
-            };
-            where_.push(ParsedClause::Field(constraint));
+        let fetches = reads.iter().map(|(index, target_class, ids)| {
+            include_read(ctx, target_class, ids, &level[*index], &keys, &exclude_keys)
+        });
+        let outcomes = futures::future::join_all(fetches).await;
 
-            let nested = FindOptions {
-                limit: Some(ids.len() as u32),
-                skip: None,
-                order: Vec::new(),
-                keys: include::keys_for_path(&keys, path),
-                exclude_keys: include::exclude_keys_for_path(&exclude_keys, path),
-                include: Vec::new(),
-                // An include's own read carries neither: upstream builds it from
-                // `includeReadPreference` alone.
-                hint: None,
-                comment: None,
-            };
-
-            // The nested read is a full pipeline read with the caller's own scope, so the target
-            // class's CLP, ACL and protected fields all apply. Grafting the row in without this
-            // is the classic Parse data leak: the caller is authorized for the class holding the
-            // pointer, not for the class it points at.
-            let rows = find_core(ctx, target_class, where_, nested, Operation::Get, method).await?;
-            for mut row in rows {
+        let mut fetched: Vec<IndexMap<String, ParseMap>> = vec![IndexMap::new(); level.len()];
+        for ((index, target_class, _), rows) in reads.iter().zip(outcomes) {
+            for mut row in rows? {
                 let Some(ParseValue::String(id)) = row.get("objectId").cloned() else {
                     continue;
                 };
-                include::shape_included(&mut row, target_class, ctx.scope.is_master());
-                fetched.insert(id, row);
+                include::shape_included(&mut row, target_class, master);
+                fetched[*index].insert(id, row);
             }
         }
-        include::graft(results, path, &fetched);
+        for ((path, rows), has) in level.iter().zip(&fetched).zip(has_pointers) {
+            if has {
+                include::graft(results, path, rows);
+            }
+        }
     }
     Ok(())
+}
+
+/// One include query: the rows of `target_class` that `path` points at.
+async fn include_read<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    target_class: &str,
+    ids: &[String],
+    path: &[String],
+    keys: &[String],
+    exclude_keys: &[String],
+) -> Result<Vec<ParseMap>, ParseError> {
+    let mut where_ = ParsedWhere::default();
+    // One id is an equality, several are an `$in` (`RestQuery.js:1244-1249`), and the same
+    // count picks the method: `get` for one, `find` for several
+    // (`RestQuery.js:1250-1251`). The CLP operation does **not** follow it. Upstream pins
+    // that to `get` for every include regardless of how many ids it collected
+    // (`RestQuery.js:1259`), so a class granting `get` and denying `find` still serves an
+    // include of any size.
+    //
+    // What the method decides is `enforceRoleSecurity`: a multi-object include of
+    // `_Installation` is refused where a single-object one is allowed.
+    let method = if ids.len() == 1 {
+        ReadMethod::Get
+    } else {
+        ReadMethod::Find
+    };
+    let constraint = if ids.len() == 1 {
+        Constraint::equal("objectId", ParseValue::String(ids[0].clone()))
+    } else {
+        Constraint::one_of(
+            "objectId",
+            ids.iter()
+                .map(|id| ParseValue::String(id.clone()))
+                .collect(),
+        )
+    };
+    where_.push(ParsedClause::Field(constraint));
+
+    let nested = FindOptions {
+        limit: Some(ids.len() as u32),
+        skip: None,
+        order: Vec::new(),
+        keys: include::keys_for_path(keys, path),
+        exclude_keys: include::exclude_keys_for_path(exclude_keys, path),
+        include: Vec::new(),
+        // An include's own read carries neither: upstream builds it from
+        // `includeReadPreference` alone.
+        hint: None,
+        comment: None,
+    };
+
+    // The nested read is a full pipeline read with the caller's own scope, so the target
+    // class's CLP, ACL and protected fields all apply. Grafting the row in without this
+    // is the classic Parse data leak: the caller is authorized for the class holding the
+    // pointer, not for the class it points at.
+    find_core(ctx, target_class, where_, nested, Operation::Get, method).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2005,9 +2162,15 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default(), &Default::default())
-                .await
-                .expect("count resolves"),
+            count(
+                &ctx,
+                "Post",
+                ParsedWhere::default(),
+                &[],
+                &Default::default()
+            )
+            .await
+            .expect("count resolves"),
             0
         );
         assert_eq!(
@@ -2049,9 +2212,15 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default(), &Default::default())
-                .await
-                .expect("count"),
+            count(
+                &ctx,
+                "Post",
+                ParsedWhere::default(),
+                &[],
+                &Default::default()
+            )
+            .await
+            .expect("count"),
             1
         );
         assert!(
@@ -2112,7 +2281,6 @@ mod tests {
         assert!(results[0].get("secret").is_some());
     }
 
-    /// Without this a client binary-searches the protected value through `where`.
     #[tokio::test]
     async fn querying_or_ordering_by_a_protected_field_is_forbidden() {
         let storage = protected_storage();
@@ -2228,6 +2396,61 @@ mod tests {
             .await
             .expect("empty")
             .is_empty());
+    }
+
+    /// An explain takes the `limit=0` branch too: before the CLP gate, the include pass and the
+    /// adapter's validation of the explain value. Each of those refuses the same request with any
+    /// other limit.
+    #[tokio::test]
+    async fn a_zero_limit_explain_answers_before_the_gate_include_and_verbosity() {
+        let storage = FakeStorage::new()
+            .with_schema(default_schema("Post").with_clp(clp(r#"{"find":{},"get":{}}"#)));
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let verbosity = || Ok(parse_rust_storage::ExplainVerbosity::AllPlansExecution);
+        let invalid = || Err(ParseError::invalid_query("Invalid value for explain"));
+        let zero = FindOptions {
+            limit: Some(0),
+            include: vec![vec!["x".to_string()]],
+            ..Default::default()
+        };
+        for v in [verbosity(), invalid()] {
+            let out = explain(&ctx, "Post", ParsedWhere::default(), zero.clone(), v)
+                .await
+                .expect("empty");
+            assert_eq!(out, serde_json::json!([]));
+        }
+
+        let one = FindOptions {
+            limit: Some(1),
+            ..zero
+        };
+        for v in [verbosity(), invalid()] {
+            let e = explain(&ctx, "Post", ParsedWhere::default(), one.clone(), v)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                e.code,
+                ErrorCode::OperationForbidden,
+                "the gate comes first"
+            );
+        }
+        let master = AclScope::Unrestricted;
+        let ctx = Ctx::new(&storage, &snap, &master, &options);
+        let e = explain(&ctx, "Post", ParsedWhere::default(), one.clone(), invalid())
+            .await
+            .unwrap_err();
+        assert_eq!(e.message, "Invalid value for explain", "then the value");
+        let e = explain(&ctx, "Post", ParsedWhere::default(), one, verbosity())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::InternalServerError,
+            "then the include pass"
+        );
     }
 
     // -----------------------------------------------------------------------------------------

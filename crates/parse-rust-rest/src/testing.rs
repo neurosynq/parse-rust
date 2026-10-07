@@ -14,8 +14,9 @@ use parse_rust_core::{
     deep_strict_eq, recognize_atom, AtomPosition, ErrorCode, ParseError, ParseMap, ParseValue,
 };
 use parse_rust_storage::{
-    AddFieldOutcome, ClassSchema, Clause, Comparison, Constraint, FieldType, Query, QueryOptions,
-    Row, SchemaIndex, SortDirection, StorageAdapter, Update, UpdateValue, WriteResult,
+    AddFieldOutcome, ClassSchema, Clause, Comparison, Constraint, FieldType, IndexFields, Query,
+    QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update, UpdateValue,
+    WriteResult,
 };
 
 #[derive(Default)]
@@ -31,11 +32,22 @@ pub struct FakeStorage {
     /// Every index built, as `(class, name)`. Separate from `inner` so a test can read it without
     /// holding the row lock.
     indexes: Mutex<Vec<(String, String)>>,
+    /// What [`StorageAdapter::index_fields`] reports, per class. Seeded by a test rather than
+    /// derived from `indexes`, which records names only.
+    listed: Mutex<Vec<(String, IndexFields)>>,
 }
 
 impl FakeStorage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed an index for [`StorageAdapter::index_fields`] to report.
+    pub fn with_index_fields(self, class_name: &str, index: IndexFields) -> Self {
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.push((class_name.to_string(), index));
+        }
+        self
     }
 
     /// Seed a class schema without going through a write.
@@ -569,12 +581,16 @@ impl StorageAdapter for FakeStorage {
                 match direction {
                     SortDirection::Ascending => ordering,
                     SortDirection::Descending => ordering.reverse(),
+                    SortDirection::TextScore => std::cmp::Ordering::Equal,
                 }
             });
         }
 
         if let Some(skip) = options.skip {
-            out = out.into_iter().skip(skip as usize).collect();
+            out = out
+                .into_iter()
+                .skip(usize::try_from(skip).unwrap_or(0))
+                .collect();
         }
         if let Some(limit) = options.limit {
             out.truncate(limit as usize);
@@ -703,6 +719,17 @@ impl StorageAdapter for FakeStorage {
             .expect("lock")
             .retain(|(c, n)| c != class_name || n != name);
         Ok(())
+    }
+
+    async fn index_fields(&self, class_name: &str) -> Result<Vec<IndexFields>, ParseError> {
+        Ok(self
+            .listed
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|(c, _)| c == class_name)
+            .map(|(_, index)| index.clone())
+            .collect())
     }
 }
 

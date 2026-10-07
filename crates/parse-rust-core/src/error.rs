@@ -4,8 +4,9 @@
 //! `src/Error.js`, and `spec/` asserts on these numbers directly. Never invent a code and
 //! never change one to a better-fitting one.
 //!
-//! Codes extracted from the `parse` npm SDK bundled with parse-server 9.10.1-alpha.6, which is
-//! the same table `src/Error.js` re-exports.
+//! Codes extracted from the `parse` npm SDK that parse-server bundles at the pin, which is the same
+//! table `src/Error.js` re-exports. Every code in that table is here; the two here that it lacks,
+//! 135 and 136, are upstream literals, as their variants say.
 
 use std::fmt;
 

@@ -26,7 +26,7 @@
  *   node tools/spec/authorization.mjs <server-url> [appId] [masterKey] [--upstream=<mongo-uri>]
  *                                     [--detailed]
  *
- * With `--upstream`, the runner additionally boots parse-server 9.10.1-alpha.6 from the checkout
+ * With `--upstream`, the runner additionally boots parse-server from the pinned checkout
  * on its own database and replays every assertion there, then requires both targets to have run
  * the same named assertions. Without it, only the given URL is exercised and the summary says so.
  *

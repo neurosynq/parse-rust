@@ -78,24 +78,92 @@ pub async fn handle(
                 "batch request path must be a string",
             ));
         };
-        let method = match request.get("method") {
-            Some(Json::String(m)) => m.to_uppercase(),
+        let routable = routable_path(path, mount_path)?;
+        // `(restRequest.method || 'GET').toUpperCase()`: the nested-batch check normalizes the
+        // method. Routing, below, does not.
+        let normalized = match request.get("method") {
+            Some(Json::String(m)) if !m.is_empty() => m.to_uppercase(),
             _ => "GET".to_string(),
         };
-        let routable = routable_path(path, mount_path)?;
-        if method == "POST" && routable == BATCH_PATH {
+        if normalized == "POST" && routable == BATCH_PATH {
             return Err(ParseError::invalid_json(
                 "nested batch requests are not allowed",
             ));
         }
-        parsed.push((method, routable, request.get("body").cloned()));
+        parsed.push((
+            js_method(request.get("method")),
+            routable,
+            request.get("body").cloned(),
+        ));
     }
 
-    let mut results = Vec::with_capacity(parsed.len());
+    // **The sub-requests run concurrently**, as upstream starts them all from one `map` and awaits
+    // them with `Promise.all` (`batch.js:161-182`). Results keep request order whatever order they
+    // finish in. Two sub-requests touching the same object therefore have no defined order between
+    // them, which is upstream's contract too: a non-transactional batch never promised one.
+    //
+    // **An unroutable sub-request fails the whole batch.** `tryRouteRequest` throws synchronously
+    // inside that `map` (`PromiseRouter.js:121-125`), so the sub-requests before it were already
+    // started and the ones after it never are, and the batch answers 400 `cannot route <M> <p>`
+    // with no results array. Here the ones before it run to completion before the refusal is
+    // returned, where upstream can answer while they are still writing; a client sees the same
+    // response either way, and the writes it did not wait for are no less durable.
+    //
+    // The method is matched exactly as sent, as `PromiseRouter.match` compares it
+    // (`PromiseRouter.js:90-93`), so `post` and a missing method do not route.
+    let mut runnable = Vec::with_capacity(parsed.len());
+    let mut unroutable = None;
     for (method, path, body) in parsed {
-        results.push(run_one(state, rc, authority, &method, &path, body.as_ref()).await);
+        match routable(&method, &path) {
+            Some(route) => runnable.push((route, path, body)),
+            None => {
+                unroutable = Some(format!("cannot route {method} {path}"));
+                break;
+            }
+        }
+    }
+    let results = futures::future::join_all(runnable.iter().map(|(route, path, body)| {
+        run_one(state, rc, authority, route.clone(), path, body.as_ref())
+    }))
+    .await;
+    if let Some(message) = unroutable {
+        return Err(ParseError::invalid_json(message));
     }
     Ok(Json::Array(results))
+}
+
+/// `restRequest.method` as JavaScript would print it in `'cannot route ' + method`.
+///
+/// Absent is `undefined`. A string is itself, case untouched, because the router compares it
+/// verbatim. Anything else is an approximation of its `String()` form, which only reaches the
+/// message: none of those can match a route.
+fn js_method(value: Option<&Json>) -> String {
+    match value {
+        None => "undefined".to_string(),
+        Some(Json::String(m)) => m.clone(),
+        Some(Json::Object(_)) => "[object Object]".to_string(),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|v| js_method(Some(v)))
+            .collect::<Vec<_>>()
+            .join(","),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// The route a sub-request names, or `None` when upstream's router would find no match for the
+/// method and path together.
+///
+/// Only the four methods `PromiseRouter.route` accepts can ever match, and only in upper case.
+/// Whether the path serves that method is the dispatcher's table, asked through
+/// [`dispatch::serves`] so the two cannot disagree.
+fn routable(method: &str, path: &str) -> Option<(http::Method, dispatch::Route)> {
+    if !["GET", "POST", "PUT", "DELETE"].contains(&method) {
+        return None;
+    }
+    let method = method.parse::<http::Method>().ok()?;
+    let route = dispatch::route_of(path)?;
+    dispatch::serves(&route, &method).then_some((method, route))
 }
 
 /// One sub-request, rendered as `{success: ...}` or `{error: {code, error}}` (`batch.js:172-179`).
@@ -103,23 +171,10 @@ async fn run_one(
     state: &AppState,
     rc: &RequestContext,
     authority: &Authority,
-    method: &str,
+    (method, route): (http::Method, dispatch::Route),
     path: &str,
     body: Option<&Json>,
 ) -> Json {
-    let Ok(method) = method.parse::<http::Method>() else {
-        return json!({ "error": {
-            "code": ErrorCode::InvalidJson.as_i32(),
-            "error": format!("cannot route {method} {path}"),
-        }});
-    };
-    let Some(route) = dispatch::route_of(path) else {
-        return json!({ "error": {
-            "code": ErrorCode::InvalidJson.as_i32(),
-            "error": format!("cannot route {method} {path}"),
-        }});
-    };
-
     // A sub-request has no URL, so its query parameters are its body. That is why upstream's
     // `handleFind` merges the two before reading either (`ClassesRouter.js:23`).
     let params = if matches!(method, http::Method::GET | http::Method::DELETE) {

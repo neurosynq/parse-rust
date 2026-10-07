@@ -340,6 +340,10 @@ pub type Update = IndexMap<String, UpdateValue>;
 pub enum SortDirection {
     Ascending,
     Descending,
+    /// A full-text search's relevance, from `$score` or `-$score`, on the key `score`. Upstream
+    /// maps both spellings to `{score: {$meta: 'textScore'}}` (`RestQuery.js:221-232`), so the
+    /// sign is dropped and the order is the database's: most relevant first.
+    TextScore,
 }
 
 /// Parse's default page size when a query does not ask for one.
@@ -353,7 +357,10 @@ pub const DEFAULT_LIMIT: u32 = 100;
 #[derive(Debug, Clone)]
 pub struct QueryOptions {
     pub limit: Option<u32>,
-    pub skip: Option<u32>,
+    /// Signed, because a negative skip is the database's refusal, not the parser's. An adapter
+    /// refuses it where the database would: after the query is built, so the query's own errors
+    /// come first, as upstream's synchronous `transformWhere` makes them.
+    pub skip: Option<i64>,
     pub order: Vec<(String, SortDirection)>,
     /// Projection. `None` means every field; `Some` is the explicit list.
     ///
@@ -441,9 +448,12 @@ impl QueryOptions {
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|k| match k.strip_prefix('-') {
-                Some(rest) => (rest.to_string(), SortDirection::Descending),
-                None => (k.to_string(), SortDirection::Ascending),
+            .map(|k| match k {
+                "$score" | "-$score" => ("score".to_string(), SortDirection::TextScore),
+                _ => match k.strip_prefix('-') {
+                    Some(rest) => (rest.to_string(), SortDirection::Descending),
+                    None => (k.to_string(), SortDirection::Ascending),
+                },
             })
             .collect()
     }
@@ -452,6 +462,18 @@ impl QueryOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_in_either_sign_is_relevance_on_score() {
+        assert_eq!(
+            QueryOptions::parse_order("-$score,name, $score"),
+            vec![
+                ("score".to_string(), SortDirection::TextScore),
+                ("name".to_string(), SortDirection::Ascending),
+                ("score".to_string(), SortDirection::TextScore),
+            ]
+        );
+    }
 
     #[test]
     fn supported_operators_map() {

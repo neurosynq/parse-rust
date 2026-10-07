@@ -43,6 +43,7 @@ pub mod params;
 pub mod request;
 pub mod response;
 pub mod routes;
+pub mod schema_cache;
 pub mod state;
 
 use std::sync::Arc;
@@ -110,7 +111,7 @@ pub fn router(state: AppState) -> Router {
     // Cloned before `with_state` consumes it below, so the CORS layer can read the same config.
     let cors_state = state.clone();
     #[cfg(feature = "test-harness")]
-    let harness_config = state.config_arc();
+    let harness_state = state.clone();
 
     // The 0.2.0 surface, and nothing else: anything not registered here is a 404. Every route
     // that a client can reach through a `_method` override also accepts `POST`, because the
@@ -125,12 +126,22 @@ pub fn router(state: AppState) -> Router {
             get(routes::http::health).post(routes::http::health),
         )
         // Users. `POST /users` is signup and is deliberately not reachable through /classes.
-        .route("/users", post(routes::http::users_collection))
+        .route(
+            "/users",
+            get(routes::http::users_collection).post(routes::http::users_collection),
+        )
         .route(
             "/users/me",
             get(routes::http::users_me).post(routes::http::users_me),
         )
-        .route("/login", post(routes::http::login))
+        .route(
+            "/users/:objectId",
+            get(routes::http::users_object)
+                .put(routes::http::users_object)
+                .delete(routes::http::users_object)
+                .post(routes::http::users_object),
+        )
+        .route("/login", get(routes::http::login).post(routes::http::login))
         .route("/logout", post(routes::http::logout))
         // Classes.
         .route(
@@ -205,16 +216,19 @@ pub fn router(state: AppState) -> Router {
     // The conformance control plane, in a harness build only. See `harness` for the two stages.
     #[cfg(feature = "test-harness")]
     let app = app
-        .merge(harness::routes(harness_config))
+        .merge(harness::routes(harness_state))
         .layer(axum::middleware::from_fn(harness::count_tagged));
     // Innermost of the outer layers, so the timing covers the request's own work only.
     #[cfg(feature = "bench-instrumentation")]
     let app = app.layer(axum::middleware::from_fn(bench::instrument));
-    app.layer(axum::middleware::from_fn(body_credentials::extract))
-        .layer(axum::middleware::from_fn_with_state(
-            cors_state,
-            cors::layer,
-        ))
+    app.layer(axum::middleware::from_fn_with_state(
+        cors_state.clone(),
+        body_credentials::extract,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        cors_state,
+        cors::layer,
+    ))
 }
 
 /// Bind and serve. Returns the bound address, which matters when the caller asked for port 0.

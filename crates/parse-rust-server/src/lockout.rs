@@ -9,6 +9,9 @@
 //! Upstream's `unlockOnPasswordReset` has nothing to hook into here, because there is no password
 //! reset flow, so it is accepted and has no effect.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+
 use parse_rust_core::{ErrorCode, ParseDate, ParseError, ParseValue};
 use parse_rust_storage::{ClassSchema, Comparison, Constraint, Query, StorageAdapter, UpdateValue};
 
@@ -50,6 +53,41 @@ impl AccountLockout {
             ),
         )
     }
+}
+
+/// One login attempt per account at a time, in this process.
+///
+/// The lockout is specified as a sequence of attempts, and this lock is what makes concurrent
+/// attempts on one account count as that sequence: it is held from before the password compare to
+/// after the bookkeeping, so a client sending in sequence sees exactly what it saw without it. It
+/// does not span a fleet; two nodes still race each other on the same two columns.
+///
+/// Keyed by username alone, so two apps in one process that share a username serialize each other's
+/// logins. That costs time and decides nothing.
+pub async fn serialize_attempts(username: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    static GATES: Mutex<Option<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+    let gate = {
+        // A poisoned map only means another thread panicked while holding it; the map itself is
+        // still a valid cache of weak handles, so recover it rather than refuse every login.
+        let mut guard = GATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let gates = guard.get_or_insert_with(HashMap::new);
+        // Drop entries whose last holder has gone, so the map tracks logins in flight rather than
+        // every username ever tried.
+        if gates.len() > 1024 {
+            gates.retain(|_, weak| weak.strong_count() > 0);
+        }
+        match gates.get(username).and_then(Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(username.to_string(), Arc::downgrade(&gate));
+                gate
+            }
+        }
+    };
+    gate.lock_owned().await
 }
 
 /// `handleLoginAttempt`: run after the password has been compared, whichever way it went.
@@ -140,4 +178,84 @@ pub async fn handle_login_attempt<S: StorageAdapter>(
         return Err(policy.locked());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(duration: f64, threshold: u32) -> AccountLockout {
+        AccountLockout {
+            duration,
+            threshold,
+            unlock_on_password_reset: false,
+        }
+    }
+
+    /// `Config.js:400-424`: the bounds are exclusive at 0 and inclusive at 99999 for the duration,
+    /// inclusive at both ends for the threshold, and the two messages are upstream's.
+    #[test]
+    fn validation_bounds_and_messages_are_upstreams() {
+        for ok in [policy(0.05, 1), policy(99999.0, 999), policy(1.0, 3)] {
+            assert_eq!(ok.validate(), Ok(()), "{ok:?}");
+        }
+        let duration =
+            "Account lockout duration should be greater than 0 and less than 100000".to_string();
+        for bad in [0.0, -1.0, 99999.5, 100000.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(policy(bad, 3).validate(), Err(duration.clone()), "{bad}");
+        }
+        let threshold =
+            "Account lockout threshold should be an integer greater than 0 and less than 1000"
+                .to_string();
+        for bad in [0, 1000] {
+            assert_eq!(policy(1.0, bad).validate(), Err(threshold.clone()), "{bad}");
+        }
+    }
+
+    /// Two attempts on one account never overlap; attempts on two accounts do. The second half is
+    /// what keeps the gate from serializing every login on the server.
+    #[tokio::test]
+    async fn attempts_on_one_account_are_serialized_and_others_are_not() {
+        let first = serialize_attempts("gate-a").await;
+        let same = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            serialize_attempts("gate-a"),
+        )
+        .await;
+        assert!(same.is_err(), "a second attempt on the account must wait");
+        let other = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            serialize_attempts("gate-b"),
+        )
+        .await;
+        assert!(other.is_ok(), "another account must not wait");
+        drop(first);
+        let after = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            serialize_attempts("gate-a"),
+        )
+        .await;
+        assert!(
+            after.is_ok(),
+            "the account is free once the first attempt ends"
+        );
+    }
+
+    /// The duration is concatenated into the message as JavaScript prints a number
+    /// (`AccountLockout.js:91-94`), so a whole number has no decimal point and a fraction keeps
+    /// exactly its shortest form.
+    #[test]
+    fn the_locked_message_prints_the_duration_as_javascript_does() {
+        for (duration, printed) in [(1.0, "1"), (5.0, "5"), (0.05, "0.05"), (1.5, "1.5")] {
+            let err = policy(duration, 3).locked();
+            assert_eq!(err.code, ErrorCode::ObjectNotFound);
+            assert_eq!(
+                err.message,
+                format!(
+                    "Your account is locked due to multiple failed login attempts. Please try \
+                     again after {printed} minute(s)"
+                )
+            );
+        }
+    }
 }

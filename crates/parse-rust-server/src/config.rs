@@ -19,11 +19,11 @@ use crate::ip_allowlist::IpAllowlist;
 /// SDKs branch on it: the Ruby SDK warns below 7.0.0, and features gate on version comparisons.
 /// Reporting `parse-rust 0.0.0` would fail every one of those checks, so the wire-compatible
 /// answer is the parse-server version whose behavior this server implements. It is the same
-/// number recorded in `PIN`.
+/// number recorded in `PIN`, and a test below fails when the two disagree.
 ///
 /// If parse-rust ever needs to advertise itself distinctly, that belongs in a separate field
 /// that upstream does not define, not in this one.
-pub const REPORTED_PARSE_SERVER_VERSION: &str = "9.10.1-alpha.6";
+pub const REPORTED_PARSE_SERVER_VERSION: &str = "9.10.3";
 
 /// What this server can actually do, as reported by `GET /serverInfo`.
 ///
@@ -207,7 +207,7 @@ pub struct ServerConfig {
     pub features: FeatureSupport,
 
     /// `sessionLength` and `expireInactiveSessions`, which together decide `_Session.expiresAt`.
-    /// Defaults are upstream's (`Options/Definitions.js:635-640`, `:269-274`).
+    /// Defaults are upstream's (`Options/Definitions.js:635-640`, `:275-280`).
     pub session: SessionConfig,
 
     /// `protectedFields`. See [`default_protected_fields`] for the merge rule.
@@ -289,6 +289,11 @@ pub struct ServerConfig {
     /// rather than a duplicate-data annoyance. Upstream tests `!== false`, so anything other than
     /// an explicit `false` creates it.
     pub create_index_role_name: bool,
+
+    /// `databaseOptions.schemaCacheTtl`, default none, which never expires
+    /// (`Options/Definitions.js:1482-1486`). See [`crate::schema_cache`] for the units and for
+    /// what invalidates the cache without it.
+    pub schema_cache_ttl: Option<std::time::Duration>,
 }
 
 impl ServerConfig {
@@ -323,6 +328,7 @@ impl ServerConfig {
             allow_headers: Vec::new(),
             batch_request_limit: -1,
             create_index_role_name: true,
+            schema_cache_ttl: None,
         }
     }
 
@@ -492,5 +498,22 @@ mod tests {
         merge_protected_fields_defaults(&mut configured, false);
 
         assert_eq!(fields(&configured, "_User", "*"), vec!["email".to_string()]);
+    }
+
+    /// The reported version is the pin's. Read from `PIN` at test time rather than compiled in,
+    /// because `PIN` sits outside the crate and a published crate cannot include it; the same
+    /// reason the test passes vacuously when run from an unpacked crate archive, which has no `PIN`.
+    #[test]
+    fn the_reported_version_is_the_pinned_one() {
+        let Ok(pin) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../PIN"))
+        else {
+            return;
+        };
+        let version = pin
+            .lines()
+            .find_map(|line| line.strip_prefix("parse-server "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a parse-server line in PIN");
+        assert_eq!(REPORTED_PARSE_SERVER_VERSION, version);
     }
 }

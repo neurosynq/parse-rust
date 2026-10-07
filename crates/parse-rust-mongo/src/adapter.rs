@@ -1,5 +1,7 @@
 //! The MongoDB `StorageAdapter`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use bson::{doc, Bson, Document};
 use futures::TryStreamExt;
 use mongodb::options::{IndexOptions, ReturnDocument};
@@ -12,7 +14,8 @@ use parse_rust_schema::storage_format::{
 };
 use parse_rust_storage::{
     join_table_name, AddFieldOutcome, ClassSchema, CountOptions, ExplainVerbosity, FieldType, Hint,
-    Query, QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update, WriteResult,
+    IndexFields, Query, QueryOptions, Row, SchemaIndex, SortDirection, StorageAdapter, Update,
+    WriteResult,
 };
 
 use crate::transform::{
@@ -51,28 +54,86 @@ const EMPTY_CLPS_KEYS: [&str; 8] = [
     "protectedFields",
 ];
 
+/// `maxPoolSize`'s default in the Node driver parse-server ships with.
+const NODE_DRIVER_MAX_POOL_SIZE: u32 = 100;
+
 pub struct MongoAdapter {
     db: Database,
+    /// Bumped after every `_SCHEMA` write this adapter makes; see [`MongoAdapter::schema_epoch`].
+    schema_epoch: AtomicU64,
+}
+
+/// Bumps the epoch when dropped, so a write that fails halfway still invalidates.
+struct SchemaWrite<'a>(&'a AtomicU64);
+
+impl Drop for SchemaWrite<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl MongoAdapter {
     pub async fn connect(uri: &str, database: &str) -> Result<Self, ParseError> {
-        #[cfg(not(feature = "bench-instrumentation"))]
-        let client = Client::with_uri_str(uri).await.map_err(mongo_err)?;
+        let mut options = mongodb::options::ClientOptions::parse(uri)
+            .await
+            .map_err(mongo_err)?;
+        // **The Node driver's pool size, unless the URI names one.** parse-server inherits the Node
+        // driver's default of 100 connections (`mongodb/lib/connection_string.js`, `maxPoolSize`)
+        // and the Rust driver's is 10. A batch runs its sub-requests concurrently, so at 10 the
+        // fifty writes of a full batch queue for connections in five waves where parse-server's go
+        // out together.
+        if options.max_pool_size.is_none() {
+            options.max_pool_size = Some(NODE_DRIVER_MAX_POOL_SIZE);
+        }
         // The benchmark build installs the command monitor; see `bench`.
         #[cfg(feature = "bench-instrumentation")]
-        let client = {
-            let mut options = mongodb::options::ClientOptions::parse(uri)
-                .await
-                .map_err(mongo_err)?;
+        {
             options.command_event_handler = Some(mongodb::event::EventHandler::callback(
                 crate::bench::on_command,
             ));
-            Client::with_options(options).map_err(mongo_err)?
-        };
+        }
+        let client = Client::with_options(options).map_err(mongo_err)?;
         Ok(Self {
             db: client.database(database),
+            schema_epoch: AtomicU64::new(0),
         })
+    }
+
+    /// A counter that moves whenever this adapter has written `_SCHEMA`.
+    ///
+    /// The schema cache reads it before a load and stores it with the result; a mismatch on the
+    /// next read means a write landed since, which is the in-process half of upstream's
+    /// `reloadData({ clearCache: true })` after every schema mutation. It knows nothing about
+    /// writes made by another process, which is what `schemaCacheTtl` bounds.
+    ///
+    /// Bumped after the write rather than before, so a load that raced the write is stored under
+    /// the old value and discarded on the next read rather than kept.
+    pub fn schema_epoch(&self) -> u64 {
+        self.schema_epoch.load(Ordering::Acquire)
+    }
+
+    fn schema_write(&self) -> SchemaWrite<'_> {
+        SchemaWrite(&self.schema_epoch)
+    }
+
+    /// Empty every collection, keeping the collections and their indexes.
+    ///
+    /// Upstream's `deleteAllClasses(true)`, the fast form its spec helper calls between tests
+    /// (`MongoStorageAdapter.js:487-493`). Exists for the conformance control plane, which has to
+    /// clear the schema cache in the same step, as upstream's `afterEach` does.
+    pub async fn delete_all_rows(&self) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
+        for name in self.db.list_collection_names().await.map_err(mongo_err)? {
+            if name.starts_with("system.") {
+                continue;
+            }
+            self.db
+                .collection::<Document>(&name)
+                .delete_many(doc! {})
+                .await
+                .map_err(mongo_err)?;
+        }
+        Ok(())
     }
 
     /// Read the `_SCHEMA` document for one class.
@@ -112,7 +173,7 @@ impl MongoAdapter {
                 // The adapter's own message, not `SchemaController`'s. Upstream raises this one
                 // from the Mongo schema collection (`MongoSchemaCollection.js:234`), and a client
                 // adding a second GeoPoint by an ordinary write sees it rather than the
-                // `validateObject` string. Measured against parse-server 9.10.1-alpha.6.
+                // `validateObject` string. Measured against parse-server at the pin.
                 return Err(ParseError::incorrect_type(
                     "MongoDB only supports one GeoPoint field in a class.".to_string(),
                 ));
@@ -315,8 +376,9 @@ fn sort_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
     let mut sort = Document::new();
     for (key, dir) in &options.order {
         let dir = match dir {
-            SortDirection::Ascending => 1,
-            SortDirection::Descending => -1,
+            SortDirection::Ascending => Bson::Int32(1),
+            SortDirection::Descending => Bson::Int32(-1),
+            SortDirection::TextScore => Bson::Document(doc! { "$meta": "textScore" }),
         };
         sort.insert(storage_key(schema, key), dir);
     }
@@ -328,7 +390,13 @@ fn projection_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Docume
     let keys = options.keys.as_ref()?;
     let mut projection = Document::new();
     for k in keys {
-        projection.insert(storage_key(schema, k), 1);
+        // A selected `$score` is the search's relevance, returned as `score`
+        // (`MongoCollection.js:74-78`).
+        if k == "$score" {
+            projection.insert("score", doc! { "$meta": "textScore" });
+        } else {
+            projection.insert(storage_key(schema, k), 1);
+        }
     }
     // Always projected regardless of `keys`:
     //  - the permission columns, because ACL filtering happens after the read and projecting them
@@ -431,8 +499,9 @@ impl MongoAdapter {
         if let Some(limit) = options.limit {
             find = find.limit(i64::from(limit));
         }
-        if let Some(skip) = options.skip {
-            find = find.skip(u64::from(skip));
+        // `find` has refused a negative skip by now; see there.
+        if let Some(skip) = options.skip.and_then(|s| u64::try_from(s).ok()) {
+            find = find.skip(skip);
         }
         if let Some(sort) = sort_doc(schema, options) {
             find = find.sort(sort);
@@ -547,6 +616,13 @@ fn geo_index_field_from_message(e: &mongodb::error::Error) -> Option<String> {
     (!name.is_empty() && rest[name.len()..].starts_with(' ')).then_some(name)
 }
 
+/// Is `field` declared as a GeoPoint? The on-demand geo index is built only for such a field, the
+/// one kind a geo query is meant for. Upstream builds it for any field a query names; see
+/// `CHANGELOG.md`.
+fn declared_geo_point(schema: &ClassSchema, field: &str) -> bool {
+    schema.field(field) == Some(&FieldType::GeoPoint)
+}
+
 /// `findGeoIndexField` (`MongoCollection.js:19-44`): the field a geo-near operator constrains, at
 /// the top level or inside `$and`, which are the only places Mongo allows one.
 fn find_geo_index_field(query: &Document) -> Option<String> {
@@ -632,6 +708,7 @@ impl StorageAdapter for MongoAdapter {
     }
 
     async fn insert_schema(&self, schema: &ClassSchema) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         let mut document = schema_fields_document(schema);
         document.insert("_id", &schema.class_name);
         // Nested, and omitted entirely when there is nothing in it, matching
@@ -660,6 +737,7 @@ impl StorageAdapter for MongoAdapter {
     }
 
     async fn upsert_schema(&self, schema: &ClassSchema) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         let mut set = schema_fields_document(schema);
         // Dotted paths, so that writing one metadata key leaves the other two alone. An ordinary
         // field-adding save arrives with `clp: None` simply because nothing loaded one, and
@@ -707,6 +785,7 @@ impl StorageAdapter for MongoAdapter {
         field_type: &FieldType,
         options: Option<&ParseMap>,
     ) -> Result<AddFieldOutcome, ParseError> {
+        let _epoch = self.schema_write();
         let type_string = field_type_to_storage(field_type);
         if type_string.is_empty() {
             // `ACL` has no `_SCHEMA` string; it is injected on read. Reserving it would write an
@@ -844,6 +923,7 @@ impl StorageAdapter for MongoAdapter {
         field_name: &str,
         options: &ParseMap,
     ) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         // One path, one field, **under a `{field: {$exists: true}}` guard**
         // (`MongoSchemaCollection.js:284-297`). Without it a field deleted between the caller's
         // read and this write leaves options behind for a column that no longer exists, which
@@ -869,6 +949,7 @@ impl StorageAdapter for MongoAdapter {
     }
 
     async fn set_indexes(&self, class_name: &str, indexes: &ParseMap) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         // No upsert, matching `updateSchema` (`MongoStorageAdapter.js:404-408`). On a class being
         // created this matches nothing and the indexes travel in the insert instead.
         self.db
@@ -887,6 +968,7 @@ impl StorageAdapter for MongoAdapter {
         class_name: &str,
         clp: Option<&ClassLevelPermissions>,
     ) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         // `$set` on the one path when there is a block, `$unset` when there is not
         // (`MongoStorageAdapter.js:337-345` does the `$set` half). Removing the key is not the
         // same as storing an empty block: the key's absence is what makes a class read back as
@@ -908,6 +990,7 @@ impl StorageAdapter for MongoAdapter {
     }
 
     async fn delete_class(&self, schema: &ClassSchema) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         // Collected before the first await so the iterator does not borrow across it.
         let joins: Vec<String> = schema
             .relation_fields()
@@ -949,6 +1032,7 @@ impl StorageAdapter for MongoAdapter {
         schema: &ClassSchema,
         fields: &[String],
     ) -> Result<(), ParseError> {
+        let _epoch = self.schema_write();
         let mut column_unset = Document::new();
         let mut existence: Vec<Bson> = Vec::new();
         let mut schema_unset = Document::new();
@@ -1052,6 +1136,14 @@ impl StorageAdapter for MongoAdapter {
         // sanitizing `.catch` exists. See `ParseErrorInfo::before_query`.
         let filter = transform_where(schema, query).map_err(ParseError::before_query)?;
         self.create_text_indexes_if_needed(schema, query).await?;
+        // The database refuses a negative skip when the cursor runs, after the query is built and
+        // the text index exists. The driver's builder cannot carry one, so it is refused here, at
+        // that position, as the plain internal error the read path then sanitizes.
+        if let Some(skip) = options.skip.filter(|s| *s < 0) {
+            return Err(ParseError::internal(format!(
+                "skip must be non-negative, got {skip}"
+            )));
+        }
         let docs = match self.raw_find(schema, filter.clone(), options).await {
             Ok(docs) => docs,
             // **A geo-near query on a field with no geo index is answered by building one and
@@ -1060,8 +1152,9 @@ impl StorageAdapter for MongoAdapter {
             // none, and refusing the query would be a regression against it. The field comes from
             // the error message on servers that still include it and from the query otherwise.
             Err(e) if is_missing_geo_index(&e) => {
-                let field =
-                    geo_index_field_from_message(&e).or_else(|| find_geo_index_field(&filter));
+                let field = geo_index_field_from_message(&e)
+                    .or_else(|| find_geo_index_field(&filter))
+                    .filter(|field| declared_geo_point(schema, field));
                 let Some(field) = field else {
                     return Err(mongo_err(e));
                 };
@@ -1101,8 +1194,9 @@ impl StorageAdapter for MongoAdapter {
         if let Some(limit) = options.limit {
             find.insert("limit", i64::from(limit));
         }
+        // Negative or not: the database refuses a negative one, as it does upstream.
         if let Some(skip) = options.skip {
-            find.insert("skip", i64::from(skip));
+            find.insert("skip", skip);
         }
         if let Some(sort) = sort_doc(schema, options) {
             find.insert("sort", sort);
@@ -1127,8 +1221,9 @@ impl StorageAdapter for MongoAdapter {
         let explained = match self.db.run_command(command.clone()).await {
             Ok(explained) => explained,
             Err(e) if is_missing_geo_index(&e) => {
-                let field =
-                    geo_index_field_from_message(&e).or_else(|| find_geo_index_field(&filter));
+                let field = geo_index_field_from_message(&e)
+                    .or_else(|| find_geo_index_field(&filter))
+                    .filter(|field| declared_geo_point(schema, field));
                 let Some(field) = field else {
                     return Err(mongo_err(e));
                 };
@@ -1305,6 +1400,71 @@ impl StorageAdapter for MongoAdapter {
             .map_err(mongo_err)?;
         Ok(())
     }
+
+    async fn index_fields(&self, class_name: &str) -> Result<Vec<IndexFields>, ParseError> {
+        let cursor = match self
+            .db
+            .collection::<Document>(class_name)
+            .list_indexes()
+            .await
+        {
+            Ok(cursor) => cursor,
+            Err(e) if is_namespace_not_found(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(mongo_err(e)),
+        };
+        let models: Vec<IndexModel> = cursor.try_collect().await.map_err(mongo_err)?;
+        Ok(models.iter().map(index_model_fields).collect())
+    }
+}
+
+/// One listed index as Parse fields. A text index stores its fields as `weights`, not as keys.
+fn index_model_fields(model: &IndexModel) -> IndexFields {
+    let options = model.options.as_ref();
+    let name = options.and_then(|o| o.name.clone()).unwrap_or_default();
+    let mut text = false;
+    let columns = model.keys.keys().cloned().collect();
+    let mut fields: Vec<String> = Vec::new();
+    let mut push = |field: String| {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    };
+    for (column, value) in &model.keys {
+        if column == "_fts" || column == "_ftsx" {
+            text = text || matches!(value, Bson::String(s) if s == "text");
+            continue;
+        }
+        if value == &Bson::String("text".into()) {
+            text = true;
+        }
+        push(parse_field_of_column(column));
+    }
+    if text {
+        if let Some(weights) = options.and_then(|o| o.weights.as_ref()) {
+            for column in weights.keys() {
+                push(parse_field_of_column(column));
+            }
+        }
+    }
+    IndexFields {
+        name,
+        columns,
+        fields,
+        text,
+    }
+}
+
+/// The Parse field a storage column belongs to, by its root.
+fn parse_field_of_column(column: &str) -> String {
+    let root = column.split('.').next().unwrap_or(column);
+    match root {
+        "_id" => "objectId".into(),
+        "_created_at" => "createdAt".into(),
+        "_updated_at" => "updatedAt".into(),
+        "$**" => "$**".into(),
+        _ if root.starts_with("_auth_data_") => "authData".into(),
+        _ => root.strip_prefix("_p_").unwrap_or(root).to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1435,5 +1595,48 @@ mod tests {
             &doc! { "x": 1 }
         );
         assert!(written.get_document("update").expect("update").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod index_field_tests {
+    use super::*;
+
+    fn model(keys: Document, name: &str, weights: Option<Document>) -> IndexModel {
+        let mut options = IndexOptions::builder().name(name.to_string()).build();
+        options.weights = weights;
+        IndexModel::builder().keys(keys).options(options).build()
+    }
+
+    #[test]
+    fn storage_columns_are_reported_as_parse_fields() {
+        let listed = index_model_fields(&model(
+            doc! { "_p_owner": 1, "_created_at": -1, "address.city": 1 },
+            "compound",
+            None,
+        ));
+        assert_eq!(listed.name, "compound");
+        assert_eq!(listed.columns, ["_p_owner", "_created_at", "address.city"]);
+        assert_eq!(listed.fields, ["owner", "createdAt", "address"]);
+        assert!(!listed.text);
+    }
+
+    /// A text index stores `_fts`/`_ftsx` as its keys; the fields it searches are its weights.
+    #[test]
+    fn a_text_index_reports_the_fields_it_covers() {
+        let listed = index_model_fields(&model(
+            doc! { "_fts": "text", "_ftsx": 1 },
+            "title_text",
+            Some(doc! { "title": 1, "secret": 1 }),
+        ));
+        assert!(listed.text);
+        assert_eq!(listed.fields, ["title", "secret"]);
+        assert_eq!(listed.columns, ["_fts", "_ftsx"]);
+    }
+
+    #[test]
+    fn a_wildcard_index_reads_every_field() {
+        let listed = index_model_fields(&model(doc! { "$**": 1 }, "all", None));
+        assert_eq!(listed.fields, ["$**"]);
     }
 }

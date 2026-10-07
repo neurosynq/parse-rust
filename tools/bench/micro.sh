@@ -34,12 +34,6 @@ if [[ ! -f "$UPSTREAM/lib/Adapters/Storage/Mongo/MongoTransform.js" ]]; then
   echo "micro.sh: $UPSTREAM has no built lib/; run npm run build there" >&2
   exit 1
 fi
-# `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built.
-stale=$(find "$UPSTREAM/src" -type f -newer "$UPSTREAM/lib/index.js" -print -quit 2>/dev/null)
-if [[ -n "$stale" ]]; then
-  echo "micro.sh: $UPSTREAM/lib is older than $stale; rebuild with npm run build" >&2
-  exit 1
-fi
 
 # The Node numbers are parse-server's only if they come from the pinned revision. A checkout that
 # has drifted measures an undeclared revision and calls it the release target.
@@ -53,6 +47,10 @@ if [[ -n "$(git -C "$UPSTREAM" status --porcelain --untracked-files=no)" ]]; the
   echo "micro.sh: $UPSTREAM has modified tracked files; its lib/ is not the pin's" >&2
   exit 1
 fi
+# `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built, and a
+# build newer than the sources says nothing about which sources. This recompiles `src/` in memory
+# and compares it to `lib/`; its header states what it still trusts.
+node tools/bench/verify-upstream-build.cjs "$UPSTREAM" >/dev/null || exit 1
 
 cargo build --quiet --release -p parse-rust-bench --bin micro --bin make-corpus
 target/release/make-corpus --check >/dev/null || {
@@ -73,8 +71,9 @@ from pathlib import Path
 
 out = Path(sys.argv[1])
 corpus_dir = Path("crates/parse-rust-bench/corpus")
-families = ["json.decode", "json.encode", "parse-to-bson", "bson-to-parse"]
-corpora = [f"{s}-{h}" for s in ["200b", "2kb", "8kb"] for h in ["flat", "nested", "pointers"]]
+matrix = json.loads(Path("crates/parse-rust-bench/matrix.json").read_text())
+families = matrix["families"]
+corpora = [f"{s}-{h}" for s in matrix["sizes"] for h in matrix["shapes"]]
 targets = ["rust", "node"]
 
 hashes = {}

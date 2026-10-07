@@ -140,8 +140,9 @@ fn ps_root() -> PathBuf {
         .unwrap_or_else(|_| repo().join("../parse-server-pinned"))
 }
 
-/// The upstream checkout must be the pinned revision with no tracked change. Untracked files do not
-/// change what `lib/` was built from and are not counted.
+/// The upstream checkout must be the pinned revision with no tracked change, and its `lib/` must be
+/// what its `src/` compiles to. Untracked files outside `src/` do not change what runs and are not
+/// counted; inside `src/` they are, because the build compiles them.
 fn verify_upstream() -> Value {
     let pin = std::fs::read_to_string(repo().join("PIN")).unwrap_or_default();
     let want = pin
@@ -176,39 +177,26 @@ fn verify_upstream() -> Value {
             root.display()
         ));
     }
-    // `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built. A
-    // source file newer than the build means `lib/` came from some other revision, as
-    // `tools/test.sh` checks for the gates.
-    let built = std::fs::metadata(root.join("lib/index.js")).and_then(|m| m.modified());
-    if let Ok(built) = built {
-        if let Some(newer) = newer_than(&root.join("src"), built) {
-            fail(format!(
-                "upstream lib/ is older than {}; rebuild with npm run build",
-                newer.display()
-            ));
-        }
+    // `lib/` is ignored by git, so a clean tree at the pin says nothing about what was built, and
+    // a build newer than the sources says nothing about which sources. The script recompiles
+    // `src/` in memory with the checkout's own babel and compares it to `lib/` byte for byte; its
+    // header states what it still trusts.
+    let script = repo().join("tools/bench/verify-upstream-build.cjs");
+    let checked = Command::new("node")
+        .arg(&script)
+        .arg(&root)
+        .env_remove("NODE_OPTIONS")
+        .output();
+    match checked {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => fail(format!(
+            "upstream lib/ at {} is not its src/ at the pin:\n{}",
+            root.display(),
+            String::from_utf8_lossy(&out.stderr).trim_end()
+        )),
+        Err(e) => fail(format!("could not run {}: {e}", script.display())),
     }
     json!({ "sha": head, "clean": true })
-}
-
-/// The first file under `dir` modified after `than`, if any.
-fn newer_than(dir: &Path, than: std::time::SystemTime) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = newer_than(&path, than) {
-                return Some(found);
-            }
-        } else if entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .is_ok_and(|m| m > than)
-        {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn context(upstream: &Value) -> Value {
@@ -397,6 +385,10 @@ struct Workload {
     corpus: Option<Corpus>,
     request: Req,
 }
+
+/// The rungs a gate run measures, in milliseconds per database command. `matrix.json` repeats
+/// them for the report, and a test holds the two together.
+const GATE_RUNGS: [u64; 3] = [0, 1, 10];
 
 fn id(prefix: &str, n: usize) -> String {
     format!("{prefix}{n:0>width$}", width = 10 - prefix.len())
@@ -987,7 +979,7 @@ async fn main() {
     // diagnostic and cannot report clean.
     let mut rungs = args.rungs.clone();
     rungs.sort_unstable();
-    if rungs != [0, 1, 10] {
+    if rungs != GATE_RUNGS {
         problems.push(format!(
             "rungs {:?}: a gate run measures 0, 1 and 10 ms; this is a diagnostic run",
             args.rungs
@@ -1028,14 +1020,16 @@ async fn main() {
         // **The command count is declared here, not read from the instrumentation.** Taking it from
         // the same hook that measures the time would let a dropped command lower both and still
         // pass. Each count is what the workload issues on that server, from its query-shape
-        // fixture as reviewed: parse-server one, parse-rust two, the second being the per-request
-        // `_SCHEMA` read. A server change that alters a count must change it here too.
+        // fixture as reviewed: one on each server, both serving the schema from cache after the
+        // warmup. parse-rust read `_SCHEMA` on every request until 0.3.0's schema cache, and a
+        // change that brings that read back fails here. A server change that alters a count must
+        // change it here too.
         const CALIBRATION: [(&str, u64, u64); 4] = [
             // (workload, node commands, rust commands)
-            ("read.get", 1, 2),
-            ("create.nested", 1, 2),
-            ("update.ops", 1, 2),
-            ("query.protected", 1, 2),
+            ("read.get", 1, 1),
+            ("create.nested", 1, 1),
+            ("update.ops", 1, 1),
+            ("query.protected", 1, 1),
         ];
         for (workload, node_ops, rust_ops) in CALIBRATION {
             let declared = if target.name == "node" {
@@ -1099,4 +1093,30 @@ async fn main() {
         fail(format!("{} problem(s)", problems.len()));
     }
     println!("gate J: clean, labelled baseline-unclassified; no verdict is published");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matrix() -> Value {
+        serde_json::from_str(include_str!("../../matrix.json")).expect("matrix.json parses")
+    }
+
+    #[test]
+    fn the_report_matrix_names_exactly_the_driver_workloads_and_rungs() {
+        let m = matrix();
+        let names: Vec<&str> = workloads().iter().map(|w| w.name).collect();
+        let listed: Vec<&str> = m["workloads"]
+            .as_array()
+            .expect("workloads")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            names, listed,
+            "matrix.json workloads drifted from the driver"
+        );
+        assert_eq!(m["rungs"], json!(GATE_RUNGS), "matrix.json rungs drifted");
+    }
 }

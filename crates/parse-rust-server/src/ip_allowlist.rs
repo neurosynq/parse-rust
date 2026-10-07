@@ -2,7 +2,7 @@
 //!
 //! Upstream builds a `net.BlockList` from the configured entries and asks it about the request's
 //! peer address (`middlewares.js:50-64`). The default for both options is the two literal
-//! addresses `127.0.0.1` and `::1` (`Options/Definitions.js:391-394`, `:396-399`), which is why an
+//! addresses `127.0.0.1` and `::1` (`Options/Definitions.js:391-394`, `:402-405`), which is why an
 //! unimplemented option is an open control rather than a missing feature: a stock parse-server
 //! honours the master key only from the machine it runs on.
 //!

@@ -9,18 +9,21 @@ and the report refuses to render one that claims anything else, because no verdi
 before 0.4.0's A/A noise floor exists.
 """
 
+import hashlib
 import json
 import sys
+from pathlib import Path
 
-WORKLOADS = [
-    "floor.health",
-    "read.get",
-    "create.nested",
-    "update.ops",
-    "batch.50",
-    "query.protected",
-    "include.wide",
-]
+BENCH = Path(__file__).resolve().parent.parent.parent / "crates" / "parse-rust-bench"
+# The completeness matrix comes from one file, never from the records: a report that inferred its
+# rows from what it was given would render a run missing a whole family as finished.
+MATRIX = json.loads((BENCH / "matrix.json").read_text(encoding="utf-8"))
+WORKLOADS = MATRIX["workloads"]
+TARGETS = MATRIX["targets"]
+RUNGS = MATRIX["rungs"]
+CALIBRATED = MATRIX["calibrated"]
+FAMILIES = MATRIX["families"]
+CORPORA = [f"{size}-{shape}" for size in MATRIX["sizes"] for shape in MATRIX["shapes"]]
 
 
 def load(path):
@@ -58,22 +61,54 @@ def main():
     historical = [r for r in e2e if r["kind"] == "historical"]
     if not measured:
         fail(f"{sys.argv[1]} has no e2e records")
-    # The same completeness and calibration the driver enforces, so a records file the driver would
-    # have failed cannot be rendered into a report that looks finished.
-    for target in ("node", "rust"):
+    if not micro:
+        fail(f"{sys.argv[2]} has no records")
+    # The same completeness and calibration the driver and micro.sh enforce, against the fixed
+    # matrix, so a records file either would have failed cannot be rendered into a report that
+    # looks finished.
+    for target in TARGETS:
         for workload in WORKLOADS:
-            for rung in (0, 1, 10):
+            for rung in RUNGS:
                 found = [r for r in measured if r["target"] == target and r["workload"] == workload
                          and r["db_latency_rung_ms"] == rung]
                 if len(found) != 1:
                     fail(f"{len(found)} records for {target} {workload} at {rung} ms; expected exactly one")
                 if not isinstance(found[0]["db_share_p50"], (int, float)):
                     fail(f"{target} {workload} at {rung} ms has no measured db_share")
-        cal = [r for r in e2e if r["kind"] == "calibration" and r["target"] == target]
-        if len(cal) != 4 or not all(r["passed"] is True for r in cal):
-            fail(f"{target}: calibration is missing or failed ({len(cal)} records)")
+        cal = sorted(r["workload"] for r in e2e if r["kind"] == "calibration" and r["target"] == target)
+        if cal != sorted(CALIBRATED):
+            fail(f"{target}: calibration covers {cal}, expected {sorted(CALIBRATED)}")
+        if not all(r["passed"] is True for r in e2e if r["kind"] == "calibration" and r["target"] == target):
+            fail(f"{target}: calibration failed")
+    for r in measured:
+        key = (r["target"], r["workload"], r["db_latency_rung_ms"])
+        if r["target"] not in TARGETS or r["workload"] not in WORKLOADS or r["db_latency_rung_ms"] not in RUNGS:
+            fail(f"e2e record {key} is outside the matrix")
+
+    hashes = {}
+    for name in CORPORA:
+        path = BENCH / "corpus" / f"{name}.json"
+        if not path.exists():
+            fail(f"corpus {path} is missing")
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    mcells = {}
+    for r in micro:
+        key = (r.get("target"), r.get("family"), r.get("corpus", {}).get("name"))
+        if key[0] not in TARGETS or key[1] not in FAMILIES or key[2] not in CORPORA:
+            fail(f"micro record {key} is outside the matrix")
+        mcells.setdefault(key, []).append(r)
+    for family in FAMILIES:
+        for corpus in CORPORA:
+            for target in TARGETS:
+                found = mcells.get((target, family, corpus), [])
+                if len(found) != 1:
+                    fail(f"{len(found)} micro records for {target} {family} {corpus}; expected exactly one")
+                if found[0]["corpus"].get("hash") != hashes[corpus]:
+                    fail(f"micro {target} {family} {corpus} ran on corpus {found[0]['corpus'].get('hash')}, "
+                         f"the file on disk is {hashes[corpus]}")
+
     ctx = measured[0]["context"]
-    rungs = sorted({r["db_latency_rung_ms"] for r in measured})
+    rungs = RUNGS
     calibration = [r for r in e2e if r["kind"] == "calibration"]
     cell = {(r["target"], r["workload"], r["db_latency_rung_ms"]): r for r in measured + historical}
 
@@ -159,8 +194,8 @@ def main():
     w("p50 per operation in microseconds, over the frozen corpora. Each record carries the hash of")
     w("the corpus file it ran on.")
     w("")
-    families = sorted({r["family"] for r in micro})
-    corpora = sorted({r["corpus"]["name"] for r in micro})
+    families = sorted(FAMILIES)
+    corpora = sorted(CORPORA)
     mcell = {(r["target"], r["family"], r["corpus"]["name"]): r for r in micro}
     w("| corpus | " + " | ".join(f"{f} rust | {f} node" for f in families) + " |")
     w("|---|" + "---:|" * (2 * len(families)))

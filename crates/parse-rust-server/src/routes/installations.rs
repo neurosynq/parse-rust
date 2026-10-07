@@ -1,7 +1,8 @@
 //! The front of `handleInstallation` (`RestWrite.js:1393-1446`): the checks and normalizations a
-//! `_Installation` write gets before anything else looks at it.
+//! `_Installation` write gets before anything else looks at it, and the sanity checks an update
+//! meets against the stored row ([`check_update`]).
 //!
-//! **Not the deduplication that follows it.** Upstream then looks up existing installations by
+//! **Not the deduplication that follows them.** Upstream then looks up existing installations by
 //! `objectId`, `installationId` and `deviceToken`, merges or deletes conflicting rows, and can turn
 //! a create into an update. That is out of 0.3.0's scope and is recorded as such; what is here is
 //! what a single write can be judged by on its own.
@@ -58,10 +59,7 @@ pub fn prepare(
     // A create names its `deviceType`, unless it resolves onto an existing installation
     // (`RestWrite.js:1552-1554`). Without the deduplication nothing ever resolves, so every create
     // needs one; upstream asks the same of every create that matches no existing row.
-    let has_device_type = matches!(
-        body.get("deviceType"),
-        Some(FieldWrite::Value(v)) if parse_rust_core::is_js_truthy(v)
-    );
+    let has_device_type = truthy(body.get("deviceType"));
     if is_create && !has_device_type {
         return Err(ParseError::new(
             ErrorCode::MissingClassName,
@@ -79,6 +77,117 @@ pub fn prepare(
     // Every `installationId` is lowercased (`RestWrite.js:1444-1446`).
     if let Some(FieldWrite::Value(ParseValue::String(id))) = body.get_mut("installationId") {
         *id = id.to_lowercase();
+    }
+    Ok(())
+}
+
+/// `this.data[field]` is truthy. An operation is an object on the JavaScript side, so it is
+/// truthy: a `deviceType` sent as `{"__op":"Delete"}` counts as present, as it does upstream.
+fn truthy(write: Option<&FieldWrite>) -> bool {
+    match write {
+        None => false,
+        Some(FieldWrite::Value(v)) => parse_rust_core::is_js_truthy(v),
+        Some(FieldWrite::Op(_)) => true,
+    }
+}
+
+/// The value a write sets, for upstream's `!==` against the stored one. An operation is never
+/// equal to anything stored, because it is an object compared by identity.
+fn written_string(write: Option<&FieldWrite>) -> Option<&str> {
+    match write {
+        Some(FieldWrite::Value(ParseValue::String(s))) => Some(s),
+        _ => None,
+    }
+}
+
+/// The update half of `handleInstallation`'s sanity checks (`RestWrite.js:1514-1541`): an
+/// existing installation keeps its `installationId`, its `deviceToken` while neither side has an
+/// `installationId`, and its `deviceType`.
+///
+/// **Runs only when the update touches something critical**, upstream's
+/// `!this.data.deviceToken && !installationId && !this.data.deviceType` early return, where
+/// `installationId` falls back to the request's `X-Parse-Installation-Id` for a non-privileged
+/// caller (`RestWrite.js:1450-1461`). So a client sending that header gets the lookup on every
+/// update, and a missing row is `Object not found for update.` rather than the pipeline's
+/// `Object not found.`.
+///
+/// The lookup is upstream's: unrestricted, by objectId (`RestWrite.js:1491-1500`). The
+/// deduplication that follows these checks upstream is not implemented; see the module note.
+pub async fn check_update<S: parse_rust_storage::StorageAdapter>(
+    storage: &S,
+    snapshot: &parse_rust_rest::SchemaSnapshot,
+    object_id: &str,
+    body: &WriteBody,
+    privileged: bool,
+    header_installation_id: Option<&str>,
+) -> Result<(), ParseError> {
+    let header = header_installation_id
+        .filter(|id| !id.is_empty() && !privileged)
+        .map(str::to_lowercase);
+    let critical = truthy(body.get("deviceToken"))
+        || truthy(body.get("installationId"))
+        || header.is_some()
+        || truthy(body.get("deviceType"));
+    if !critical {
+        return Ok(());
+    }
+
+    let schema = snapshot.get_or_default(INSTALLATION_CLASS);
+    let query =
+        parse_rust_storage::Query::from_constraints(vec![parse_rust_storage::Constraint::equal(
+            "objectId",
+            ParseValue::String(object_id.into()),
+        )]);
+    let rows = storage
+        .find(
+            &schema,
+            &query,
+            &parse_rust_storage::QueryOptions::default(),
+        )
+        .await?;
+    let Some(stored) = rows.into_iter().next() else {
+        return Err(ParseError::new(
+            ErrorCode::ObjectNotFound,
+            "Object not found for update.",
+        ));
+    };
+    let stored_string = |field: &str| match stored.get(field) {
+        Some(ParseValue::String(s)) if !s.is_empty() => Some(s.as_str()),
+        _ => None,
+    };
+    let changed = |field: &str| {
+        ParseError::new(
+            ErrorCode::UnchangeableField,
+            format!("{field} may not be changed in this operation"),
+        )
+    };
+
+    let data_installation_id = written_string(body.get("installationId")).filter(|s| !s.is_empty());
+    if let (Some(data), Some(stored)) = (data_installation_id, stored_string("installationId")) {
+        if data != stored {
+            return Err(changed("installationId"));
+        }
+    }
+    if truthy(body.get("deviceToken"))
+        && data_installation_id.is_none()
+        && stored_string("installationId").is_none()
+    {
+        if let Some(stored) = stored_string("deviceToken") {
+            if written_string(body.get("deviceToken")) != Some(stored) {
+                return Err(changed("deviceToken"));
+            }
+        }
+    }
+    // `this.data.deviceType !== objectIdMatch.deviceType`, so an absent stored value differs from
+    // any written one, and an operation differs from everything.
+    if truthy(body.get("deviceType")) {
+        let stored = match stored.get("deviceType") {
+            Some(ParseValue::String(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        if stored.is_none() || written_string(body.get("deviceType")) != stored {
+            return Err(changed("deviceType"));
+        }
     }
     Ok(())
 }

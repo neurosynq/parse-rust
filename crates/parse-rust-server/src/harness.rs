@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use parse_rust_core::{ErrorCode, ParseError};
 use serde_json::json;
@@ -82,6 +82,18 @@ async fn get_stats() -> Response {
     Json(json!({ "blocks": blocks })).into_response()
 }
 
+/// Upstream's `afterEach` between spec blocks: every row gone, then `SchemaCache.clear()`
+/// (`spec/helper.js:284-290`). Done in process because the cache is: a reset from outside would
+/// leave this server serving the previous block's classes.
+async fn reset(state: &crate::state::AppState) -> Response {
+    let result = state.storage().delete_all_rows().await;
+    state.schema_cache().clear();
+    match result {
+        Ok(()) => Json(json!({})).into_response(),
+        Err(e) => crate::response::ParseErrorResponse(e).into_response(),
+    }
+}
+
 fn refused() -> Response {
     crate::response::ParseErrorResponse(ParseError::new(
         ErrorCode::OperationForbidden,
@@ -98,7 +110,10 @@ fn resolved(config: &crate::config::ServerConfig) -> serde_json::Value {
         "appId": config.app_id,
         "defaultLimit": config.default_limit,
         "maxLimit": config.max_limit,
-        "databaseOptions": { "allowPublicExplain": config.allow_public_explain },
+        "databaseOptions": {
+            "allowPublicExplain": config.allow_public_explain,
+            "schemaCacheTtl": config.schema_cache_ttl.map(|d| d.as_millis() as u64),
+        },
         "allowClientClassCreation": config.allow_client_class_creation,
         "allowCustomObjectId": config.allow_custom_object_id,
         "enableSanitizedErrorResponse": config.enable_sanitized_error_response,
@@ -116,9 +131,22 @@ fn resolved(config: &crate::config::ServerConfig) -> serde_json::Value {
 
 /// The control routes, mounted at the root rather than under the API's mount path, so no client
 /// route can collide with them.
-pub fn routes(config: std::sync::Arc<crate::config::ServerConfig>) -> Router {
+pub fn routes(state: crate::state::AppState) -> Router {
+    let config = state.config_arc();
     Router::new()
         .route("/_control/stats", get(get_stats))
+        .route(
+            "/_control/reset",
+            post(move || {
+                let state = state.clone();
+                async move {
+                    if !enabled() {
+                        return refused();
+                    }
+                    reset(&state).await
+                }
+            }),
+        )
         .route(
             "/_control/config",
             get(move || {

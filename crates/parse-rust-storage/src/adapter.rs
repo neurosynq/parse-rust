@@ -307,6 +307,28 @@ pub trait StorageAdapter: Send + Sync {
         class_name: &str,
         name: &str,
     ) -> impl Future<Output = Result<(), ParseError>> + Send;
+
+    /// What each of a class's indexes reads, for authorization rather than for planning.
+    ///
+    /// A read can reach a field through an index without naming it, so the read path checks the
+    /// fields an index covers against what the caller may see. Field names are Parse names, not
+    /// storage columns. A class with no collection has no indexes.
+    fn index_fields(
+        &self,
+        class_name: &str,
+    ) -> impl Future<Output = Result<Vec<IndexFields>, ParseError>> + Send;
+}
+
+/// One index as [`StorageAdapter::index_fields`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexFields {
+    pub name: String,
+    /// The key names exactly as stored, in order, which is what a key-pattern `hint` names.
+    pub columns: Vec<String>,
+    /// The Parse fields the index reads. A wildcard index reports `$**`.
+    pub fields: Vec<String>,
+    /// A full-text index, which answers a text search on any field with the fields it covers.
+    pub text: bool,
 }
 
 /// One entry of the schema API's `indexes` block: a name, and the key document under it.

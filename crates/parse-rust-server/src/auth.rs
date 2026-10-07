@@ -18,6 +18,7 @@ pub mod headers {
     pub const DOT_NET_KEY: &str = "x-parse-windows-key";
     pub const SESSION_TOKEN: &str = "x-parse-session-token";
     pub const INSTALLATION_ID: &str = "x-parse-installation-id";
+    pub const CLOUD_CONTEXT: &str = "x-parse-cloud-context";
 }
 
 /// How a request authenticated.

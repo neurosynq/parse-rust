@@ -51,12 +51,20 @@ fn strip_sensitive(mut row: ParseMap) -> ParseMap {
 /// `!password` is upstream's test, and it fires on an absent key, `null`, `false`, `0` and `""`
 /// alike, but **not** on a non-string that happens to be truthy. That one falls to the type check
 /// below it, which is a different code.
-fn body_has_truthy(body: &WriteBody, key: &str) -> bool {
+fn raw_truthy(body: &serde_json::Map<String, Json>, key: &str) -> bool {
     match body.get(key) {
-        Some(FieldWrite::Value(v)) => parse_rust_core::is_js_truthy(v),
-        // An op envelope is an object on the JS side, so it is truthy.
-        Some(FieldWrite::Op(_)) => true,
-        None => false,
+        None | Some(Json::Null) => false,
+        Some(Json::Bool(b)) => *b,
+        Some(Json::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Json::String(s)) => !s.is_empty(),
+        Some(Json::Array(_) | Json::Object(_)) => true,
+    }
+}
+
+fn raw_string(body: &serde_json::Map<String, Json>, key: &str) -> Option<String> {
+    match body.get(key) {
+        Some(Json::String(s)) => Some(s.clone()),
+        _ => None,
     }
 }
 
@@ -384,10 +392,11 @@ fn sdk_acl_entries_accepted(acl: &ParseValue) -> Result<(), ParseError> {
 /// alike. parse-rust had it on the signup route only, which left the class route uncovered for
 /// the master key.
 pub(crate) fn reject_role_prefixed_object_id(
-    body: &WriteBody,
+    body: &Json,
     rc: &RequestContext,
 ) -> Result<(), ParseError> {
-    let Some(FieldWrite::Value(ParseValue::String(id))) = body.get("objectId") else {
+    // The raw body, because the router reads it before any decoding (`ClassesRouter.js:111-118`).
+    let Some(Json::String(id)) = body.get("objectId") else {
         // `typeof req.body?.objectId === 'string'` guards it upstream, so a non-string is not
         // refused here. It is refused by schema validation instead.
         return Ok(());
@@ -481,21 +490,28 @@ pub async fn signup_core(
     authority: &Authority,
     body: &Json,
 ) -> Result<Json, ParseError> {
+    // `handleCreate`'s guard runs in the router, ahead of the `RestWrite` constructor and its
+    // objectId policy (`ClassesRouter.js:111-118`, `RestWrite.js:50-65`).
+    reject_role_prefixed_object_id(body, rc)?;
     let mut body = parse_rust_rest::decode_write_body(body, parse_rust_core::op::OpPath::Create)?;
-    // Before anything else: a signup body must not carry a `_hashed_password` of the caller's
-    // choosing.
+    // A signup body must not carry a `_hashed_password` of the caller's choosing.
     parse_rust_rest::reject_reserved_keys_in(body.keys().map(String::as_str))?;
     // Signup is a create like any other, so the objectId policy applies to it
     // (`RestWrite.js:50-65`). It has to run here rather than inside the pipeline, because
     // `ensure_user_identity_and_acl` below puts a server-generated objectId into the body.
     parse_rust_rest::enforce_object_id_policy(&body, state.config().allow_custom_object_id)?;
 
-    reject_role_prefixed_object_id(&body, rc)?;
+    // `validateAuthData` (`RestWrite.js:116`) before `checkRestrictedFields` (`:119`). The
+    // credential half is skipped upstream when `authData` is present, because the adapter supplies
+    // the identity; parse-rust refuses a client's `authData` at that same position instead, so a
+    // body carrying it is still refused for it rather than for a missing username.
+    if !authority.is_privileged() && body.get("authData").is_some() {
+        reject_client_restricted_user_fields(&body, rc, authority)?;
+    }
+    require_create_credentials(&body)?;
     // Upstream runs this on create as well as update (`RestWrite.js:119`), and running it only on
     // the update path left signup able to set `emailVerified` and `authData` on its own new row.
     reject_client_restricted_user_fields(&body, rc, authority)?;
-
-    require_create_credentials(&body)?;
 
     // **The `create` permission is checked before any identity work**, as upstream's
     // `validateWritePermission` is (`RestWrite.js:793-804`, run at `:134`, ahead of
@@ -591,7 +607,15 @@ pub async fn login_core(
     authority: &Authority,
     body: &Json,
 ) -> Result<Json, ParseError> {
-    let body = parse_rust_rest::decode_write_body(body, parse_rust_core::op::OpPath::Create)?;
+    // **Read raw, never decoded as a write.** Upstream destructures `username`, `email` and
+    // `password` straight off the payload (`UsersRouter.js:81`) and looks at nothing else, so a
+    // stray `{"x":{"__op":"Bogus"}}` beside the credentials is ignored. Decoding the body as a
+    // write refused that login over a key the login never reads.
+    let empty = serde_json::Map::new();
+    let body = match body {
+        Json::Object(map) => map,
+        _ => &empty,
+    };
 
     // **Three refusals in upstream's order, each with its own code** (`UsersRouter.js:84-96`).
     // Collapsing them into one `USERNAME_MISSING`, which is what this did, is wire-visible twice
@@ -602,15 +626,15 @@ pub async fn login_core(
     // The distinction decides which of the three fires: `{"username": 7}` is truthy, so it passes
     // the first guard and is refused by the third as a type error, where testing for a string here
     // would report a missing username instead.
-    let has_username = body_has_truthy(&body, "username");
-    let has_email = body_has_truthy(&body, "email");
+    let has_username = raw_truthy(body, "username");
+    let has_email = raw_truthy(body, "email");
     if !has_username && !has_email {
         return Err(ParseError::new(
             ErrorCode::UsernameMissing,
             "username/email is required.",
         ));
     }
-    if !body_has_truthy(&body, "password") {
+    if !raw_truthy(body, "password") {
         return Err(ParseError::new(
             ErrorCode::PasswordMissing,
             "password is required.",
@@ -621,9 +645,9 @@ pub async fn login_core(
     // its password was the wrong *type* is one bit more than upstream gives away here.
     let invalid_credentials =
         || ParseError::new(ErrorCode::ObjectNotFound, "Invalid username/password.");
-    let username = take_string(&body, "username");
-    let email = take_string(&body, "email");
-    let Some(password) = take_string(&body, "password") else {
+    let username = raw_string(body, "username");
+    let email = raw_string(body, "email");
+    let Some(password) = raw_string(body, "password") else {
         return Err(invalid_credentials());
     };
     if (has_username && username.is_none()) || (has_email && email.is_none()) {
@@ -697,6 +721,13 @@ pub async fn login_core(
         parse_rust_auth::password::verify_dummy(password).await;
         return Err(invalid());
     };
+    // Held across the compare and the lockout bookkeeping below; see `serialize_attempts`.
+    let attempt = match (&state.config().account_lockout, row.get("username")) {
+        (Some(_), Some(ParseValue::String(username))) => {
+            Some(crate::lockout::serialize_attempts(username).await)
+        }
+        _ => None,
+    };
     let valid = match row.get(HASHED_PASSWORD) {
         Some(ParseValue::String(hash)) if !hash.is_empty() => {
             parse_rust_auth::password::verify(password, hash.clone()).await
@@ -718,6 +749,7 @@ pub async fn login_core(
         crate::lockout::handle_login_attempt(state.storage(), &schema, policy, username, valid)
             .await?;
     }
+    drop(attempt);
     if !valid {
         return Err(invalid());
     }
@@ -945,7 +977,7 @@ pub(crate) async fn authorize_user_update(
     rc: &RequestContext,
     authority: &Authority,
     object_id: &str,
-    body: &WriteBody,
+    body: &Json,
 ) -> Result<(), ParseError> {
     if authority.is_privileged() {
         return Ok(());
@@ -961,7 +993,7 @@ pub(crate) async fn authorize_user_update(
     // present that is not the same string retargets, an op envelope included.
     match body.get("objectId") {
         None => {}
-        Some(FieldWrite::Value(ParseValue::String(id))) if id == object_id => {}
+        Some(Json::String(id)) if id == object_id => {}
         Some(_) => {
             return Err(ParseError::new(
                 ErrorCode::ObjectNotFound,
@@ -1107,7 +1139,7 @@ pub(crate) fn enforce_user_update_policy(
 /// Force the row's own principal back into a submitted ACL.
 ///
 /// Upstream re-adds it after the client's ACL is applied, so a `_User` cannot be made unreadable
-/// or unwritable by its owner. Measured against parse-server 9.10.1-alpha.6: saving
+/// or unwritable by its owner. Measured against parse-server at the pin: saving
 /// `{"ACL": {"*": {"read": true, "write": true}}}` reads back with the owner entry still present.
 /// Without this a client can lock itself out of its own row, and can do it to another user
 /// wherever an ACL permits the write.

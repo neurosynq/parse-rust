@@ -1,5 +1,4 @@
 [
-  "find _SCHEMA {}",
   "find BenchHolder {_rperm:{$in:[null,string,string]}} sort={\"n\":1} limit=20",
   "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} limit=1",
   "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} limit=1",

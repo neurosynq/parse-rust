@@ -458,6 +458,23 @@ pub fn deny_protected_fields(
     Ok(())
 }
 
+/// The first field in `fields` that [`deny_protected_fields`] would refuse, by full name or by
+/// root. `$**` is a wildcard index, which reads every field.
+pub fn protected_index_field<'a>(
+    plan: Option<&ProtectedFieldPlan>,
+    fields: &'a [String],
+) -> Option<&'a str> {
+    let plan = plan?;
+    fields
+        .iter()
+        .find(|field| {
+            let root = field.split('.').next().unwrap_or(field);
+            field.as_str() == "$**" && !plan.strip.is_empty()
+                || plan.strip.iter().any(|f| f == *field || f == root)
+        })
+        .map(String::as_str)
+}
+
 /// `filterSensitiveData` (`DatabaseController.js:192-303`), applied to one row in upstream's
 /// order.
 ///

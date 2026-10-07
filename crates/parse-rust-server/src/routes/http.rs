@@ -22,6 +22,7 @@ use crate::body_credentials::{BodyParams, MethodOverride};
 use crate::params::Params;
 use crate::response::{HttpError, ParseErrorResponse};
 use crate::routes::dispatch::{self, Incoming, Route, RouteError};
+use crate::schema_cache::Freshness;
 use crate::state::AppState;
 
 /// Resolve the context and run one route.
@@ -52,7 +53,10 @@ async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Res
     };
 
     // One snapshot, one role expansion, per HTTP request.
-    let rc = match state.request_context(authority).await {
+    let rc = match state
+        .request_context(authority, incoming.route.schema_freshness())
+        .await
+    {
         Ok(rc) => rc,
         Err(e) => return ParseErrorResponse(e).into_response(),
     };
@@ -135,19 +139,46 @@ pub async fn server_info(State(state): State<AppState>, authority: Authority) ->
 pub async fn users_collection(
     State(state): State<AppState>,
     authority: Authority,
+    ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
     body: Option<Json<Json_>>,
 ) -> Response {
-    let method = effective_method(http::Method::POST, method);
+    let method = effective_method(transport, method);
     run(
         &state,
         &authority,
         Incoming {
             method,
             route: Route::Users,
-            params: Params::default(),
+            params,
             body: body.map(|b| b.0),
             path: "/users".to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn users_object(
+    State(state): State<AppState>,
+    authority: Authority,
+    Path(object_id): Path<String>,
+    ReadParams(params): ReadParams,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+    body: Option<Json<Json_>>,
+) -> Response {
+    let method = effective_method(transport, method);
+    let path = format!("/users/{object_id}");
+    run(
+        &state,
+        &authority,
+        Incoming {
+            method,
+            route: Route::UserObject { object_id },
+            params,
+            body: body.map(|b| b.0),
+            path,
         },
     )
     .await
@@ -178,20 +209,63 @@ pub async fn users_me(
 pub async fn login(
     State(state): State<AppState>,
     authority: Authority,
+    Query(query): Query<HashMap<String, String>>,
+    method: Option<axum::Extension<MethodOverride>>,
+    body_params: Option<axum::Extension<BodyParams>>,
+    transport: http::Method,
     body: Option<Json<Json_>>,
 ) -> Response {
+    let method = effective_method(transport, method);
+    // An overridden `GET` had its body moved into [`BodyParams`]; upstream's `req.body` is still
+    // that body, so it is put back here.
+    let body = match body_params {
+        Some(axum::Extension(BodyParams(map))) => Some(Json_::Object(map)),
+        None => body.map(|b| b.0),
+    };
     run(
         &state,
         &authority,
         Incoming {
-            method: http::Method::POST,
+            method,
             route: Route::Login,
             params: Params::default(),
-            body: body.map(|b| b.0),
+            body: Some(login_payload(body, query)),
             path: "/login".to_string(),
         },
     )
     .await
+}
+
+/// The object a login reads its credentials from (`UsersRouter.js:72-80`).
+///
+/// The body, unless it lacks a truthy `username` and the query string has one, or lacks a truthy
+/// `email` and the query string has one; then the query string, whole. That is what serves
+/// `GET /login?username=..&password=..` and a `POST` that carries its credentials in the URL. The
+/// two are never merged: a password in the body does not survive the switch.
+fn login_payload(body: Option<Json_>, query: HashMap<String, String>) -> Json_ {
+    let body = match body {
+        Some(Json_::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    let truthy = |key: &str| match body.get(key) {
+        None | Some(Json_::Null) | Some(Json_::Bool(false)) => false,
+        Some(Json_::String(s)) => !s.is_empty(),
+        Some(Json_::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(_) => true,
+    };
+    let in_query = |key: &str| query.get(key).is_some_and(|v| !v.is_empty());
+    let use_query =
+        (!truthy("username") && in_query("username")) || (!truthy("email") && in_query("email"));
+    if use_query {
+        Json_::Object(
+            query
+                .into_iter()
+                .map(|(k, v)| (k, Json_::String(v)))
+                .collect(),
+        )
+    } else {
+        Json_::Object(body)
+    }
 }
 
 pub async fn logout(State(state): State<AppState>, authority: Authority) -> Response {
@@ -458,7 +532,10 @@ pub async fn batch(
     authority: Authority,
     body: Option<Json<Json_>>,
 ) -> Response {
-    let rc = match state.request_context(&authority).await {
+    // A batch names its classes in sub-request paths it has not parsed yet, so it takes the cache
+    // as it stands. A sub-request on a class another node created since is the one case a batch
+    // sees as missing where a direct request would reload.
+    let rc = match state.request_context(&authority, Freshness::Cached).await {
         Ok(rc) => rc,
         Err(e) => return ParseErrorResponse(e).into_response(),
     };

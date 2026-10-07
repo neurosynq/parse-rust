@@ -199,10 +199,11 @@ async fn a_transactional_batch_is_refused() {
     assert!(listed.results().is_empty(), "nothing ran: {}", listed.raw);
 }
 
-/// An unroutable sub-request is a per-operation error, not a 404 for the whole batch.
+/// An unroutable sub-request fails the whole batch with 400, as `tryRouteRequest` throwing inside
+/// upstream's `map` does. The sub-requests before it ran; the ones after it did not.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
-async fn an_unroutable_sub_request_fails_only_itself() {
+async fn an_unroutable_sub_request_fails_the_whole_batch() {
     let server = common::boot().await;
     let host = &server.host;
 
@@ -212,20 +213,65 @@ async fn an_unroutable_sub_request_fails_only_itself() {
         &As::master(),
         &json!({
             "requests": [
-                { "method": "POST", "path": "/parse/functions/nope", "body": {} },
                 { "method": "POST", "path": "/parse/classes/Fine", "body": { "n": 1 } },
+                { "method": "POST", "path": "/parse/nothing/here", "body": {} },
+                { "method": "POST", "path": "/parse/classes/Fine", "body": { "n": 2 } },
             ],
         }),
     )
     .await;
-    assert_eq!(r.status, 200, "{}", r.raw);
-    let results = r.body.as_array().expect("array").clone();
-    assert_eq!(results[0]["error"]["code"], json!(107), "{}", r.raw);
+    assert_eq!(r.status, 400, "{}", r.raw);
+    assert_eq!(r.code(), Some(107), "{}", r.raw);
+    assert_eq!(r.error(), "cannot route POST /nothing/here");
+
+    let rows = get(host, "/classes/Fine", &As::master()).await;
+    let ns: Vec<_> = rows.results().iter().map(|row| row["n"].clone()).collect();
     assert_eq!(
-        results[0]["error"]["error"],
-        json!("cannot route POST /functions/nope")
+        ns,
+        vec![json!(1)],
+        "only the one before it ran: {}",
+        rows.raw
     );
-    assert!(results[1]["success"]["objectId"].is_string(), "{}", r.raw);
+}
+
+/// The router compares the method verbatim, so a lowercase or missing one does not route, and a
+/// method a path does not serve does not either. `/health` is not on the router at all.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_sub_request_routes_only_on_an_exact_method() {
+    let server = common::boot().await;
+    let host = &server.host;
+    for (request, message) in [
+        (
+            json!({ "method": "post", "path": "/parse/classes/Lower", "body": {} }),
+            "cannot route post /classes/Lower",
+        ),
+        (
+            json!({ "path": "/parse/classes/Lower", "body": {} }),
+            "cannot route undefined /classes/Lower",
+        ),
+        (
+            json!({ "method": "PUT", "path": "/parse/classes/Lower" }),
+            "cannot route PUT /classes/Lower",
+        ),
+        (
+            json!({ "method": "GET", "path": "/parse/health" }),
+            "cannot route GET /health",
+        ),
+    ] {
+        let r = post(
+            host,
+            "/batch",
+            &As::master(),
+            &json!({ "requests": [request] }),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{}", r.raw);
+        assert_eq!(r.code(), Some(107), "{}", r.raw);
+        assert_eq!(r.error(), message, "{}", r.raw);
+    }
+    let rows = get(host, "/classes/Lower", &As::master()).await;
+    assert!(rows.results().is_empty(), "{}", rows.raw);
 }
 
 /// `batchRequestLimit` defaults to `-1`, which disables it.

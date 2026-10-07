@@ -112,6 +112,24 @@ async fn run() -> std::io::Result<()> {
     if let Some(v) = env("PARSE_SERVER_ACCOUNT_LOCKOUT") {
         config.account_lockout = Some(account_lockout(&v)?);
     }
+    // Milliseconds, as upstream compares it, whatever its help text says; zero or unset never
+    // expires. See `parse_rust_server::schema_cache`.
+    if let Some(v) = env("PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL") {
+        config.schema_cache_ttl = parse_rust_server::schema_cache::ttl_from_millis(number(
+            &v,
+            "PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL",
+        )?);
+    }
+    // Change-stream invalidation is not implemented. Accepting `true` would promise a multi-node
+    // deployment fresh schemas and deliver a cache that only the TTL refreshes.
+    if let Some(v) = env("PARSE_SERVER_DATABASE_ENABLE_SCHEMA_HOOKS") {
+        if boolean(&v, "PARSE_SERVER_DATABASE_ENABLE_SCHEMA_HOOKS")? {
+            return Err(std::io::Error::other(
+                "PARSE_SERVER_DATABASE_ENABLE_SCHEMA_HOOKS is not supported by parse-rust; \
+                 bound schema staleness with PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL instead",
+            ));
+        }
+    }
     if let Some(v) = env("PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN") {
         config.allow_public_explain = boolean(&v, "PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN")?;
     }

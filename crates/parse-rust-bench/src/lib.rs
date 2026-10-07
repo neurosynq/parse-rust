@@ -151,3 +151,16 @@ impl Writer {
 pub fn no_database() -> Value {
     json!({ "not_measured": "no database in this measurement" })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_report_matrix_names_exactly_the_frozen_corpora() {
+        let m: Value =
+            serde_json::from_str(include_str!("../matrix.json")).expect("matrix.json parses");
+        assert_eq!(m["sizes"], json!(SIZES), "matrix.json sizes drifted");
+        assert_eq!(m["shapes"], json!(SHAPES), "matrix.json shapes drifted");
+    }
+}

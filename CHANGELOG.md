@@ -33,10 +33,12 @@ parse-server's for every shape a client can send.
 - **Geo queries**: `$nearSphere` with `$maxDistance` and its radian, mile and kilometre spellings,
   `$within` with `$box`, `$geoWithin` with `$polygon` or `$centerSphere`, and `$geoIntersects`, with
   upstream's validation messages. A count rewrites `$nearSphere` the way upstream does, inside
-  `$or` too. A geo-near query on a field with no geo index builds a `2d` index and retries once,
-  as upstream does.
+  `$or` too. A geo-near query on a GeoPoint field with no geo index builds a `2d` index and retries
+  once, as upstream does.
 - **`$text`** with `$search`, `$language`, `$caseSensitive` and `$diacriticSensitive`, building a
-  `<field>_text` index and recording it in `_SCHEMA` the first time a field is searched.
+  `<field>_text` index and recording it in `_SCHEMA` the first time a field is searched. `$score`
+  orders by relevance, most relevant first whichever sign it carries, and selecting `$score`
+  returns it as `score`.
 - **`explain`, `hint` and `comment`** on find, with `hint` and `comment` also carried by the count
   a find returns beside its results. `explain` requires the master key unless
   `databaseOptions.allowPublicExplain` is set, which defaults to false, so a query plan is never
@@ -44,15 +46,27 @@ parse-server's for every shape a client can send.
 - **`defaultLimit` and `maxLimit`.** `maxLimit` caps the resolved row count.
 - **`accountLockout`**: the failed-login counter, the lock and its expiry, on the same
   `_failed_login_count` and `_account_lockout_expires_at` columns parse-server uses, so a lock set by
-  either server in a mixed fleet is honored by the other. `unlockOnPasswordReset` is accepted and has
-  no effect, because there is no password reset yet.
+  either server in a mixed fleet is honored by the other. Login attempts on one account are handled
+  one at a time within a server, so concurrent attempts are counted as if they arrived in sequence.
+  `unlockOnPasswordReset` is accepted and has no effect, because there is no password reset yet.
 - **`_Installation` validation.** `/classes/_Installation` has been reachable since 0.2.0 with none
   of upstream's write checks; 0.2.x listed installations among the absent subsystems, which was
-  wrong. 0.3.0 adds the checks that need no lookup: string types for the three id
-  fields, an id on every create from the body or the `X-Parse-Installation-Id` header, a
-  `deviceType` on every create, and lowercasing of a 64-character `deviceToken` and of
-  `installationId`. The deduplication that follows upstream is not implemented.
-- A `test-harness` cargo feature, off by default, that adds the harness's two control routes. A
+  wrong. 0.3.0 adds string types for the three id fields, an id on every create from the body or
+  the `X-Parse-Installation-Id` header, a `deviceType` on every create, lowercasing of a
+  64-character `deviceToken` and of `installationId`, and upstream's update checks: an existing
+  installation's `installationId` and `deviceType` cannot change, nor its `deviceToken` while
+  neither side has an `installationId`, each refused with 136, and an update to a missing
+  installation is `Object not found for update.`. A `deviceType` sent as an operation counts as
+  present, as it does upstream. The deduplication that follows upstream is not implemented.
+- **A schema cache.** Every request read `_SCHEMA` before its own query; it is now served from
+  memory, as parse-server serves it. A schema change made through this server applies to the next
+  request; a class another server created is loaded the first time a request names it; `GET
+  /schemas` reloads. A change another server makes to a class already loaded waits for
+  `databaseOptions.schemaCacheTtl` (milliseconds, `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL`) or a
+  restart, which is parse-server's behavior between its own nodes. Unset, the cache never expires,
+  as upstream's does. `enableSchemaHooks` is refused at boot rather than accepted, because the
+  change-stream invalidation it names is not implemented.
+- A `test-harness` cargo feature, off by default, that adds the harness's control routes. A
   release build has neither.
 - **A benchmark harness**, `parse-rust-bench`, which is not published, and a
   `bench-instrumentation` cargo feature, off by default, that attributes database time to each
@@ -63,6 +77,31 @@ parse-server's for every shape a client can send.
 
 ### Changed
 
+- **An unroutable `/batch` sub-request fails the whole batch** with 400 and 107
+  `cannot route <method> <path>`, as upstream's router does; the sub-requests before it have run and
+  the ones after it do not. The method is matched as sent, so a lower-case or missing method does
+  not route, and neither does `/health`, which upstream mounts outside its router. Each was
+  reported per item before.
+- **`/batch` sub-requests run concurrently, and so do the queries of an `include`**, as upstream
+  runs them. A batch's results stay in request order. Two sub-requests touching the same object
+  have no defined order between them, which is upstream's behavior and never was a guarantee. An
+  include queries every path of one depth at once, and a deeper path after the depth above it.
+- **The MongoDB connection pool defaults to 100 connections**, the Node driver's default and so
+  parse-server's, where the Rust driver's is 10. A `maxPoolSize` in the connection URI still wins.
+- **`GET /login` is served**, and so is the SDK's `POST` with `_method: "GET"`. A login reads its
+  credentials from the query string when the body has no username or email and the query string
+  does, as upstream does, and reads nothing else from the body, so a stray key beside the
+  credentials no longer fails it.
+- **`GET /users`, and `GET`, `PUT` and `DELETE /users/:objectId`**, which upstream serves with the
+  same handlers as `/classes/_User`. A caller fetching their own `_User` row, on either route, gets
+  the session token they presented as its last key.
+- **Checks on a write meet the client in upstream's order.** On a `_User` create the `role:`
+  objectId guard precedes the objectId policy, and on signup the credential check precedes the
+  restricted-field check. A `_User` update by anyone but the owner is authorized before its body is
+  read, so a malformed body sent at somebody else's row answers 206, not the body's error. On an
+  `_Installation` create the objectId policy precedes the installation checks.
+- **An `ACL` in a response lists its principals in JavaScript key order**, an integer-like objectId
+  ahead of `*`, as the object upstream builds it into does.
 - **`limit` and `skip` are read as JavaScript reads them**: `Number()` over the decoded value, then
   the driver's truncation, as upstream reads them. `limit=0` answers an empty result
   without asking the database, and so without asking for `find` permission, which is what lets a
@@ -98,9 +137,34 @@ parse-server's for every shape a client can send.
 - **An owner's `_User` update checks `username` and `password` before the class-level `update`
   permission**, as 9.10.3 orders them, so an empty username under a CLP that closes `update` is 200,
   not 119.
+- **`keys`, `excludeKeys`, `include` and `order` are JavaScript's `String()` of the decoded value**,
+  as upstream reads them, from the URL or the body. An array is its elements joined with commas,
+  so `keys=["n","text"]` selects both fields where it selected neither, and `order=["-n"]` sorts
+  where it was 105. `keys=null` is no projection.
+- **A read runs its checks in upstream's order.** Parameter names and the `where` JSON are checked
+  before class security, and the explain gate before the query is read. An unknown top-level
+  operator is 105 `Invalid key name: $foo`, raised after the CLP gate, where it was 102 before it. A
+  class that does not exist is refused, when client class creation is off, before the sort and CLP
+  checks, and is otherwise still queried, so an invalid operand is refused on it too. The count
+  beside a find validates the find's sort, and a negative `skip` is refused after the query is
+  built. An explain with `limit=0` answers `[]` before the CLP gate, the `include` pass and the
+  check of the explain value, which is made after the CLP gate.
+- **Geo and `$text` operands are read as JavaScript reads them.** A `null` operand whose member
+  upstream reads is a bare 500, `$maxDistanceInMiles` and `$maxDistanceInKilometers` coerce a
+  string, and a `$centerSphere` distance that coerces to a non-negative number reaches the database
+  as sent.
+
+- **Credentials in a request body are read exactly where parse-server reads them**, and `_method`
+  overrides the method of a `POST` only, in any case.
 
 ### Deliberate differences
 
+- Protected fields are enforced across more of the read path.
+- The on-demand geo index is built only for a field declared as a GeoPoint. A geo query on any
+  other field fails.
+- `databaseOptions.enableSchemaHooks: true` is refused at boot. parse-server accepts it and
+  invalidates its schema cache from a change stream, which parse-rust does not implement;
+  `schemaCacheTtl` bounds staleness instead.
 - A `_User` signup whose `ACL` parse-server refuses is refused before the insert, in both of
   upstream's branches. Without an `email` on the body, parse-server inserts the row and then
   refuses, leaving the username taken; parse-rust leaves nothing.
@@ -111,7 +175,7 @@ parse-server's for every shape a client can send.
 
 ### Known limitations
 
-- `$select`, `$dontSelect`, `$inQuery`, `$notInQuery`, `$containedBy`, `$score` ordering,
+- `$select`, `$dontSelect`, `$inQuery`, `$notInQuery`, `$containedBy`,
   `includeAll` and `redirectClassNameForKey` are still refused by name, and the conformance run
   reports the blocks that need them as failures.
 - Cloud Code, triggers, LiveQuery, files, push, GraphQL and Postgres are unchanged from 0.2.0.
@@ -667,7 +731,8 @@ after release are tracked as defects instead.
 
 - **The routes, exhaustively, by method.** `GET`/`POST /health`, `GET /serverInfo`,
   `POST /batch`, `GET`/`POST /classes/:className`, `GET`/`PUT`/`DELETE /classes/:className/:objectId`,
-  `POST /users`, `GET /users/me`, `POST /login`, `POST /logout`, `GET`/`POST /roles`,
+  `GET`/`POST /users`, `GET /users/me`, `GET`/`PUT`/`DELETE /users/:objectId`,
+  `GET`/`POST /login`, `POST /logout`, `GET`/`POST /roles`,
   `GET`/`PUT`/`DELETE /roles/:objectId`, `GET /sessions`, `GET /sessions/me`,
   `GET`/`DELETE /sessions/:objectId`, `GET`/`POST /schemas`,
   `GET`/`POST`/`PUT`/`DELETE /schemas/:className`, `DELETE /purge/:className`. An unknown path
@@ -675,16 +740,15 @@ after release are tracked as defects instead.
   path before the method, with one exception: `POST` is registered almost everywhere as the
   JavaScript SDK's method-override transport, so a bare `POST` carrying no usable override reaches
   the dispatcher, finds no arm, and is reported as an unroutable method-and-path pair, which is a
-  404. Upstream also serves `GET /users`, `GET /login`, `POST /sessions`,
-  `PUT /sessions/:objectId` and `GET`/`PUT`/`DELETE /users/:objectId`, and none of those exist
+  404. Upstream also serves `POST /sessions` and `PUT /sessions/:objectId`, and neither exists
   here, and upstream answers `/health` on any method where parse-rust serves `GET` and `POST`.
   Whole subsystems absent along with their routes: `/aggregate`, `/functions`, `/jobs`, `/files`,
   `/hooks`, `/push`, `/installations`, `/events`, `/config`, `/requestPasswordReset`,
   `/verificationEmailRequest`, `/loginAs`, `/upgradeToRevocableSession`, `/verifyPassword`,
   `/challenge`, `/scriptlog`, `/security`, `/cloud_code/jobs`, `/push_audiences`,
   `/validate_purchase`, `/graphql-config`, the pages routes under `/apps` and `/graphql`.
-- **A client can save an existing `_User` but cannot create or delete one through `/classes`.**
-  `user.save()` works: the SDK sends it as `PUT /classes/_User/:objectId`. An unauthenticated
+- **A client can save an existing `_User` but cannot create or delete one through `/classes` or
+  `/users/:objectId`.** `user.save()` works: the SDK sends it as `PUT /classes/_User/:objectId`. An unauthenticated
   caller is refused before the ACL is consulted, `emailVerified` and `authData` are refused, a
   submitted `ACL` keeps the owner's entry, the password is hashed, the email format is checked, and
   username and email uniqueness is checked **case-insensitively**, which the `username_1` and
@@ -692,8 +756,7 @@ after release are tracked as defects instead.
   and returns a replacement token, matching upstream. Create and delete on that route stay refused
   for an ordinary client, because both need stages of `transformUser` that do not exist yet;
   signup is `POST /users`, and a master or maintenance key reaches the row through
-  `/classes/_User`.
-  `/users/:objectId` still does not exist.
+  `/classes/_User` or `/users/:objectId`.
 - **The maintenance key is not exposed by the binary, deliberately.** `ServerConfig` honours one, so
   an embedder can set it, but no environment variable enables it and the README no longer advertises
   it. Upstream restricts the key with `maintenanceKeyIps`, **defaulting to `['127.0.0.1', '::1']`**,

@@ -372,6 +372,15 @@ pub fn raise_acl(mut row: ParseMap) -> ParseMap {
         }
         map.insert(principal.as_key(), ParseValue::Object(entry));
     }
+    // **In JavaScript's key order, not insertion order.** `untransformObjectACL` assigns each
+    // principal onto a fresh object (`DatabaseController.js:385-406`), and a JavaScript object
+    // enumerates its array-index keys first, ascending, whatever order they were assigned in. An
+    // objectId such as `1234567890` is one. The response is serialized from that object, so its
+    // ACL lists that principal ahead of `*` even when `_rperm` stores it after.
+    let map = js_own_entries(&ParseValue::Object(map))
+        .into_iter()
+        .map(|(key, entry)| (key, entry.clone()))
+        .collect();
     row.insert("ACL".to_string(), ParseValue::Object(map));
     row
 }
@@ -653,6 +662,33 @@ mod tests {
             panic!("ACL should be an object");
         };
         assert!(acl.contains_key("*") && acl.contains_key("u1"));
+    }
+
+    /// A raised ACL lists array-index principals first, ascending, as the JavaScript object
+    /// upstream builds it into does, whatever order the columns hold them in.
+    #[test]
+    fn a_raised_acl_is_in_javascript_key_order() {
+        let strings = |items: &[&str]| {
+            ParseValue::Array(
+                items
+                    .iter()
+                    .map(|s| ParseValue::String((*s).into()))
+                    .collect(),
+            )
+        };
+        let raised = raise_acl(row(vec![
+            ("_rperm", strings(&["*", "role:a", "10", "2", "01"])),
+            ("_wperm", strings(&["4294967295", "7"])),
+        ]));
+        let ParseValue::Object(acl) = raised.get("ACL").expect("ACL") else {
+            panic!("ACL should be an object");
+        };
+        let keys: Vec<&str> = acl.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["2", "7", "10", "*", "role:a", "01", "4294967295"],
+            "indices ascending, then the rest in insertion order"
+        );
     }
 
     /// UPSTREAM-QUIRK, reproduced end to end.

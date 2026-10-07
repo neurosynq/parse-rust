@@ -59,15 +59,33 @@ pub async fn find_core(
     class_name: &str,
     params: &Params,
 ) -> Result<Json, ParseError> {
+    // Upstream's order: `handleFind` checks the parameter names and decodes `where`
+    // (`ClassesRouter.js:23-37`), `rest.find` enforces class security (`rest.js:136`), then the
+    // explain gate (`rest.js:39-48`), and only `RestQuery` reads `where` as a query and parses
+    // `include`. So an unknown parameter on a class a client may not find is 102, not 119.
+    params.reject_unknown_find_keys()?;
+    let where_json = params.where_json()?;
     parse_rust_rest::enforce_class_security(
         class_name,
         authority.is_privileged(),
         "find",
         rc.options.error_detail,
     )?;
-    params.reject_unknown_find_keys()?;
+    let explaining = params.js_explain_requested();
+    // **`explain` ships with its authorization boundary.** A caller without the master key is
+    // refused unless `databaseOptions.allowPublicExplain` says otherwise (`rest.js:39-48`), and
+    // that check precedes the value's own validation, which upstream leaves to the adapter. The
+    // maintenance key is not the master key here, as upstream's `auth.isMaster` is not.
+    if explaining && !authority.is_master() && !state.config().allow_public_explain {
+        return Err(ParseError::invalid_query(
+            "Using the explain query parameter requires the master key",
+        ));
+    }
 
-    let where_ = params.parse_where()?;
+    let where_ = match where_json {
+        Some(value) => parse_rust_rest::parse_where(&value)?,
+        None => parse_rust_rest::ParsedWhere::default(),
+    };
     let options = params.find_options(&state.config().limit_policy())?;
     let wants_count = params.wants_count();
     // The count beside the results takes the same `hint` and `comment` the find does
@@ -76,21 +94,14 @@ pub async fn find_core(
         hint: options.hint.clone(),
         comment: options.comment.clone(),
     };
+    let order = options.order.clone();
     let ctx = rc.ctx(state.storage());
 
-    // **`explain` ships with its authorization boundary.** A caller without the master key is
-    // refused unless `databaseOptions.allowPublicExplain` says otherwise (`rest.js:39-48`), and
-    // that check precedes the value's own validation, which upstream leaves to the adapter. The
-    // maintenance key is not the master key here, as upstream's `auth.isMaster` is not.
-    let mut body = if params.js_explain_requested() {
-        if !authority.is_master() && !state.config().allow_public_explain {
-            return Err(ParseError::invalid_query(
-                "Using the explain query parameter requires the master key",
-            ));
-        }
+    let mut body = if explaining {
+        // Validated where the adapter validates it; see `parse_rust_rest::explain`.
         let verbosity = params
-            .explain()?
-            .unwrap_or(ExplainVerbosity::AllPlansExecution);
+            .explain()
+            .map(|v| v.unwrap_or(ExplainVerbosity::AllPlansExecution));
         let explained =
             parse_rust_rest::explain(&ctx, class_name, where_.clone(), options, verbosity).await?;
         json!({ "results": explained })
@@ -99,7 +110,7 @@ pub async fn find_core(
         json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() })
     };
     if wants_count {
-        let n = parse_rust_rest::count(&ctx, class_name, where_, &count_options).await?;
+        let n = parse_rust_rest::count(&ctx, class_name, where_, &order, &count_options).await?;
         body["count"] = json!(n);
     }
     Ok(body)
@@ -113,13 +124,15 @@ pub async fn get_core(
     object_id: &str,
     params: &Params,
 ) -> Result<Json, ParseError> {
+    // `handleGet` checks the parameter names (`ClassesRouter.js:58-62`) before `rest.get`
+    // enforces class security (`rest.js:150`).
+    params.reject_unknown_get_keys()?;
     parse_rust_rest::enforce_class_security(
         class_name,
         authority.is_privileged(),
         "get",
         rc.options.error_detail,
     )?;
-    params.reject_unknown_get_keys()?;
 
     // `handleGet` is `rest.get`, which pins the query to an objectId **and carries the `get`
     // method** (`rest.js:150`, `:183`). Routing it through `find` instead would re-derive the
@@ -134,7 +147,26 @@ pub async fn get_core(
     };
     let ctx = rc.ctx(state.storage());
     let row = parse_rust_rest::get(&ctx, class_name, object_id, options).await?;
-    Ok(body_of(&row))
+    let mut out = body_of(&row);
+    // **A caller fetching their own `_User` row gets their session token back**
+    // (`ClassesRouter.js:97-106`). Any stored `sessionToken` is deleted first, then the token this
+    // request presented is assigned, so it is the last key. On `/classes/_User/:id` and
+    // `/users/:id` alike, because both are this handler upstream. Master has no user, so it gets
+    // none.
+    if class_name == crate::routes::users::USER_CLASS {
+        if let Json::Object(map) = &mut out {
+            map.shift_remove("sessionToken");
+            let own = rc.user_id.is_some()
+                && map.get("objectId").and_then(Json::as_str) == rc.user_id.as_deref();
+            if own {
+                map.insert(
+                    "sessionToken".to_string(),
+                    rc.session_token.clone().map_or(Json::Null, Json::String),
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub async fn create_core(
@@ -144,6 +176,13 @@ pub async fn create_core(
     class_name: &str,
     body: &Json,
 ) -> Result<Json, ParseError> {
+    // **Upstream's order, which is three layers deep.** `handleCreate`'s `role:` guard runs in the
+    // router, before anything (`ClassesRouter.js:111-118`); `rest.create` then enforces class
+    // security (`rest.js:263`); the `RestWrite` constructor applies the objectId policy
+    // (`RestWrite.js:50-65`); and only then does `execute` reach `handleInstallation` (`:107`).
+    if class_name == crate::routes::users::USER_CLASS {
+        crate::routes::users::reject_role_prefixed_object_id(body, rc)?;
+    }
     parse_rust_rest::enforce_class_security(
         class_name,
         authority.is_privileged(),
@@ -151,16 +190,12 @@ pub async fn create_core(
         rc.options.error_detail,
     )?;
     let mut body = decode_body(body, parse_rust_core::op::OpPath::Create)?;
+    // Runs on the client's body before any server-side identity is folded in.
+    parse_rust_rest::enforce_object_id_policy(&body, state.config().allow_custom_object_id)?;
     if class_name == crate::routes::installations::INSTALLATION_CLASS {
         crate::routes::installations::prepare(&mut body, true, rc.installation_id.as_deref())?;
     }
-    // The `RestWrite` constructor's first check, and it runs on the client's body before any
-    // server-side identity is folded in (`RestWrite.js:50-65`).
-    parse_rust_rest::enforce_object_id_policy(&body, state.config().allow_custom_object_id)?;
     if class_name == crate::routes::users::USER_CLASS {
-        // `handleCreate`'s guard, which lives on `ClassesRouter` and therefore covers this route
-        // as well as signup (`ClassesRouter.js:111-118`).
-        crate::routes::users::reject_role_prefixed_object_id(&body, rc)?;
         // Upstream's `!this.query && !hasAuthData` guard is not gated on the caller
         // (`RestWrite.js:528`), so the master key does not buy an exemption from it. Before
         // the uniqueness query and the hash, as upstream orders those stages.
@@ -224,11 +259,27 @@ async fn update_inner(
         "update",
         rc.options.error_detail,
     )?;
+    let is_user = class_name == crate::routes::users::USER_CLASS;
+    // **Authorization before the body is read as a write.** `authorizeUserUpdate` is the fifth
+    // stage of `execute` (`RestWrite.js:113`) and nothing before it decodes an operation, so a
+    // non-owner sending a malformed body is told it may not modify the user, not what is wrong
+    // with the body.
+    if is_user {
+        crate::routes::users::authorize_user_update(state, rc, authority, object_id, body).await?;
+    }
     let mut body = decode_body(body, parse_rust_core::op::OpPath::Update)?;
     if class_name == crate::routes::installations::INSTALLATION_CLASS {
         crate::routes::installations::prepare(&mut body, false, rc.installation_id.as_deref())?;
+        crate::routes::installations::check_update(
+            state.storage(),
+            &rc.snapshot,
+            object_id,
+            &body,
+            authority.is_privileged(),
+            rc.installation_id.as_deref(),
+        )
+        .await?;
     }
-    let is_user = class_name == crate::routes::users::USER_CLASS;
 
     // Whether this write changes the password, decided before `prepare_user_write` replaces the
     // key with its hash. **Only a string counts**, because only a string is a password: a
@@ -243,7 +294,6 @@ async fn update_inner(
         );
 
     if is_user {
-        crate::routes::users::authorize_user_update(state, rc, authority, object_id, &body).await?;
         crate::routes::users::require_update_credentials(&body)?;
         crate::routes::users::enforce_user_update_policy(&body, rc, authority, object_id)?;
         crate::routes::users::owner_update_gate(state, rc, authority, object_id)?;

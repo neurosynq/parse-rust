@@ -235,7 +235,7 @@ pub fn plan_update(
             // discriminant, so the gate above lets them past, and the comment above used to say
             // the field reservation would catch it. It does not: reservation runs only for fields
             // that are *new* (`routes/schemas.rs`), so a retarget answered 200 and silently kept
-            // the original target. Measured against parse-server 9.10.1-alpha.6, which answers
+            // the original target. Measured against parse-server at the pin, which answers
             // `111 schema mismatch for <Class>.<field>; expected Pointer<_User> but got
             // Pointer<Other>`.
             //

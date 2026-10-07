@@ -9,12 +9,14 @@
 //! Each value remembers where it came from, because upstream decodes the two differently.
 //! `JSONFromQuery` parses a query value as JSON and falls back to the raw string
 //! (`ClassesRouter.js:148-158`); a body value is already JSON and is read as it is. So a query
-//! `comment=123` is the number 123 and a body `{"comment":"123"}` stays a string. Readers that take
-//! text (`where`, `order`, `keys`, `include`) see a body object or array re-encoded as JSON text,
-//! which is what a real query string carries.
+//! `comment=123` is the number 123 and a body `{"comment":"123"}` stays a string. `where` sees a
+//! body object re-encoded as JSON text, which is what a real query string carries. `order`, `keys`,
+//! `excludeKeys` and `include` are JavaScript's `String()` of the decoded value, as upstream reads
+//! them, so an array arrives as its `join(",")` from either source.
 
 use std::collections::HashMap;
 
+use parse_rust_core::js_number::string_to_number;
 use parse_rust_core::ParseError;
 use parse_rust_rest::{parse_include, parse_where, FindOptions, ParsedWhere};
 use parse_rust_storage::{ExplainVerbosity, Hint, QueryOptions};
@@ -177,12 +179,24 @@ impl Params {
     /// `handleFind` (`ClassesRouter.js:32-37`) reports `where parameter is not valid JSON` for a
     /// string that does not parse, and that is the message a client sees.
     pub fn parse_where(&self) -> Result<ParsedWhere, ParseError> {
+        match self.where_json()? {
+            Some(value) => parse_where(&value),
+            None => Ok(ParsedWhere::default()),
+        }
+    }
+
+    /// The `where` document as JSON, not yet read as a query.
+    ///
+    /// Split from [`Self::parse_where`] because the two happen at different points upstream: the
+    /// JSON is decoded by the route, before class security (`ClassesRouter.js:32-37`), and read as
+    /// a query only by `RestQuery`, after it and after the explain gate.
+    pub fn where_json(&self) -> Result<Option<Json>, ParseError> {
         let Some(raw) = self.get("where") else {
-            return Ok(ParsedWhere::default());
+            return Ok(None);
         };
-        let value: Json = serde_json::from_str(raw)
-            .map_err(|_| ParseError::invalid_json("where parameter is not valid JSON"))?;
-        parse_where(&value)
+        serde_json::from_str(raw)
+            .map(Some)
+            .map_err(|_| ParseError::invalid_json("where parameter is not valid JSON"))
     }
 
     pub fn wants_count(&self) -> bool {
@@ -310,13 +324,13 @@ impl Params {
             hint: self.resolve_hint(),
             comment: self.resolve_comment(),
             order: self
-                .get("order")
-                .map(QueryOptions::parse_order)
+                .resolve_order()
+                .map(|order| QueryOptions::parse_order(&order))
                 .unwrap_or_default(),
             keys: self.csv("keys"),
             exclude_keys: self.csv("excludeKeys"),
-            include: match self.get("include") {
-                Some(raw) => parse_include(raw)?,
+            include: match self.js_string_unless_nullish("include") {
+                Some(raw) => parse_include(&raw)?,
                 None => Vec::new(),
             },
         })
@@ -332,15 +346,32 @@ impl Params {
             order: Vec::new(),
             keys: self.csv("keys"),
             exclude_keys: self.csv("excludeKeys"),
-            include: match self.get("include") {
-                Some(raw) => parse_include(raw)?,
+            include: match self.js_string_unless_nullish("include") {
+                Some(raw) => parse_include(&raw)?,
                 None => Vec::new(),
             },
         })
     }
 
+    /// `order` as `optionsFromBody` reads it: `if (body.order) String(body.order)`
+    /// (`ClassesRouter.js:194-196`). So `order=["-n"]` is `-n`, and a falsy value is no order.
+    fn resolve_order(&self) -> Option<String> {
+        self.js_value("order")
+            .filter(js_truthy)
+            .map(|v| js_string(&v))
+    }
+
+    /// `keys`, `excludeKeys` and `include` as both handlers read them:
+    /// `if (body.keys != null) String(body.keys)` (`ClassesRouter.js:200-208`, `:59-67`). An array
+    /// is its `join(",")`, so `keys=["n","text"]` selects both fields, and `null` is absent.
+    fn js_string_unless_nullish(&self, key: &str) -> Option<String> {
+        self.js_value(key)
+            .filter(|v| !v.is_null())
+            .map(|v| js_string(&v))
+    }
+
     fn csv(&self, key: &str) -> Option<Vec<String>> {
-        self.get(key).map(|raw| {
+        self.js_string_unless_nullish(key).map(|raw| {
             raw.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -380,6 +411,15 @@ fn js_number(value: &Json) -> f64 {
     }
 }
 
+/// JavaScript's `String(value)`. Differs from [`js_join_element`] only at the top level, where
+/// `null` is `"null"` rather than empty.
+fn js_string(value: &Json) -> String {
+    match value {
+        Json::Null => "null".to_string(),
+        other => js_join_element(other),
+    }
+}
+
 /// `ToString` of a value as `Array.prototype.join` sees an element: `null` is empty, an array is
 /// its own `join(",")`, an object is `[object Object]`, a number is ECMAScript's formatting.
 fn js_join_element(value: &Json) -> String {
@@ -397,43 +437,6 @@ fn js_join_element(value: &Json) -> String {
             .join(","),
         Json::Object(_) => "[object Object]".to_string(),
     }
-}
-
-/// ECMAScript `StringToNumber`: surrounding whitespace ignored, empty is zero, `Infinity` and the
-/// `0x`, `0o` and `0b` prefixes recognised, anything else that is not a decimal literal `NaN`.
-fn string_to_number(s: &str) -> f64 {
-    let t = s.trim();
-    if t.is_empty() {
-        return 0.0;
-    }
-    // `from_str_radix` accepts a leading sign, which `Number("0x+10")` does not: `NaN`.
-    let radix = |digits: &str, base: u32| {
-        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(base)) {
-            return f64::NAN;
-        }
-        u64::from_str_radix(digits, base).map_or(f64::NAN, |n| n as f64)
-    };
-    match t {
-        "Infinity" | "+Infinity" => return f64::INFINITY,
-        "-Infinity" => return f64::NEG_INFINITY,
-        _ => {}
-    }
-    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        return radix(h, 16);
-    }
-    if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
-        return radix(o, 8);
-    }
-    if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
-        return radix(b, 2);
-    }
-    let decimal = t
-        .bytes()
-        .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'));
-    if !decimal || t.contains("inf") || t.contains("nan") {
-        return f64::NAN;
-    }
-    t.parse().unwrap_or(f64::NAN)
 }
 
 /// A hint key pattern's value, kept as the client sent it.
@@ -666,6 +669,65 @@ mod tests {
         assert_eq!(skip("-0.5"), None);
         assert_eq!(skip("abc"), None);
         assert_eq!(skip("0"), None);
+    }
+
+    #[test]
+    fn text_options_are_javascript_string_of_the_decoded_value() {
+        use parse_rust_storage::SortDirection;
+        let from_query = |key: &str, raw: &str| {
+            params(&[(key, raw)])
+                .find_options(&LimitPolicy::default())
+                .expect("options")
+        };
+        let from_body = |body: Json| {
+            Params::from_json(Some(&body))
+                .find_options(&LimitPolicy::default())
+                .expect("options")
+        };
+        let both = [
+            from_query("keys", r#"["n","text"]"#),
+            from_body(serde_json::json!({"keys": ["n", "text"]})),
+        ];
+        for options in both {
+            assert_eq!(
+                options.keys,
+                Some(vec!["n".to_string(), "text".to_string()])
+            );
+        }
+        let both = [
+            from_query("order", r#"["-n"]"#),
+            from_body(serde_json::json!({"order": ["-n"]})),
+        ];
+        for options in both {
+            assert_eq!(
+                options.order,
+                vec![("n".to_string(), SortDirection::Descending)]
+            );
+        }
+        assert_eq!(
+            from_query("excludeKeys", r#"[["a"],"b"]"#).exclude_keys,
+            Some(vec!["a".to_string(), "b".to_string()]),
+            "a nested array joins flat"
+        );
+        assert_eq!(
+            from_query("include", r#"["p"]"#).include,
+            vec![vec!["p".to_string()]]
+        );
+        assert_eq!(
+            from_query("keys", r#""n""#).keys,
+            Some(vec!["n".to_string()]),
+            "a quoted query value is the string inside it"
+        );
+        assert_eq!(from_query("keys", "null").keys, None, "null is absent");
+        assert!(
+            from_query("order", "0").order.is_empty(),
+            "a falsy order is none"
+        );
+        let get = Params::from_json(Some(&serde_json::json!({"keys": ["n"], "include": ["p"]})))
+            .get_options()
+            .expect("get options");
+        assert_eq!(get.keys, Some(vec!["n".to_string()]));
+        assert_eq!(get.include, vec![vec!["p".to_string()]]);
     }
 
     #[test]

@@ -304,11 +304,15 @@ impl StorageAdapter for FakeStorage {
                 match direction {
                     SortDirection::Ascending => ord,
                     SortDirection::Descending => ord.reverse(),
+                    SortDirection::TextScore => std::cmp::Ordering::Equal,
                 }
             });
         }
         if let Some(skip) = options.skip {
-            rows = rows.into_iter().skip(skip as usize).collect();
+            rows = rows
+                .into_iter()
+                .skip(usize::try_from(skip).unwrap_or(0))
+                .collect();
         }
         if let Some(limit) = options.limit {
             rows.truncate(limit as usize);
@@ -423,6 +427,13 @@ impl StorageAdapter for FakeStorage {
 
     async fn drop_index(&self, _class_name: &str, _name: &str) -> Result<(), ParseError> {
         Ok(())
+    }
+
+    async fn index_fields(
+        &self,
+        _class_name: &str,
+    ) -> Result<Vec<parse_rust_storage::IndexFields>, ParseError> {
+        Ok(Vec::new())
     }
 }
 

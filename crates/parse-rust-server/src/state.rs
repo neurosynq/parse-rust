@@ -13,19 +13,26 @@ use parse_rust_mongo::MongoAdapter;
 use crate::auth::Authority;
 use crate::config::ServerConfig;
 use crate::request::RequestContext;
+use crate::schema_cache::{Freshness, SchemaCache};
 
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<ServerConfig>,
     storage: Arc<MongoAdapter>,
+    schemas: Arc<SchemaCache>,
 }
 
 impl AppState {
     pub fn new(config: ServerConfig, storage: MongoAdapter) -> Self {
         Self {
+            schemas: Arc::new(SchemaCache::new(config.schema_cache_ttl)),
             config: Arc::new(config),
             storage: Arc::new(storage),
         }
+    }
+
+    pub fn schema_cache(&self) -> &SchemaCache {
+        &self.schemas
     }
 
     pub fn config(&self) -> &ServerConfig {
@@ -106,11 +113,20 @@ impl AppState {
     /// Resolve the request context: session, roles, ACL scope and the schema snapshot.
     ///
     /// Called **once** per HTTP request, including a `/batch` whose sub-requests then share it.
+    /// `freshness` says what the route needs from the schema cache; see [`Freshness`].
     pub async fn request_context(
         &self,
         authority: &Authority,
+        freshness: Freshness<'_>,
     ) -> Result<RequestContext, ParseError> {
-        crate::request::resolve(&self.storage, &self.config, authority).await
+        crate::request::resolve(
+            &self.storage,
+            &self.schemas,
+            &self.config,
+            authority,
+            freshness,
+        )
+        .await
     }
 }
 

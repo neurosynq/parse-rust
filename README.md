@@ -77,9 +77,10 @@ Three of those absences are not inert, and matter before you try anything agains
   silently dropped constraint broadens a result set, which is an authorization failure rather than
   a missing feature. Code written against parse-server will fail loudly here rather than return
   too much.
-- **Nothing is cached.** Every request reloads every schema and role expansion issues one query
-  per level of the graph. Correct and slow, deferred on purpose because a cache's staleness window
-  decides how long a revoked permission keeps working.
+- **Schemas are cached; roles are not.** A schema change made through this server applies to the
+  next request, and one made by another server sharing the database waits for
+  `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL` or a restart, as it does between parse-server nodes.
+  Role expansion issues one query per level of the graph on every request.
 
 `CHANGELOG.md` carries the full list, including the deliberate differences from upstream.
 
@@ -218,6 +219,7 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_DEFAULT_LIMIT` | `100` | rows a find returns when it names no `limit` |
 | `PARSE_SERVER_MAX_LIMIT` | unset | caps the rows a find returns |
 | `PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN` | `false` | whether `explain` works without the master key |
+| `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL` | unset | milliseconds before a cached schema is reloaded; unset or `0` never expires |
 | `PARSE_SERVER_ACCOUNT_LOCKOUT` | unset | JSON, as upstream's option: `{"duration":5,"threshold":3}` |
 
 The client keys are all-or-nothing, as upstream: configure none and none is required; configure

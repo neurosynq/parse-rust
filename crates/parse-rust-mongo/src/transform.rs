@@ -1024,15 +1024,26 @@ fn lower_branches(
 }
 
 /// `$text` (`MongoTransform.js:777-811`), with upstream's messages.
+///
+/// `null` is the one operand JavaScript cannot read a member of, so `$text: null` and
+/// `$search: null` (whose `typeof` is `"object"`, so it passes the shape test) are `TypeError`s
+/// and a bare 500. An array `$search` passes the same test and fails on its missing `$term`.
 fn text_to_bson(operand: &ParseValue) -> Result<Bson, ParseError> {
     let search = match operand {
+        ParseValue::Null => return Err(null_member("$search")),
         ParseValue::Object(m) => m.get("$search"),
         _ => None,
     };
-    let Some(ParseValue::Object(search)) = search else {
-        return Err(ParseError::invalid_json(
-            "bad $text: $search, should be object",
-        ));
+    let empty = parse_rust_core::ParseMap::new();
+    let search = match search {
+        Some(ParseValue::Object(search)) => search,
+        Some(ParseValue::Array(_)) => &empty,
+        Some(ParseValue::Null) => return Err(null_member("$term")),
+        _ => {
+            return Err(ParseError::invalid_json(
+                "bad $text: $search, should be object",
+            ))
+        }
     };
     let mut answer = Document::new();
     match search.get("$term") {
@@ -1112,6 +1123,9 @@ fn geo_to_bson(pairs: &[(String, ParseValue)], count: bool) -> Result<Bson, Pars
         let Some(value) = get(key) else { continue };
         match key {
             "$nearSphere" => {
+                if matches!(value, ParseValue::Null) {
+                    return Err(null_member("longitude"));
+                }
                 let (lon, lat) = (
                     js_member_number(value, "longitude"),
                     js_member_number(value, "latitude"),
@@ -1145,13 +1159,20 @@ fn geo_to_bson(pairs: &[(String, ParseValue)], count: bool) -> Result<Bson, Pars
             "$within" => {
                 let malformed = || ParseError::invalid_json("malformatted $within arg");
                 let ParseValue::Object(within) = value else {
-                    return Err(malformed());
+                    return Err(if matches!(value, ParseValue::Null) {
+                        null_member("$box")
+                    } else {
+                        malformed()
+                    });
                 };
                 let Some(ParseValue::Array(corners)) = within.get("$box") else {
                     return Err(malformed());
                 };
                 if corners.len() != 2 {
                     return Err(malformed());
+                }
+                if corners.iter().any(|c| matches!(c, ParseValue::Null)) {
+                    return Err(null_member("longitude"));
                 }
                 let corner = |c: &ParseValue| {
                     Bson::Array(vec![
@@ -1171,6 +1192,7 @@ fn geo_to_bson(pairs: &[(String, ParseValue)], count: bool) -> Result<Bson, Pars
             }
             "$geoIntersects" => {
                 let point = match value {
+                    ParseValue::Null => return Err(null_member("$point")),
                     ParseValue::Object(m) => m.get("$point"),
                     _ => None,
                 };
@@ -1194,10 +1216,16 @@ fn geo_to_bson(pairs: &[(String, ParseValue)], count: bool) -> Result<Bson, Pars
 /// `$geoWithin` with either `$polygon` or `$centerSphere` (`MongoTransform.js:862-934`).
 fn geo_within(value: &ParseValue) -> Result<Option<Bson>, ParseError> {
     let ParseValue::Object(within) = value else {
-        return Ok(None);
+        return if matches!(value, ParseValue::Null) {
+            Err(null_member("$polygon"))
+        } else {
+            Ok(None)
+        };
     };
     if let Some(polygon) = within.get("$polygon") {
         let points: &Vec<ParseValue> = match polygon {
+            // `typeof null === 'object'`, so the next test reads `null.__type`.
+            ParseValue::Null => return Err(null_member("__type")),
             ParseValue::Object(p) if matches!(p.get("__type"), Some(ParseValue::String(t)) if t == "Polygon") => {
                 match p.get("coordinates") {
                     Some(ParseValue::Array(c)) if c.len() >= 3 => c,
@@ -1268,14 +1296,16 @@ fn geo_within(value: &ParseValue) -> Result<Option<Bson>, ParseError> {
                 ))
             }
         };
-        let distance = js_number(&parts[1]);
+        // `isNaN(distance) || distance < 0` coerces, so `"1"` and `null` pass; the value itself is
+        // passed on uncoerced, and the database refuses what is not a number.
+        let distance = parse_rust_core::js_number::to_number(&parts[1]);
         if distance.is_nan() || distance < 0.0 {
             return Err(ParseError::invalid_json(
                 "bad $geoWithin value; $centerSphere distance invalid",
             ));
         }
         return Ok(Some(Bson::Document(
-            doc! { "$centerSphere": [ [lon, lat], distance ] },
+            doc! { "$centerSphere": [ [lon, lat], raw_scalar(&parts[1]) ] },
         )));
     }
     Ok(None)
@@ -1343,11 +1373,28 @@ fn geo_number(value: &ParseValue) -> Bson {
     }
 }
 
+/// `value / by`, which coerces: `"100" / 6371` is a distance and `true / 3959` is a tiny one.
 fn scaled(value: &ParseValue, by: f64) -> Bson {
+    Bson::Double(parse_rust_core::js_number::to_number(value) / by)
+}
+
+/// An operand upstream hands the database as it arrived. Only the scalar shapes are kept; the
+/// database refuses anything that is not a number either way.
+fn raw_scalar(value: &ParseValue) -> Bson {
     match value {
-        ParseValue::Number(n) => Bson::Double(n / by),
-        _ => Bson::Double(f64::NAN),
+        ParseValue::Number(n) => Bson::Double(*n),
+        ParseValue::String(s) => Bson::String(s.clone()),
+        ParseValue::Bool(b) => Bson::Boolean(*b),
+        _ => Bson::Null,
     }
+}
+
+/// Reading a member of `null`, which JavaScript throws as a `TypeError` that upstream does not
+/// catch: a bare 500, raised while the query is built.
+fn null_member(name: &str) -> ParseError {
+    ParseError::internal(format!(
+        "TypeError: Cannot read properties of null (reading '{name}')"
+    ))
 }
 
 /// `Number(value)` for the operands geo validation reads, where a non-number is `NaN`.

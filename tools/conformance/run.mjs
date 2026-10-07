@@ -207,6 +207,7 @@ const MAPPED = {
   defaultLimit: v => ({ PARSE_SERVER_DEFAULT_LIMIT: String(v) }),
   maxLimit: v => ({ PARSE_SERVER_MAX_LIMIT: String(v) }),
   'databaseOptions.allowPublicExplain': v => ({ PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN: String(v) }),
+  'databaseOptions.schemaCacheTtl': v => ({ PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL: String(v) }),
   allowClientClassCreation: v => ({ PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION: String(v) }),
   allowCustomObjectId: v => ({ PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID: String(v) }),
   enableSanitizedErrorResponse: v => ({ PARSE_SERVER_ENABLE_SANITIZED_ERROR_RESPONSE: String(v) }),
@@ -311,11 +312,14 @@ async function startRust(dbUri) {
       into[k].lifecycle += c.lifecycle;
     }
   };
-  const reset = await resetServer(dbUri);
+  // In process, through the control plane, because the schema cache is: emptying the database
+  // from outside would leave the server serving the previous block's classes. Upstream's
+  // `afterEach` clears its cache in the same step (`spec/helper.js:284-285`).
+  const resetUrl = () => `${current.base}/_control/reset`;
   return {
     kind: 'parse-rust',
     get url() { return current.url; },
-    reset: reset.url,
+    get reset() { return resetUrl(); },
     async stats() {
       const out = structuredClone(retired);
       fold(out, await current.stats());
@@ -352,9 +356,9 @@ async function startRust(dbUri) {
         }
       }
       lastEnv = env;
-      return { url: current.url, reset: reset.url, options: resolved };
+      return { url: current.url, reset: resetUrl(), options: resolved };
     },
-    stop: async () => { current.kill(); await reset.close(); },
+    stop: async () => { current.kill(); },
   };
 }
 
@@ -639,13 +643,36 @@ function judgeRust(results, stats, server) {
     const missing = Object.keys(spec.blocks).filter(k => !rows.some(x => x.key === k));
     for (const k of missing) { problem(`[inventory] ${file}: a committed block did not run: ${spec.blocks[k].name}`); }
   }
+  // The contract's list, section 6: these four are never an acceptable steady state. A 500 is
+  // parse-rust failing to answer, not answering differently, so it is not an ordinary red block.
   for (const x of rows) {
-    if (['transport', 'server-panic', 'harness-error'].includes(x.failure_class)) {
+    if (FATAL_CLASSES.includes(x.failure_class)) {
       problem(`[class] ${x.file}: ${x.failure_class}: ${x.name}`);
     }
   }
   if (server.panics() > 0) { problem(`[panic] parse-rust panicked ${server.panics()} time(s)`); }
+  judgeRun('rust', results, results.some(r => r.status === 'failed'));
   return rows;
+}
+
+const FATAL_CLASSES = ['server-5xx', 'server-panic', 'transport', 'harness-error'];
+
+/**
+ * The run as a whole, which no per-block row shows. A failure outside any block (an `afterAll`
+ * that threw, a suite that could not load) fails nothing per block, and an incomplete or crashed
+ * jasmine reports fewer blocks rather than failed ones. Jasmine's own exit status is accepted as
+ * `failed` only when failed blocks the judge has already counted explain it.
+ */
+function judgeRun(label, results, blockFailuresExplain) {
+  const run = results.run || { overallStatus: 'unknown', failures: [], exitCode: null };
+  for (const f of run.failures || []) {
+    problem(`[${label}] failure outside any block: ${f.suite}: ${String(f.message).slice(0, 200)}`);
+  }
+  const clean = run.exitCode === 0 && run.overallStatus === 'passed';
+  const explained = run.overallStatus === 'failed' && blockFailuresExplain && (run.failures || []).length === 0;
+  if (!clean && !explained) {
+    problem(`[${label}] jasmine exited ${run.exitCode} (${run.overallStatus}${run.incompleteReason ? `: ${run.incompleteReason}` : ''})`);
+  }
 }
 
 function judgeDead(results) {
@@ -706,23 +733,21 @@ function judgeUpstream(results) {
     for (const [key, block] of Object.entries(spec.blocks)) {
       if (block.upstream !== 'pass') { continue; }
       const r = byKey.get(key);
-      if (r && isUnstable(r)) { continue; }
+      // Declared unstable means it may fail, not that it may be skipped.
+      if (r && isUnstable(r) && r.status === 'failed') { continue; }
       if (!r) {
         problem(`[upstream] did not run against the pinned parse-server: ${file}: ${block.name}`);
-      } else if (r.status !== 'passed' && r.status !== 'excluded' && !r.reason) {
-        problem(`[upstream] ${r.status} against the pinned parse-server: ${file}: ${block.name}`);
+      } else if (r.status !== 'passed' && !(r.reason && authorized(r.reason))) {
+        // Not running is acceptable only for the reasons Gate F accepts on parse-rust: an
+        // exclusion naming a register row or an upstream issue. Any other reason, or none, is a
+        // block the control stopped measuring, and a skip is the cheapest way to make it pass.
+        problem(`[upstream] ${r.status}${r.reason ? ` with unauthorized reason "${r.reason}"` : ''} against the pinned parse-server: ${file}: ${block.name}`);
       }
     }
   }
-  for (const f of results.run?.failures || []) {
-    problem(`[upstream] failure outside any block: ${f.suite}: ${String(f.message).slice(0, 200)}`);
-  }
-  // Jasmine's exit status counts the unstable blocks too, so it is only a problem when something
-  // other than a declared unstable block failed.
-  const onlyUnstable = results.every(r => r.status !== 'failed' || isUnstable(r));
-  if (results.run?.exitCode !== 0 && !(onlyUnstable && results.run?.overallStatus === 'failed')) {
-    problem(`[upstream] jasmine exited ${results.run?.exitCode} (${results.run?.overallStatus})`);
-  }
+  // Jasmine's exit status counts the unstable blocks too; failed blocks are already judged above,
+  // whether declared unstable or not, so any failed block explains a `failed` run.
+  judgeRun('upstream', results, results.some(r => r.status === 'failed'));
 }
 
 function nameOf(key) {

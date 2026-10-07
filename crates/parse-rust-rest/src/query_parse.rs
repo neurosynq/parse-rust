@@ -174,9 +174,12 @@ fn parse_where_at(where_json: &Json, top_level: bool) -> Result<ParsedWhere, Par
 
 /// `$or`, `$and`, `$nor` and `$relatedTo` at the top level of a where document.
 ///
-/// Returns `Ok(None)` when the key is an ordinary field name, and an error for a `$`-prefixed key
-/// that is not one of the four. Treating an unknown one as a field name would match nothing and
-/// look like an empty result rather than an unsupported query.
+/// Returns `Ok(None)` when the key is not one of the four, so it is read as a field name. **An
+/// unknown `$`-prefixed key is not accepted by that**: it reaches [`validate_query_keys`] as a
+/// field, fails its pattern and is refused there with upstream's 105 `Invalid key name: $foo`.
+/// Refusing it here instead answered with a different code and message, and too early: before
+/// the `_Session` refusal, the explain gate and the CLP, all of which run first upstream
+/// (`DatabaseController.js:161-188` is `validateQuery`, reached from `find` after the gate).
 fn parse_query_level_key(field: &str, value: &Json) -> Result<Option<ParsedClause>, ParseError> {
     if !field.starts_with('$') {
         return Ok(None);
@@ -210,11 +213,7 @@ fn parse_query_level_key(field: &str, value: &Json) -> Result<Option<ParsedClaus
             }
         }
         "$relatedTo" => parse_related_to(value)?,
-        other => {
-            return Err(ParseError::invalid_query(format!(
-                "unsupported query operator: {other}"
-            )))
-        }
+        _ => return Ok(None),
     };
     Ok(Some(clause))
 }
@@ -571,13 +570,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_query_level_operator_is_refused() {
-        let e = parse_where(&j(r#"{"$nope":[]}"#)).unwrap_err();
-        assert_eq!(e.code, ErrorCode::InvalidQuery);
-        assert!(e.message.contains("$nope"));
-    }
-
-    #[test]
     fn logical_operators_parse_recursively() {
         let w = parse_where(&j(
             r#"{"$or":[{"a":1},{"$and":[{"b":2},{"c":3}]}],"$nor":[{"d":4}]}"#,
@@ -678,6 +670,14 @@ mod tests {
     fn where_must_be_an_object() {
         assert!(parse_where(&j("[]")).is_err());
         assert!(parse_where(&j("3")).is_err());
+    }
+
+    #[test]
+    fn an_unknown_top_level_operator_is_an_invalid_key_at_validation() {
+        let w = parse_where(&j(r#"{"$foo":[]}"#)).expect("parsed as a field");
+        let e = validate_query_keys(&w, true).expect_err("refused at validation");
+        assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidKeyName);
+        assert_eq!(e.message, "Invalid key name: $foo");
     }
 
     #[test]

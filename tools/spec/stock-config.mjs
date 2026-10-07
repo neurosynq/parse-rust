@@ -90,6 +90,9 @@ const EXPECTED = {
   'I9 objectId operation': 3,
   'I10 user update authorization': 24,
   'I11 ACL operations': 28,
+  'I12 read path order': 38,
+  'I13 body credentials': 42,
+  'I14 routes and write order': 40,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
@@ -169,7 +172,8 @@ function request(server, { method = 'GET', path: p, from, headers = {}, body, ra
   // literal reorders integer-like keys before `JSON.stringify` sees them.
   const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
   const all = {
-    'X-Parse-Application-Id': appId ?? server.appId,
+    // `appId: null` sends no app id header at all, the JavaScript SDK's body-only form.
+    ...(appId === null ? {} : { 'X-Parse-Application-Id': appId ?? server.appId }),
     ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
     ...headers,
   };
@@ -216,7 +220,7 @@ const master = extra => ({ 'X-Parse-Master-Key': MASTER_KEY, ...extra });
 /** parse-rust, out of `target/debug`, reporting its bound address on stdout. */
 function bootRust(bind, env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(path.join(REPO, 'target/debug/parse-rust'), [], {
+    const child = spawn(process.env.PARSE_RUST_BIN || path.join(REPO, 'target/debug/parse-rust'), [], {
       cwd: REPO,
       env: {
         ...process.env,
@@ -344,6 +348,9 @@ async function main() {
     await gateI9ObjectIdOperation([servers.rustConfigured, servers.upstreamConfigured]);
     await gateI10UserUpdateAuthorization(defaults);
     await gateI11AclOperations(defaults);
+    await gateI12ReadPathOrder(defaults);
+    await gateI13BodyCredentials(defaults);
+    await gateI14RoutesAndWriteOrder(defaults);
   } finally {
     if (mongo) { await mongo.close(); }
     for (const s of started) {
@@ -1149,6 +1156,265 @@ async function gateI11AclOperations(servers) {
     });
     const anon = await request(server, { path: `/classes/${cls}/${truthy.body?.objectId}`, from: 'loopback' });
     eq(`${who}: a truthy non-boolean flag grants`, anon.status, 200);
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I12. What a read checks, in what order, and how it reads its text options
+//
+// Each case is one answer that depends on where a check sits in the read path, or on reading a
+// text option as JavaScript's `String()` of the decoded value rather than as JSON text.
+// -------------------------------------------------------------------------------------------
+
+async function gateI12ReadPathOrder(servers) {
+  enter('I12 read path order');
+  const e = v => encodeURIComponent(JSON.stringify(v));
+  const error = r => `${r.status} ${r.body?.code} ${r.body?.error}`;
+  const fields = row => Object.keys(row ?? {}).filter(k => !['objectId', 'createdAt', 'updatedAt'].includes(k)).sort().join(',');
+  const ns = r => `${r.status} ${(r.body?.results ?? []).map(x => x.n).join(',')}`;
+  const badBox = e({ loc: { $within: { $box: 'x' } } });
+  const cases = [
+    // `limit=0` answers before the database, so before the adapter validates the explain value
+    // and before the include pass walks an explain document (`RestQuery.js:864-867`).
+    ['an explain with limit=0 and include answers empty', { path: '/classes/$C?explain=true&limit=0&include=x', headers: master() },
+      r => `${r.status} ${J(r.body?.results)}`, '200 []'],
+    ['an invalid explain value with limit=0 answers empty', { path: '/classes/$C?explain=bogus&limit=0', headers: master() },
+      r => `${r.status} ${J(r.body?.results)}`, '200 []'],
+    // Text options are `String()` of the decoded value (`ClassesRouter.js:194-208`).
+    ['keys as an array selects each field', { path: `/classes/$C?keys=${e(['n', 'text'])}&order=n&limit=1` },
+      r => `${r.status} ${fields(r.body?.results?.[0])}`, '200 n,text'],
+    ['order as an array sorts', { path: `/classes/$C?order=${e(['-n'])}&keys=n` }, ns, '200 2,1,0'],
+    ['keys and order as body arrays', { method: 'POST', path: '/classes/$C', body: { _method: 'GET', keys: ['n'], order: ['-n'] } },
+      ns, '200 2,1,0'],
+    ['keys=null is no projection', { path: '/classes/$C?keys=null&order=n&limit=1' },
+      r => `${r.status} ${fields(r.body?.results?.[0])}`, '200 n,other,text'],
+    // The count reruns the find's options through `DatabaseController.find`, sort included.
+    ['a count validates its sort', { path: '/classes/$C?limit=0&count=1&order=%24bad' }, error,
+      '400 105 Invalid field name: $bad.'],
+    // An unknown top-level operator is `validateQuery`'s invalid key, raised after the gates.
+    ['an unknown top-level operator is an invalid key', { path: `/classes/$C?where=${e({ $foo: 1 })}` }, error,
+      '400 105 Invalid key name: $foo'],
+    ['the _Session refusal comes first', { path: `/classes/_Session?where=${e({ $foo: 1 })}` }, error,
+      '400 209 Permission denied'],
+    ['and limit=0 never reaches it', { path: `/classes/$C?limit=0&where=${e({ $foo: 1 })}` },
+      r => `${r.status} ${J(r.body?.results)}`, '200 []'],
+    // The route checks parameters and decodes `where` before `rest.find` enforces class security.
+    ['an unknown parameter beats class security', { path: '/classes/_Installation?bogus=1' }, error,
+      '400 102 Invalid parameter for query: bogus'],
+    ['malformed where JSON beats class security', { path: '/classes/_Installation?where=%7Bx' }, error,
+      '400 107 where parameter is not valid JSON'],
+    // A class that does not exist is still read, so its query is still built.
+    ['a missing class still builds its query', { cls: 'I12m', path: `/classes/$C?where=${badBox}` }, error,
+      '400 107 malformatted $within arg'],
+    ['a bad query beats a negative skip', { path: `/classes/$C?skip=-1&where=${badBox}` }, error,
+      '400 107 malformatted $within arg'],
+    ['a negative skip alone is the database refusal', { path: '/classes/$C?skip=-1' }, error,
+      '500 1 An internal server error occurred'],
+    // Operands as JavaScript reads them: a member of `null` is a `TypeError` and a bare 500, and
+    // arithmetic and `isNaN` coerce (`MongoTransform.js:777-955`).
+    ['$text: null is a TypeError', { cls: 'I12g', path: `/classes/$C?where=${e({ s: { $text: null } })}` },
+      r => `${r.status} ${J(r.body)}`, `500 ${J({ code: 1, message: 'Internal server error.' })}`],
+    ['$geoWithin: null is a TypeError', { cls: 'I12g', path: `/classes/$C?where=${e({ loc: { $geoWithin: null } })}` },
+      r => `${r.status} ${J(r.body)}`, `500 ${J({ code: 1, message: 'Internal server error.' })}`],
+    ['a string $maxDistanceInKilometers divides', { cls: 'I12g', path: `/classes/$C?where=${e({
+      loc: { $nearSphere: { __type: 'GeoPoint', latitude: 1, longitude: 1 }, $maxDistanceInKilometers: '100' } })}` },
+      r => `${r.status} ${r.body?.results?.length}`, '200 1'],
+    ['a string $centerSphere distance reaches the database', { cls: 'I12g', path: `/classes/$C?where=${e({
+      loc: { $geoWithin: { $centerSphere: [{ __type: 'GeoPoint', latitude: 1, longitude: 1 }, '1'] } } })}` }, error,
+      '500 1 An internal server error occurred'],
+  ];
+  for (const server of servers) {
+    const cls = `I12_${suffixOf(server)}`;
+    for (let n = 0; n < 3; n++) {
+      await request(server, {
+        method: 'POST', path: `/classes/${cls}`, from: 'loopback', headers: master(), body: { n, text: `t${n}`, other: 'x' },
+      });
+    }
+    await request(server, {
+      method: 'POST', path: `/classes/I12g_${suffixOf(server)}`, from: 'loopback', headers: master(),
+      body: { loc: { __type: 'GeoPoint', latitude: 1, longitude: 1 }, s: 'hello' },
+    });
+    for (const [label, { cls: prefix, path: p, ...rest }, sig, expected] of cases) {
+      const target = prefix ? `${prefix}_${suffixOf(server)}` : cls;
+      const r = await request(server, { ...rest, path: p.replace('$C', target), from: 'loopback' });
+      eq(`${server.kind}: ${label}`, sig(r), expected);
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I13. Credentials and the method override travel in the body only where upstream reads them
+// -------------------------------------------------------------------------------------------
+
+/*
+ * The JavaScript SDK sends its credentials in the body, with no app id header. Upstream reads them
+ * there only when the header does not name the app, reads three of them and no others, and
+ * overrides the method only on a `POST` (`middlewares.js:119-193`, `:425-433`). Everything it does
+ * not read stays in the body, where a write refuses it as a field name.
+ */
+async function gateI13BodyCredentials(servers) {
+  enter('I13 body credentials');
+  const error = r => `${r.status} ${r.body?.code ?? ''} ${r.body?.error}`.replace('  ', ' ');
+  for (const server of servers) {
+    const cls = `I13_${suffixOf(server)}`;
+    const { token } = await signUp(server, 'i13');
+    const bodyOnly = body => ({ appId: null, raw: JSON.stringify({ _ApplicationId: server.appId, ...body }) });
+    const call = opts => request(server, { from: 'loopback', ...opts });
+
+    // With the header naming the app, the body is not consulted.
+    eq(`${server.kind}: a body master key beside an app id header is not read`,
+      (await call({ method: 'POST', path: '/schemas', body: { _method: 'GET', _MasterKey: MASTER_KEY } })).status, 403);
+    eq(`${server.kind}: the same request with the header is master`,
+      (await call({ path: '/schemas', headers: master() })).status, 200);
+    eq(`${server.kind}: a body session token beside an app id header is a field`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, body: { a: 1, _SessionToken: token } })),
+      '400 105 Invalid field name: _SessionToken.');
+    eq(`${server.kind}: so is a body maintenance key`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, body: { a: 1, _MaintenanceKey: 'any' } })),
+      '400 105 Invalid field name: _MaintenanceKey.');
+
+    // Without it, the body's app id, session token, installation id and master key are read.
+    eq(`${server.kind}: a maintenance key is never read from the body`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _MaintenanceKey: 'any' }) })),
+      '400 105 Invalid field name: _MaintenanceKey.');
+    const me = await call({ method: 'POST', path: '/users/me', ...bodyOnly({ _method: 'GET', _SessionToken: token }) });
+    eq(`${server.kind}: a body session token authenticates a body-only request`,
+      `${me.status} ${me.body?.username === `i13_${TAG}_${server.kind}`}`, '200 true');
+    eq(`${server.kind}: a non-string one is refused`,
+      error(await call({ method: 'POST', path: '/users/me', ...bodyOnly({ _method: 'GET', _SessionToken: 7 }) })),
+      '403 unauthorized');
+    eq(`${server.kind}: a falsy one is neither read nor removed`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _SessionToken: '' }) })),
+      '400 105 Invalid field name: _SessionToken.');
+    eq(`${server.kind}: a body app id stands in for a header naming no app`,
+      (await call({ method: 'POST', path: `/classes/${cls}`, appId: 'nosuchapp', raw: JSON.stringify({ _ApplicationId: server.appId, a: 1 }) })).status,
+      201);
+
+    // The override is a `POST`'s alone, and its name is upper-cased.
+    const created = await call({ method: 'POST', path: `/classes/${cls}`, body: { a: 1 } });
+    const id = created.body?.objectId;
+    eq(`${server.kind}: _method on a PUT is a field`,
+      error(await call({ method: 'PUT', path: `/classes/${cls}/${id}`, body: { _method: 'DELETE' } })),
+      '400 105 Invalid field name: _method.');
+    eq(`${server.kind}: and deletes nothing`,
+      (await call({ path: `/classes/${cls}/${id}` })).status, 200);
+    const got = await call({ method: 'POST', path: `/classes/${cls}/${id}`, body: { _method: 'get' } });
+    eq(`${server.kind}: a lower-case override is honoured`, `${got.status} ${got.body?.objectId === id}`, '200 true');
+
+    // Context: the header is checked on every request, the body key only where the body is read,
+    // and either must be a plain object (`middlewares.js:76-86`, `:173-186`).
+    const malformed = '400 107 Invalid object for context.';
+    const withContext = value => call({ path: `/classes/${cls}`, headers: { 'X-Parse-Cloud-Context': value } });
+    eq(`${server.kind}: an array context header is malformed`, error(await withContext('[1]')), malformed);
+    eq(`${server.kind}: so is one that is not JSON`, error(await withContext('nope')), malformed);
+    eq(`${server.kind}: an object context header is accepted`, (await withContext('{"a":1}')).status, 200);
+    eq(`${server.kind}: a body context string that parses to an array is malformed`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _context: '[1]' }) })), malformed);
+    eq(`${server.kind}: so is a body context number`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _context: 5 }) })), malformed);
+    eq(`${server.kind}: a body context object is taken and removed`,
+      (await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _context: { b: 1 } }) })).status, 201);
+    eq(`${server.kind}: so is a body context array, which isObject accepts`,
+      (await call({ method: 'POST', path: `/classes/${cls}`, ...bodyOnly({ a: 1, _context: [1] }) })).status, 201);
+    eq(`${server.kind}: beside an app id header, a body context is a field`,
+      error(await call({ method: 'POST', path: `/classes/${cls}`, body: { a: 1, _context: { b: 1 } } })),
+      '400 105 Invalid field name: _context.');
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// I14. Routing, the login payload, and which check a write meets first
+// -------------------------------------------------------------------------------------------
+
+async function gateI14RoutesAndWriteOrder(servers) {
+  enter('I14 routes and write order');
+  for (const server of servers) {
+    const who = server.kind;
+    const sfx = suffixOf(server);
+    const call = opts => request(server, { from: 'loopback', ...opts });
+
+    // An unroutable sub-request fails the whole batch; the one before it ran, the one after did not.
+    const cls = `I14Batch_${sfx}`;
+    const batch = await call({
+      method: 'POST', path: '/batch', headers: master(),
+      body: { requests: [
+        { method: 'POST', path: `/parse/classes/${cls}`, body: { n: 1 } },
+        { method: 'POST', path: '/parse/nothing/here', body: {} },
+        { method: 'POST', path: `/parse/classes/${cls}`, body: { n: 2 } },
+      ] },
+    });
+    eq(`${who}: an unroutable sub-request answers 400`, batch.status, 400);
+    eq(`${who}: with 107`, batch.body?.code, 107);
+    // Upstream answers as soon as the throw lands, while the sub-request it already started is
+    // still writing, so the row is polled for rather than read once.
+    let ran = [];
+    for (let i = 0; i < 20 && ran.length === 0; i++) {
+      if (i) { await new Promise(r => setTimeout(r, 50)); }
+      ran = (await call({ path: `/classes/${cls}`, headers: master() })).body?.results ?? [];
+    }
+    eq(`${who}: only the sub-request before it ran`, J(ran.map(r => r.n)), J([1]));
+    const lower = await call({
+      method: 'POST', path: '/batch', headers: master(),
+      body: { requests: [{ method: 'post', path: `/parse/classes/${cls}`, body: {} }] },
+    });
+    eq(`${who}: a lower-case sub-request method does not route`, lower.body?.code, 107);
+    eq(`${who}: and is named as sent`, lower.body?.error, `cannot route post /classes/${cls}`);
+
+    // Login over GET, and a body key login never reads.
+    const user = await signUp(server, 'i14');
+    const username = `i14_${TAG}_${server.kind}`;
+    const q = `username=${encodeURIComponent(username)}&password=${encodeURIComponent(PASSWORD)}`;
+    const overGet = await call({ path: `/login?${q}` });
+    eq(`${who}: GET /login is served`, overGet.status, 200);
+    eq(`${who}: and issues a session`, typeof overGet.body?.sessionToken, 'string');
+    const stray = await call({
+      method: 'POST', path: '/login',
+      body: { username, password: PASSWORD, junk: { __op: 'NotAnOperation' } },
+    });
+    eq(`${who}: a stray operation beside the credentials does not fail a login`, stray.status, 200);
+
+    // A caller fetching their own row gets their token back, on both routes.
+    for (const p of [`/users/${user.id}`, `/classes/_User/${user.id}`]) {
+      const own = await call({ path: p, headers: as(user.token) });
+      eq(`${who}: ${p.split('/')[1]} returns the caller's own session token`, own.body?.sessionToken, user.token);
+    }
+
+    // `_Installation` keeps its id and its device type.
+    const inst = await call({
+      method: 'POST', path: '/classes/_Installation', headers: master(),
+      body: { installationId: `i14-${sfx}`, deviceType: 'ios' },
+    });
+    eq(`${who}: an installation is created`, inst.status, 201);
+    const instPath = `/classes/_Installation/${inst.body?.objectId}`;
+    eq(`${who}: its installationId cannot change`,
+      (await call({ method: 'PUT', path: instPath, headers: master(), body: { installationId: `x-${sfx}` } })).body?.code, 136);
+    eq(`${who}: nor its deviceType, even as an operation`,
+      (await call({ method: 'PUT', path: instPath, headers: master(), body: { deviceType: { __op: 'Delete' } } })).body?.code, 136);
+    eq(`${who}: an update to a missing installation is named as such`,
+      (await call({ method: 'PUT', path: '/classes/_Installation/i14missing', headers: master(), body: { deviceType: 'ios' } })).body?.error,
+      'Object not found for update.');
+
+    // Signup: the router's `role:` guard first, and the credentials before the restricted fields.
+    eq(`${who}: a role-prefixed objectId is refused before the objectId policy`,
+      (await call({ method: 'POST', path: '/users', body: { objectId: 'role:x', username: `r_${sfx}`, password: PASSWORD } })).body?.code, 119);
+    eq(`${who}: a missing username is reported before emailVerified`,
+      (await call({ method: 'POST', path: '/users', body: { emailVerified: true, password: PASSWORD } })).body?.code, 200);
+
+    // A non-owner update is refused before the body is read as a write.
+    const other = await signUp(server, 'i14_other');
+    eq(`${who}: a non-owner's malformed update answers 206`,
+      (await call({ method: 'PUT', path: `/classes/_User/${other.id}`, headers: as(user.token), body: { x: { __op: 'NotAnOperation' } } })).body?.code, 206);
+
+    // An ACL is rendered in JavaScript key order: an array-index principal first. Checked on the
+    // raw text, because `JSON.parse` would reorder it anyway.
+    const aclCls = `I14Acl_${sfx}`;
+    const made = await call({
+      method: 'POST', path: `/classes/${aclCls}`, headers: master(),
+      raw: '{"ACL":{"*":{"read":true},"123":{"read":true}}}',
+    });
+    const got = await call({ path: `/classes/${aclCls}/${made.body?.objectId}`, headers: master() });
+    check(`${who}: an index principal precedes "*" in the rendered ACL`,
+      got.raw.indexOf('"123"') >= 0 && got.raw.indexOf('"123"') < got.raw.indexOf('"*"'), got.raw);
   }
 }
 

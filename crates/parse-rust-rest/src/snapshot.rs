@@ -10,11 +10,10 @@
 //! class other than the one being queried, and a per-class fetch at the point of use would be a
 //! second snapshot.
 //!
-//! No caching here. 0.2.0 reloads every schema on every request, which is correct and slow. A
-//! cache is the obvious next step and deliberately not taken yet: a schema carries the CLP, so the
-//! staleness window of a schema cache is the window in which a revoked permission is still
-//! honored. That makes it an authorization decision rather than a tuning knob, and it wants to be
-//! designed as one rather than added for the throughput.
+//! No caching here: a snapshot is immutable once built. The server keeps one between requests in
+//! its schema cache (`parse_rust_server::schema_cache`), which decides how new the next request's
+//! snapshot is. A schema carries the CLP, so that cache's staleness window is the window in which a
+//! revoked permission is still honored, and its invalidation rules are written down there.
 
 use std::borrow::Cow;
 

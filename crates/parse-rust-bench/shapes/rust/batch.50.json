@@ -1,5 +1,4 @@
 [
-  "find _SCHEMA {}",
   "insert BenchBatch ",
   "insert BenchBatch ",
   "insert BenchBatch ",

@@ -562,7 +562,7 @@ fn as_object(body: &Json) -> Result<ParseMap, ParseError> {
 /// class silently edits another.
 ///
 /// Falsy values are absent, which is upstream exactly. Measured against parse-server
-/// 9.10.1-alpha.6: `"className": null` and `"className": ""` both answer 200 and act on the path's
+/// at the pin: `"className": null` and `"className": ""` both answer 200 and act on the path's
 /// class, while `["Gadget"]`, `7`, `true` and `{"a":1}` all answer 103.
 enum ClassNameField {
     Absent,
@@ -588,7 +588,7 @@ fn class_name_field(body: &ParseMap) -> ClassNameField {
 /// through the ECMAScript formatter this project already carries, an object is the famous
 /// `[object Object]`, and an array is its elements joined by commas, which is why `["Gadget"]`
 /// reports `Gadget` upstream rather than anything bracketed. Verified against parse-server
-/// 9.10.1-alpha.6 for `["Gadget"]`, `7`, `true` and `{"a":1}`.
+/// at the pin for `["Gadget"]`, `7`, `true` and `{"a":1}`.
 fn render_as_js_string(value: &ParseValue) -> String {
     match value {
         ParseValue::String(s) => s.clone(),
@@ -618,10 +618,10 @@ fn render_as_js_string(value: &ParseValue) -> String {
 /// in response to a request that was trying to define fields.
 ///
 /// Upstream's outcome is decided by JSON type, as with the other two. Measured against parse-server
-/// 9.10.1-alpha.6: a **string** or non-empty array enumerates to its indices and fails as 105
+/// at the pin: a **string** or non-empty array enumerates to its indices and fails as 105
 /// `invalid field name: 0`; a **number**, **boolean** or empty array enumerates to nothing and
 /// answers 200 having created the class with no fields; **null** reaches `Object.keys(null)` and
-/// answers `{"code":1,"error":"Internal server error."}`.
+/// answers `{"code":1,"message":"Internal server error."}`.
 ///
 /// Blast radius: a client sending `"fields": []` where it meant `{}` gets a refusal here and a
 /// success upstream. No spec file submits a malformed block.

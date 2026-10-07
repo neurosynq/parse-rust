@@ -176,6 +176,58 @@ pub fn to_ecma_display(value: &crate::value::ParseValue) -> String {
     }
 }
 
+/// ECMAScript `StringToNumber`: surrounding whitespace ignored, empty is zero, `Infinity` and the
+/// `0x`, `0o` and `0b` prefixes recognised, anything else that is not a decimal literal `NaN`.
+pub fn string_to_number(s: &str) -> f64 {
+    let t = s.trim();
+    if t.is_empty() {
+        return 0.0;
+    }
+    // `from_str_radix` accepts a leading sign, which `Number("0x+10")` does not: `NaN`.
+    let radix = |digits: &str, base: u32| {
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(base)) {
+            return f64::NAN;
+        }
+        u64::from_str_radix(digits, base).map_or(f64::NAN, |n| n as f64)
+    };
+    match t {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return radix(h, 16);
+    }
+    if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return radix(o, 8);
+    }
+    if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return radix(b, 2);
+    }
+    let decimal = t
+        .bytes()
+        .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'));
+    if !decimal || t.contains("inf") || t.contains("nan") {
+        return f64::NAN;
+    }
+    t.parse().unwrap_or(f64::NAN)
+}
+
+/// JavaScript's `Number(value)`, which the arithmetic and comparison operators apply implicitly:
+/// `"100" / 6371` divides, `isNaN(null)` is false because `null` is 0.
+pub fn to_number(value: &crate::value::ParseValue) -> f64 {
+    use crate::value::ParseValue;
+    match value {
+        ParseValue::Number(n) => *n,
+        ParseValue::Null => 0.0,
+        ParseValue::Bool(b) => f64::from(u8::from(*b)),
+        ParseValue::String(s) => string_to_number(s),
+        // Through `String()`, so `[5]` is 5, `[]` is 0 and `[1,2]` is `NaN`.
+        ParseValue::Array(_) => string_to_number(&to_ecma_display(value)),
+        _ => f64::NAN,
+    }
+}
+
 /// JavaScript truthiness.
 ///
 /// Upstream guards several schema decisions with a bare `if (obj.key)`, which is **not** a presence

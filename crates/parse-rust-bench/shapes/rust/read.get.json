@@ -1,4 +1,3 @@
 [
-  "find _SCHEMA {}",
   "find BenchItem {_id:string,_rperm:{$in:[null,string,string]}} limit=1"
 ]

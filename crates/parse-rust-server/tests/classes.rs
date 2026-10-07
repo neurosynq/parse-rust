@@ -555,7 +555,7 @@ async fn a_role_prefixed_user_id_is_refused_on_both_create_routes() {
 ///
 /// Both are ordering properties of `enforceClassExists`, which runs before every one of
 /// `validateObject`'s per-field checks (`SchemaController.js:1288`) and refuses an invalid class
-/// name without writing (`:987-1004`). Measured against a running parse-server 9.10.1-alpha.6 at
+/// name without writing (`:987-1004`). Measured against a running parse-server at the pin, with
 /// `allowCustomObjectId: true`: it answers 111 and leaves the row, and answers 107 and writes
 /// nothing, respectively.
 ///
@@ -604,7 +604,7 @@ async fn a_refused_create_leaves_the_class_behind_unless_the_class_name_is_the_p
 /// One GeoPoint per class, enforced on ordinary writes and not only through the schema API.
 ///
 /// Two layers upstream, with two different messages, and both are wire-visible. Measured against
-/// parse-server 9.10.1-alpha.6:
+/// parse-server at the pin:
 ///
 /// - two GeoPoints in one body answer `there can only be one geopoint field in a class`, from
 ///   `validateObject`'s `geocount` over the incoming object (`SchemaController.js:1287-1302`);
@@ -817,7 +817,7 @@ async fn a_nested_key_with_a_dollar_or_dot_is_refused() {
 /// "Date"}` inside a query operand stays three string keys and cannot equal the BSON date the row
 /// holds. Recursing instead matched a row upstream does not return, which is the direction that
 /// matters: a query answering with more than upstream would is an authorization concern here, not
-/// a formatting one. Measured against parse-server 9.10.1-alpha.6, which answers with no results.
+/// a formatting one. Measured against parse-server at the pin, which answers with no results.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_nested_parse_value_in_a_query_atom_matches_nothing() {
