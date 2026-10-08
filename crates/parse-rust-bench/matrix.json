@@ -11,6 +11,7 @@
     "query.protected",
     "include.wide",
     "query.dated",
+    "query.protected.large",
     "include.array"
   ],
   "calibrated": ["read.get", "create.nested", "update.ops", "query.protected", "include.array"],

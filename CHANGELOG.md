@@ -87,6 +87,10 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   wherever the set depends on the row or the caller: explicit `keys`, any `userField:` rule on the
   class, `_User`, and the master and maintenance keys. `objectId`, `createdAt`, `updatedAt` and
   `ACL` are always read. Responses are unchanged; only what is read from the database differs.
+  Measured on one machine against MongoDB 7.0.25, reading a whole class as a client with a 2 KB
+  protected field: 1,000 rows went from 11.9 ms to 4.9 ms at the median, and 10,000 rows from about
+  115 ms to about 45 ms. With a 25-byte protected field the difference is within noise. Gate J has a
+  new workload for it, `query.protected.large`.
 
 ### Fixed
 

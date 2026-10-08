@@ -368,8 +368,8 @@ async fn send(http: &Http, base: &str, req: &Req) -> Resp {
 }
 
 // -------------------------------------------------------------------------------------------
-// Workloads: the seven 0.3.0 pilots, and the two added on 2026-10-07 for date-heavy pages and an
-// include through an array of pointers
+// Workloads: the seven 0.3.0 pilots, the two added on 2026-10-07 for date-heavy pages and an
+// include through an array of pointers, and the one added for 0.3.1's protected-field projection
 // -------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -496,6 +496,19 @@ fn workloads() -> Vec<Workload> {
                 master: false,
             },
         },
+        // A page whose rows each carry a large protected field, read by a client. Every row loses
+        // the field, so it is the case a projection can skip reading at all.
+        Workload {
+            name: "query.protected.large",
+            class: Class::Normalized,
+            corpus: None,
+            request: Req {
+                method: "GET",
+                path: format!("/classes/BenchProtectedLarge?order=n&limit={PROTECTED_LARGE_ROWS}"),
+                body: None,
+                master: false,
+            },
+        },
         // An include through an array of pointers rather than a pointer field. Every holder points
         // at the same four targets, so a server that collects ids across rows issues one target
         // query.
@@ -515,6 +528,11 @@ fn workloads() -> Vec<Workload> {
 
 /// Rows in `query.dated`, all read by its one request.
 const DATED_ROWS: usize = 1000;
+
+/// Rows in `query.protected.large`, all read by its one request, and the size of each row's
+/// protected field.
+const PROTECTED_LARGE_ROWS: usize = 1000;
+const PROTECTED_LARGE_BYTES: usize = 2048;
 
 /// A fixed instant per row and field, so both targets store and return identical dates.
 fn dated_iso(row: usize, field: usize) -> String {
@@ -617,6 +635,32 @@ async fn seed(http: &Http, base: &str) {
                         "objectId": id("dated", n), "n": n,
                         "d0": date(n, 0), "d1": date(n, 1), "d2": date(n, 2), "d3": date(n, 3),
                     },
+                })
+            })
+            .collect();
+        must.push(post("/batch".into(), json!({ "requests": requests })));
+    }
+    must.push(post(
+        "/schemas/BenchProtectedLarge".into(),
+        json!({
+            "className": "BenchProtectedLarge",
+            "fields": { "n": {"type": "Number"}, "secret": {"type": "String"}, "label": {"type": "String"} },
+            "classLevelPermissions": {
+                "find": {"*": true}, "count": {"*": true}, "get": {"*": true}, "create": {"*": true},
+                "update": {"*": true}, "delete": {"*": true}, "addField": {"*": true},
+                "protectedFields": { "*": ["secret"] },
+            },
+        }),
+    ));
+    let secret = "s".repeat(PROTECTED_LARGE_BYTES);
+    for chunk in (0..PROTECTED_LARGE_ROWS).collect::<Vec<_>>().chunks(50) {
+        let requests: Vec<Value> = chunk
+            .iter()
+            .map(|&n| {
+                json!({
+                    "method": "POST",
+                    "path": "/parse/classes/BenchProtectedLarge",
+                    "body": { "objectId": id("plarge", n), "n": n, "label": format!("row {n}"), "secret": secret },
                 })
             })
             .collect();
