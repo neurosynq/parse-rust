@@ -14,8 +14,8 @@ name: parse-rust-demo
 
 services:
   mongo:
-    # Pinned by digest: MongoDB 7.0.25, the version the project's tests run against.
-    image: mongo:7.0.25@sha256:82db6c6c8103eee46ca820c190742b7c280d02d6f993903a603cec9d56be374b
+    # Pinned by digest: MongoDB 8.2.9, a major the project's tests run against.
+    image: mongo:8.2.9@sha256:b679e74db730c6fc4aa7f2b6b0d360692fcc0f045d063cf9283511da732f7ffb
     volumes:
       - mongo-data:/data/db
     networks: [demo]

@@ -55,6 +55,10 @@ use axum::routing::any;
 use axum::Router;
 
 pub use auth::{Authority, Credentials, HeaderRejection, Peer};
+/// The `axum` this crate is built with. [`router`] returns its `Router` and the handlers are its
+/// types, so an embedder that serves, nests or layers the router should name axum through this
+/// re-export rather than depend on a version that might not match.
+pub use axum;
 pub use config::{ProtectedFieldsConfig, ServerConfig};
 pub use ip_allowlist::{InvalidIpEntry, IpAllowlist};
 pub use request::RequestContext;

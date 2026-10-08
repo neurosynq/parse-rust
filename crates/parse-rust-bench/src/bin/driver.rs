@@ -369,7 +369,7 @@ async fn send(http: &Http, base: &str, req: &Req) -> Resp {
 
 // -------------------------------------------------------------------------------------------
 // Workloads: the seven 0.3.0 pilots, the two added on 2026-10-07 for date-heavy pages and an
-// include through an array of pointers, and the one added for 0.3.1's protected-field projection
+// include through an array of pointers, and the one added for 0.4.0's protected-field projection
 // -------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]

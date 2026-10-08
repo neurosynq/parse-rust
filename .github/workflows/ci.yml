@@ -42,6 +42,17 @@ jobs:
       - name: build
         run: cargo +"$MSRV" build --workspace --locked
 
+  # A Rust API break must cost a minor version: checked against the last release on crates.io,
+  # so a patch that breaks an embedder fails here rather than on their `cargo update`. Crates with
+  # `publish = false` are skipped.
+  semver:
+    name: semver against the last release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
   rust:
     name: rust (MongoDB ${{ matrix.mongodb }})
     runs-on: ubuntu-latest
@@ -51,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mongodb: ["7", "9"]
+        mongodb: ["8", "9"]
     # The adapter tests, the schema-format oracle and the acceptance gates all need a real
     # MongoDB. Mocking it would test that the mock behaves like the mock.
     services:

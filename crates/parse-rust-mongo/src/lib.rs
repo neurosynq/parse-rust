@@ -17,3 +17,7 @@ mod js_regex;
 pub mod transform;
 
 pub use adapter::MongoAdapter;
+/// The `bson` this crate is built with. The transform functions take and return its `Document` and
+/// `Bson`, so a caller should name bson through this re-export rather than depend on a version that
+/// might not match.
+pub use bson;

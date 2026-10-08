@@ -11,30 +11,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
-## 0.3.1
+## 0.4.0
 
 Dependency majors, the fixes their review found, and a read optimization for protected
-fields.
-
-**This release breaks the Rust API despite its patch number.** Cargo treats 0.3.1 as compatible with
-0.3.0, so `cargo update` takes an embedder onto it. A project that depends on any parse-rust crate
-directly, not only one that embeds `parse-rust-server`, should read the section below before
-updating. To stay on 0.3.0, pin **every** parse-rust crate in the dependency tree to `=0.3.0`, not
-only the one you name: the 0.3.0 crates depend on each other with caret ranges, so pinning
-`parse-rust-server` alone still resolves its siblings to 0.3.1, which does not compile. Keeping an
-existing `Cargo.lock`, or `cargo install --locked`, also holds 0.3.0. **The minimum Rust is now
-1.89.**
+fields. Planned as 0.3.1 and numbered as a minor because it breaks the Rust API: from this release
+every Rust API break costs a minor, so a patch number means `cargo update` is safe, and
+`cargo-semver-checks` in CI holds that. A project that depends on a parse-rust crate directly
+should read Breaking below. **The minimum Rust is now 1.89.**
 
 For an SDK talking to the `parse-rust` binary, the wire changes are the routing and batch entries
-under Changed and everything under Fixed, each of which moves parse-rust to parse-server's answer.
-The dependency updates and the protected-field projection change no response.
+under Changed and the first four entries under Fixed, each of which moves parse-rust to
+parse-server's answer. The last four entries under Fixed concern how the binary runs. The
+dependency updates and the protected-field projection change no response.
 
 ### BREAKING
 
 - **`axum` 0.7 to 0.8, in `parse-rust-server`'s public API.** `router()` returns an axum 0.8
   `Router`, and `Authority` and the handlers are axum 0.8 types, so any project that serves,
   nests or layers the router needs axum 0.8, whether or not it adds routes of its own. To migrate:
-  depend on `axum = "0.8"`; write path parameters in your own routes as `{name}` rather than
+  name axum through the new re-export, `parse_rust_server::axum`, which is always the version the
+  router was built with, or depend on `axum = "0.8"` yourself; write path parameters in your own routes as `{name}` rather than
   `:name`, since a `:name` segment panics when the router is built; and remove `#[async_trait]`
   from your own extractor impls.
 - **`router()` carries its own fallback.** An unrouted path is answered inside it, and at a root
@@ -51,7 +47,8 @@ The dependency updates and the protected-field projection change no response.
   `OriginalUrl` extension the router's path layer inserts, falling back to axum's `OriginalUri`
   when that layer is absent.
 - **`bson` 2 to 3, in `parse-rust-mongo`'s public API.** The transform functions take and return
-  bson 3 `Document` and `Bson`. To migrate: depend on `bson = "3"` and follow bson's own migration
+  bson 3 `Document` and `Bson`. To migrate: name bson through the new re-export,
+  `parse_rust_mongo::bson`, or depend on `bson = "3"` yourself, and follow bson's own migration
   notes. The changes this codebase met were a regex's `pattern` and `options` becoming `CString`,
   `into_relaxed_extjson` moving behind the `serde_json-1` feature, and `get_*` returning bson's own
   error type.
@@ -69,19 +66,30 @@ The dependency updates and the protected-field projection change no response.
 - **`parse-rust-storage`: `QueryOptions` has a new field, `omit_fields`**, so a struct literal of
   it needs `..Default::default()`. An adapter may ignore it; see Changed.
 - **A mount path is checked.** An empty path means the root; any other must start with `/`, must not
-  contain `{`, `}`, `*`, `:`, `(`,
-  `)`, `[`, `]`, `+`, `!` or `\`, which are route syntax, and must not contain `?` or `#`, which
-  cannot occur in a request path. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
-  returns an `InvalidInput` error, and `router()` given such a path serves nothing, every request a
-  404, and writes the refusal to standard error. `ServerConfig::check_mount_path` is the check, for
-  an embedder that builds the router itself. Upstream's Express 5 router reads those characters as
-  syntax too, differently: `:name` anywhere in a segment is a parameter, so `/:app` matches any first
-  segment and `/a:b` matches `/a` followed by anything; `{...}` is an optional group; and `(`, `)`,
-  `[`, `]`, `+` and `!` are refused at boot, and `\` is an escape. None of it can be served the same way under axum 0.8,
-  so all of it is refused rather than served differently.
+  contain `{`, `}`, `*`, `:`, `(`, `)`, `[`, `]`, `+`, `!` or `\`, which are route syntax, and must
+  not contain `?` or `#`, which cannot occur in a request path. `PARSE_SERVER_MOUNT_PATH` is refused
+  at start, `serve` returns an `InvalidInput` error, and `router()` given such a path serves
+  nothing, every request a 404, and writes the refusal to standard error.
+  `ServerConfig::check_mount_path` is the check, for an embedder that builds the router itself.
+  Upstream's Express 5 router reads those characters as syntax too, differently: `:name` anywhere in
+  a segment is a parameter, so `/:app` matches any first segment and `/a:b` matches `/a` followed by
+  anything; `{...}` is an optional group; and `(`, `)`, `[`, `]`, `+` and `!` are refused at boot,
+  and `\` is an escape. None of it can be served the same way under axum 0.8, so all of it is
+  refused rather than served differently.
+
+### Added
+
+- **`parse_rust_server::axum` and `parse_rust_mongo::bson` re-export the versions those crates are
+  built with**, so an embedder names the same `Router`, `Document` and `Bson` types the crates use
+  instead of depending on a version that might not match.
+- **`cargo-semver-checks` runs in CI against the last release on crates.io.** A Rust API break now
+  costs a minor version, and a patch that breaks an embedder fails CI rather than their
+  `cargo update`.
 
 ### Changed
 
+- **CI runs against MongoDB 8 and 9**, in place of 7 and 9, and the `docker compose` demo runs
+  MongoDB 8.2.9.
 - **`rand` 0.8 to 0.10.** Session tokens and `objectId`s now draw from the operating system's
   generator directly, and a failure there is an internal error on the request rather than a panic.
   rand 0.10's thread-local generator panics when a periodic reseed fails.
@@ -90,12 +98,12 @@ The dependency updates and the protected-field projection change no response.
   uses and which writes `$2y$`, and `bcryptjs`, which writes `$2b$`. Passwords over 72 bytes, at the
   boundary, with a two-byte character straddling it, and containing a NUL are checked to verify the
   same way on both sides.
-- **Paths below the mount match as parse-server's do.** One trailing slash is optional, so
-  `/classes/Foo/` is `/classes/Foo`. One extra leading slash is ignored, as upstream's
-  `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes, and `/parse//health` is the
-  health route, exempt from the body checks. An empty segment that remains matches no route, so
-  `/classes//abc` is a 404 rather than a read of a class with an empty name. The rules apply below
-  the mount only, so a mount that itself contains `//` is matched literally.
+- **Trailing and doubled slashes below the mount behave as parse-server's do.** One trailing slash
+  is optional, so `/classes/Foo/` is `/classes/Foo`. One extra leading slash is ignored, as
+  upstream's `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes, and
+  `/parse//health` is the health route, exempt from the body checks. An empty segment that remains
+  matches no route, so `/classes//abc` is a 404 rather than a read of a class with an empty name.
+  The rules apply below the mount only, so a mount that itself contains `//` is matched literally.
 - **A batch takes its routing prefix from its URL, as upstream's does.** Upstream strips `/batch`
   off the request's original URL and requires every sub-request path to start with what remains.
   So a URL that does not end with `/batch`, such as `/batch/` or `/batch?x=1`, is a bare 500 with
@@ -117,12 +125,13 @@ The dependency updates and the protected-field projection change no response.
   refuse the read.
 
   Gate J has a new workload for it, `query.protected.large`: 1,000 rows, each with a 2 KB
-  protected string, read as one page by a client. Measured once, at commit `41fe696`, on an Apple
-  M3 Max against MongoDB 7.0.25 in Docker on the same machine, 30 samples per cell after 5 warmup,
-  at the 0 ms latency rung: parse-rust's median was 6.0 ms and its p90 6.5 ms, with 44% of the
-  median in the database; parse-server's median was 43.8 ms and its p90 48.4 ms, with 54% in the
-  database. Review later narrowed the projection to plain declared names, which this
-  workload's `secret` field is, so the measured read is the one that ships. These are
+  protected string, read as one page by a client. Measured once, before review narrowed the
+  projection, on an Apple M3 Max against MongoDB 7.0.25 in Docker on the same machine, 30 samples
+  per cell after 5 warmup, at the 0 ms latency rung: parse-rust's median was 6.0 ms and its p90
+  6.5 ms, with 44% of the median in the database; parse-server's median was 43.8 ms and its p90
+  48.4 ms, with 54% in the database. Review later narrowed the projection to plain declared names,
+  which this workload's `secret` field is, so the same field is projected away. Routing and body
+  handling also changed after the run, and it has not been repeated on this release. These are
   distributions from one run with no noise floor established, not a verdict.
 
 ### Fixed
@@ -150,8 +159,12 @@ The dependency updates and the protected-field projection change no response.
   in flight finish, for at most 8 s, then exits. Before, `docker stop` waited out its timeout and
   then killed the process mid-request, because a container's first process has no default action
   for the signal. `serve_with_shutdown` offers the same to an embedder. Present in 0.3.0.
-- **An unparsable `PORT` is refused** rather than replaced by 27800; an empty one is unset, as
-  upstream reads it. Present in 0.3.0.
+- **An unparsable `PORT` is refused** rather than replaced by 27800. Present in 0.3.0.
+- **An empty environment variable is unset and takes the default**, as upstream's CLI reads one
+  only when it is truthy (`cli/utils/commander.js:64`). An empty `PARSE_SERVER_MOUNT_PATH` now
+  serves `/parse` rather than the root, an empty `PARSE_SERVER_ALLOW_ORIGIN` allows `*` rather
+  than no origin, and an empty `PARSE_SERVER_MASTER_KEY_IPS` keeps the loopback default rather than
+  refusing to start. An empty application id or master key is reported as missing.
 - **An unreachable database is reported as that.** Startup failed with `1: Database error` after
   the driver's 30 s server-selection timeout, naming neither the host nor the cause. It now pings
   the database first and fails with `cannot reach MongoDB:` and the driver's account of each address
@@ -163,8 +176,6 @@ The dependency updates and the protected-field projection change no response.
 
 - **A mount path containing route syntax is refused at start**, where parse-server serves it with
   Express's reading of that syntax. See Breaking.
-- **A nested `/batch` sub-request is refused before anything runs**, whether or not its path has a
-  trailing slash.
 
 ### Known limitations
 
@@ -174,8 +185,6 @@ The dependency updates and the protected-field projection change no response.
 - **A path under the mount that matches no route answers 404 even with an invalid session
   token**, where upstream resolves the token before routing and answers 400 with code 209
   `Invalid session token`.
-- **A batch sub-request path loses a trailing slash**, `/classes/X/` becoming `/classes/X`, where
-  upstream's path join keeps it.
 - **A top-level array body on a write answers 107**, where upstream validates its indices as field
   names and answers 105.
 - **`/health/foo` is not the health route**, where Express's `api.use('/health')` serves anything

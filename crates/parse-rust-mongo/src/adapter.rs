@@ -102,7 +102,7 @@ impl MongoAdapter {
     /// Ask the server to answer, and say why it cannot.
     ///
     /// `connect` does not contact the server, so the first operation is where an unreachable or
-    /// refusing database shows up, and through [`mongo_err`] it shows up as upstream's fixed
+    /// refusing database shows up, and through `mongo_err` it shows up as upstream's fixed
     /// `Database error`, which names neither the host nor the cause. Startup calls this first to
     /// fail with the driver's own account instead: the addresses it tried and what each answered.
     /// The driver's text names hosts, never the credentials in the URI.

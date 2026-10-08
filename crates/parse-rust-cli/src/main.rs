@@ -25,7 +25,12 @@ async fn run() -> std::io::Result<()> {
     // Placeholder wiring. Upstream has roughly 292 options and a real option surface is not built
     // yet; reading a handful of environment variables is enough to serve the routes that exist,
     // and pretending otherwise would be worse than saying so.
-    let env = |k: &str| std::env::var(k).ok();
+    //
+    // **An empty variable is unset**, for every option, because upstream's CLI reads one only
+    // when it is truthy (`cli/utils/commander.js:64`, `if (env[key])`), so `FOO=` in a compose
+    // file means the default there. Reading it as a value would put the API at the root for an
+    // empty `PARSE_SERVER_MOUNT_PATH` where upstream serves `/parse`.
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
 
     // **The identity has no defaults, deliberately.** Upstream's documentation uses `myAppId` and
     // `myMasterKey` as examples, and defaulting to them here would mean a server started without
@@ -34,7 +39,7 @@ async fn run() -> std::io::Result<()> {
     // to start is a loud, fixable mistake; one that starts with a guessable master key is a
     // silent, unfixable one.
     let required = |k: &str| -> std::io::Result<String> {
-        std::env::var(k).map_err(|_| {
+        env(k).ok_or_else(|| {
             std::io::Error::other(format!(
                 "{k} is required. parse-rust has no default application id or master key: \
                  the master key bypasses every access control, so a default would be a \
@@ -173,8 +178,8 @@ async fn run() -> std::io::Result<()> {
     // **The empty array cannot be expressed here and that is upstream's limitation too**: there is
     // no way to pass an empty array through an environment variable, so `masterKeyIps: []`, which
     // disables the key entirely, is reachable only through `ServerConfig`. Setting the variable to
-    // an empty string is an **error**, not a silent deny-all, because upstream's `validateIps`
-    // refuses the empty entry `arrayParser` produces from it and refuses to boot.
+    // an empty string is unset, so it keeps the loopback default, as upstream's CLI skips it; an
+    // empty entry inside a list, such as `127.0.0.1,`, is refused at start.
     if let Some(v) = env("PARSE_SERVER_MASTER_KEY_IPS") {
         config.master_key_ips = ip_allowlist(&v, "PARSE_SERVER_MASTER_KEY_IPS")?;
     }
@@ -205,12 +210,10 @@ async fn run() -> std::io::Result<()> {
     // machine, and 1337 is exactly where that one is. The default sits in the 27xxx block this
     // repository has registered for differential runs. `PORT=0` binds an ephemeral port and is
     // what every test uses, so parallel test batteries cannot collide with each other.
-    // An unparsable `PORT` is refused rather than replaced by the default: a typo must not quietly
-    // put the server on a port nobody configured.
-    // An empty `PORT` is unset, as upstream reads an empty variable; an unparsable one is refused
-    // rather than replaced by the default, because a typo must not quietly put the server on a
-    // port nobody configured.
-    let port: u16 = match env("PORT").filter(|p| !p.is_empty()) {
+    // An unparsable `PORT` is refused rather than replaced by the default, because a typo must not
+    // quietly put the server on a port nobody configured. An empty one is unset, as every variable
+    // is.
+    let port: u16 = match env("PORT") {
         Some(p) => p
             .parse()
             .map_err(|_| std::io::Error::other(format!("PORT must be a port number, got {p:?}")))?,
@@ -290,12 +293,10 @@ async fn shutdown_signal() {
 /// `parsers.arrayParser`, which is a plain `split(',')` and nothing else
 /// (`Options/parsers.js:42-50`).
 ///
-/// **No trimming and no dropping of empty entries, and the second part is load-bearing.**
-/// `PARSE_SERVER_ALLOW_ORIGIN=""` must parse to one empty origin, not to no origins. Both spellings
-/// are closed now, since `resolve_origin` stopped treating an empty list as unconfigured, but they
-/// are closed for different reasons and only one of them is upstream's: upstream's `?? ['*']` fires
-/// on an absent value, and a configured empty entry is what it actually carries. An empty string
-/// matches no browser origin, which is the intent, and it survives only if it survives here.
+/// **No trimming and no dropping of empty entries**, as upstream's split keeps them: an empty entry
+/// such as the one in `https://a.example,` matches no browser origin. A variable that is empty as a
+/// whole never reaches this, because an empty variable is unset, so `PARSE_SERVER_ALLOW_ORIGIN=`
+/// is upstream's default `*`, as upstream's CLI reads it.
 fn list(value: &str) -> Vec<String> {
     value.split(',').map(str::to_string).collect()
 }

@@ -224,13 +224,15 @@ impl Parser<'_> {
         self.i += 1;
         match c {
             'b' | 'B' => Some(false),
+            // The name's span is recorded but **not skipped**. With no named group in the pattern,
+            // `\k` is an identity escape and what follows is ordinary pattern, so `\k<[>` is an
+            // unterminated class and `\k<(?:>)` a valid group; skipping to the `>` hid both. With
+            // one, the name must be a group's, which is checked at the end, and an identifier's
+            // characters parse as literals either way.
             'k' => {
                 let name = if self.peek() == Some('<') {
                     let start = self.i + 1;
-                    self.next_gt_from(start).map(|end| {
-                        self.i = end + 1;
-                        (start, end)
-                    })
+                    self.next_gt_from(start).map(|end| (start, end))
                 } else {
                     None
                 };
@@ -566,6 +568,13 @@ mod tests {
             ("(?<=a)+", false),
             ("(?!a)+", true),
             ("(?!a){2}", true),
+            ("\\k<[>", false),
+            ("\\k<a(>", false),
+            ("\\k<(?:>)", true),
+            ("\\k<)>", false),
+            ("(?<a>x)\\k<[>", false),
+            ("\\k<", true),
+            ("\\k<a", true),
         ];
         for (pattern, valid) in cases {
             assert_eq!(is_valid(pattern), *valid, "{pattern:?}");
