@@ -227,9 +227,14 @@ fn interior_value_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
 fn interior_query_atom_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
     if let ParseValue::Object(map) = value {
         if let Some(pattern) = interior_regex(map) {
+            // A BSON regex is a pair of C strings, so a pattern with a NUL byte has no encoding.
+            // Upstream's serializer throws on it and the request is a 500; this is the same failure
+            // raised here rather than in the driver.
+            let pattern = bson::raw::CString::try_from(pattern)
+                .map_err(|_| ParseError::internal("regex pattern contains a NUL byte"))?;
             return Ok(Bson::RegularExpression(bson::Regex {
                 pattern,
-                options: String::new(),
+                options: bson::raw::cstr!("").into(),
             }));
         }
     }
@@ -2804,12 +2809,28 @@ mod eq_operator_tests {
             .expect("$all");
         match &all[0] {
             Bson::RegularExpression(r) => {
-                assert_eq!(r.pattern, "^ba");
+                assert_eq!(r.pattern.as_str(), "^ba");
                 // `new RegExp(atom.$regex)` passes no flags, so neither does this.
-                assert_eq!(r.options, "");
+                assert_eq!(r.options.as_str(), "");
             }
             other => panic!("expected a regex, got {other:?}"),
         }
+    }
+
+    /// A regex atom with a NUL byte is an internal error, as it is upstream, and not a panic.
+    #[test]
+    fn a_regex_atom_with_a_nul_byte_is_refused() {
+        let mut regex = ParseMap::new();
+        regex.insert("$regex".to_string(), ParseValue::String("a\0b".to_string()));
+
+        let mut query = Query::default();
+        query.push(Clause::Field(Constraint {
+            field: "tags".into(),
+            comparison: Comparison::All(vec![ParseValue::Object(regex)]),
+        }));
+
+        let err = transform_where(&schema(), &query).expect_err("a NUL cannot be encoded");
+        assert_eq!(err.code, ParseError::internal("").code);
     }
 
     /// A `$`-carrying nested key is refused on a write, and the query path still accepts one.
@@ -3076,8 +3097,9 @@ mod eq_operator_tests {
         assert_eq!(
             find.get_document("loc")
                 .expect("loc")
-                .get_f64("$maxDistance"),
-            Ok(1.0)
+                .get_f64("$maxDistance")
+                .ok(),
+            Some(1.0)
         );
     }
 

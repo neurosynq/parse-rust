@@ -20,6 +20,8 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
   time. No wire change.
 - **`bcrypt` 0.15 to 0.19.** Hashing and verification still truncate at 72 bytes, as
   parse-server's bcrypt does, and hashes still verify in both directions against parse-server's.
+- **`bson` 2 to 3**, with the `mongodb` driver switched to its bson 3 support. Stored documents and
+  query encoding are unchanged.
 
 ## 0.3.0
 
