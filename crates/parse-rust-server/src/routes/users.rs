@@ -2,9 +2,11 @@
 //!
 //! Upstream: `src/Routers/UsersRouter.js`. Three facts shape this module.
 //!
-//! - **`POST /users` is not `POST /classes/_User`.** Only the signup route returns a session
-//!   token. A non-master **create or delete** through the class route is refused; an **update** is
-//!   allowed, because that is what `user.save()` sends. See `classes::enforce_class_security`.
+//! - **Both create routes mint a session by one rule.** A `_User` created through `POST /users` or
+//!   `POST /classes/_User` gets a session unless its installation id is `cloud`, which a master
+//!   request without the header has; see [`mint_create_session`]. A non-master **create or delete**
+//!   through the class route is refused; an **update** is allowed, because that is what
+//!   `user.save()` sends. See `classes::enforce_class_security`.
 //! - **The password hash must never reach a response.** Upstream reattaches the hash onto the
 //!   object as `password` and strips it in exactly one place, so every response path depends on
 //!   that one step running. Here the hash is never placed on a response object at all, so there
@@ -553,16 +555,7 @@ pub async fn signup_core(
             .await
             .map_err(map_duplicate)?;
 
-    let session = create_session(
-        state.storage(),
-        &state.config().session,
-        NewSession {
-            user_object_id: &created.object_id,
-            created_with: Some(CreatedWith::signup(None)),
-            installation_id: rc.installation_id.as_deref(),
-        },
-    )
-    .await?;
+    let token = mint_create_session(state, rc, authority, &created.object_id).await?;
 
     // Server-set fields, defaults among them, join the response before the token, as upstream's
     // `_updateResponseWithData` runs in `runDatabaseOperation` and the token is added after.
@@ -571,10 +564,46 @@ pub async fn signup_core(
         "createdAt": created.created_at.to_iso(),
     });
     crate::routes::classes::merge_echo(&mut out, created.echoed, rc, USER_CLASS);
-    if let Json::Object(map) = &mut out {
-        map.insert("sessionToken".into(), Json::String(session.session_token));
+    if let (Json::Object(map), Some(token)) = (&mut out, token) {
+        map.insert("sessionToken".into(), Json::String(token));
     }
     Ok(out)
+}
+
+/// `createSessionTokenIfNeeded` on a `_User` create, through either route: the session's token, or
+/// `None` when upstream mints none.
+///
+/// Upstream skips a request whose installation id is `cloud` (`RestWrite.js:1175-1177`), and a
+/// master or maintenance request that sent no `X-Parse-Installation-Id` has exactly that id,
+/// because `handleParseAuth` resolves those keys with `installationId: ... || 'cloud'`
+/// (`middlewares.js:500`) before `handleParseHeaders` runs. Measured at the pin: a master create
+/// with no installation id answers no token and writes no `_Session` row; with one, it answers a
+/// token and writes the row; a client create always does.
+pub(crate) async fn mint_create_session(
+    state: &AppState,
+    rc: &RequestContext,
+    authority: &Authority,
+    user_object_id: &str,
+) -> Result<Option<String>, ParseError> {
+    let installation_id = match rc.installation_id.as_deref() {
+        Some(id) => Some(id),
+        None if authority.is_privileged() => Some("cloud"),
+        None => None,
+    };
+    if installation_id == Some("cloud") {
+        return Ok(None);
+    }
+    let session = create_session(
+        state.storage(),
+        &state.config().session,
+        NewSession {
+            user_object_id,
+            created_with: Some(CreatedWith::signup(None)),
+            installation_id,
+        },
+    )
+    .await?;
+    Ok(Some(session.session_token))
 }
 
 /// `transformUser` for a create, as a [`parse_rust_rest::BeforeInsert`]: the identity checks, then

@@ -80,6 +80,11 @@ whose name a client could use.
 
 ### Changed
 
+- **A `_User` create mints a session by upstream's rule on both routes**: unless its installation
+  id is `cloud`, which a master or maintenance request without `X-Parse-Installation-Id` has. A
+  master `POST /classes/_User` with an installation id now answers a `sessionToken`, and a master
+  `POST /users` without one no longer does.
+
 - **A signup applies the class's default ACL and the schema's defaults before hashing and the
   owner's ACL**, as upstream does: a `password` field can be required, a class default ACL is kept
   with the owner's entry added to it, and a missing required field is reported before a taken

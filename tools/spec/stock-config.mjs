@@ -94,7 +94,7 @@ const EXPECTED = {
   'I11 ACL operations': 28,
   'I12 read path order': 38,
   'I13 body credentials': 42,
-  'I14 routes and write order': 94,
+  'I14 routes and write order': 102,
   'I15 read parity': 62,
 };
 
@@ -1389,6 +1389,20 @@ async function gateI14RoutesAndWriteOrder(servers) {
     eq(`${who}: a signup echoes an applied default before the token`, J(Object.keys(defaulted.body ?? {})), J(['objectId', 'createdAt', field, 'sessionToken']));
     eq(`${who}: with its value`, defaulted.body?.[field], 'anon');
     await call({ method: 'PUT', path: '/schemas/_User', headers: master(), body: { className: '_User', fields: { [field]: { __op: 'Delete' } } } });
+
+    // A `_User` create mints a session unless its installation id is `cloud`, which a master
+    // request without the header has.
+    const created = async (path, headers, name) => {
+      const r = await call({ method: 'POST', path, headers, body: { username: `${name}_${sfx}`, password: PASSWORD } });
+      return `${r.status} ${typeof r.body?.sessionToken}`;
+    };
+    eq(`${who}: a master create through /classes with no installation id mints no session`,
+      await created('/classes/_User', master(), 'mc1'), '201 undefined');
+    eq(`${who}: one with an installation id does`,
+      await created('/classes/_User', { ...master(), 'X-Parse-Installation-Id': `i-${sfx}` }, 'mc2'), '201 string');
+    eq(`${who}: a master signup with no installation id mints none`,
+      await created('/users', master(), 'mc3'), '201 undefined');
+    eq(`${who}: a client signup always does`, await created('/users', {}, 'mc4'), '201 string');
 
     // Login over GET, and a body key login never reads.
     const user = await signUp(server, 'i14');

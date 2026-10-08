@@ -234,6 +234,14 @@ pub async fn create_core(
         "createdAt": res.created_at.to_iso(),
     });
     merge_echo(&mut out, res.echoed, rc, class_name);
+    // A `_User` created through this route gets a session as a signup does, by the same rule.
+    if class_name == crate::routes::users::USER_CLASS {
+        let token =
+            crate::routes::users::mint_create_session(state, rc, authority, &res.object_id).await?;
+        if let (Json::Object(map), Some(token)) = (&mut out, token) {
+            map.insert("sessionToken".into(), Json::String(token));
+        }
+    }
     Ok(out)
 }
 
