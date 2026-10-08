@@ -212,7 +212,6 @@ pub async fn create_core(
         // usernames and malformed email addresses that `POST /users` refuses. The dashboard
         // creates users through this route. There is no self to exclude on a create, which is
         // what the empty objectId means here.
-        crate::routes::users::prepare_user_write(&mut body, true).await?;
     }
     let ctx = rc.ctx(state.storage());
     // The identity validation runs inside the create, after defaults; see `identity_check`.
@@ -305,16 +304,23 @@ async fn update_inner(
         crate::routes::users::require_update_credentials(&body)?;
         crate::routes::users::enforce_user_update_policy(&body, rc, authority, object_id)?;
         crate::routes::users::owner_update_gate(state, rc, authority, object_id)?;
-        crate::routes::users::validate_user_identity(state, rc, &body, object_id).await?;
-        crate::routes::users::force_owner_into_acl(
-            &mut body,
-            object_id,
-            authority.is_privileged(),
-        )?;
-        crate::routes::users::prepare_user_write(&mut body, false).await?;
     }
+    // `transformUser`, after the schema and required-field checks as upstream orders them: the
+    // identity checks, the owner's ACL entry, and the password hash.
+    let privileged = authority.is_privileged();
+    let step: Option<parse_rust_rest::BeforeInsert<'_>> = is_user.then(|| {
+        let step: parse_rust_rest::BeforeInsert<'_> = Box::new(move |mut body| {
+            Box::pin(async move {
+                crate::routes::users::validate_user_identity(state, rc, &body, object_id).await?;
+                crate::routes::users::force_owner_into_acl(&mut body, object_id, privileged)?;
+                crate::routes::users::prepare_user_write(&mut body, false).await?;
+                Ok(body)
+            })
+        });
+        step
+    });
     let ctx = rc.ctx(state.storage());
-    let res = parse_rust_rest::update(&ctx, class_name, object_id, body)
+    let res = parse_rust_rest::update_checked(&ctx, class_name, object_id, body, step)
         .await
         // **`_User` only.** The relabelling turns a duplicate-key error into 202 or 203 by reading
         // the index name, and an ordinary class is free to carry its own unique index called
@@ -392,11 +398,21 @@ pub async fn delete_core(
                 ))
             }
             Some(uid) if uid != object_id => {
+                // The class's CLP is checked before the row is looked for, so a CLP that denies
+                // `delete` answers 119 before the not-found becomes `SESSION_MISSING`.
+                parse_rust_rest::validate_permission(
+                    rc.snapshot.clp(class_name),
+                    class_name,
+                    &rc.scope.acl_group(),
+                    parse_rust_core::Operation::Delete,
+                    None,
+                    rc.options.error_detail,
+                )?;
                 return Err(crate::routes::users::as_session_missing(
                     ParseError::new(ErrorCode::ObjectNotFound, "Object not found."),
                     rc,
                     authority,
-                ))
+                ));
             }
             Some(_) => {}
         }

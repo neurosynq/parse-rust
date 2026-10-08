@@ -38,7 +38,9 @@
  *
  * With neither available the gate fails rather than skipping, and names the one-line fix.
  *
- * Every assertion here holds against parse-server, so a failure means parse-rust diverged.
+ * Every assertion here runs against both servers. Almost all expect the same answer from each, so a
+ * failure means parse-rust diverged; the few where parse-rust deliberately differs state each
+ * server's answer, so they also catch parse-server changing.
  *
  * Usage:
  *   node tools/spec/stock-config.mjs <mongo-uri> [appId] [masterKey]
@@ -93,7 +95,7 @@ const EXPECTED = {
   'I12 read path order': 38,
   'I13 body credentials': 42,
   'I14 routes and write order': 94,
-  'I15 read parity': 58,
+  'I15 read parity': 62,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
@@ -1651,6 +1653,12 @@ async function gateI15ReadParity(servers) {
     eq(`${who}: $exists given an object on a plain field`,
       error(await call({ path: `/classes/${C}?where=${e({ n: { $exists: {} } })}` })),
       '400 107 bad atom: {}');
+    eq(`${who}: a non-string $regex is refused before its options`,
+      error(await call({ path: `/classes/${C}?where=${e({ n: { $regex: 3, $options: 'z' } })}` })),
+      '400 102 $regex value must be a string');
+    eq(`${who}: a protected field beside a malformed $or is refused for the field first`,
+      error(await call({ path: `/classes/_User?where=${e({ email: 'x', $or: 5 })}` })),
+      '400 119 Permission denied');
     eq(`${who}: an invalid key name is reported before its malformed operand`,
       error(await call({ path: `/classes/${C}?where=${e({ 'bad-key': { $in: 5 } })}` })),
       '400 105 Invalid key name: bad-key');

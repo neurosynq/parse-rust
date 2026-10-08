@@ -145,7 +145,12 @@ pub fn resolve_with_peer(
 ) -> Result<Authority, HeaderRejection> {
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
 
-    let installation_id = get(headers::INSTALLATION_ID).map(str::to_string);
+    // An empty id is no id: upstream's session code tests it for truthiness before using it
+    // (`RestWrite.js:1216-1218`, `:1260-1262`), so two logins sending an empty header do not
+    // replace each other's sessions as duplicates.
+    let installation_id = get(headers::INSTALLATION_ID)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     // Empty is absent: upstream builds an anonymous `Auth` on `!info.sessionToken`
     // (`middlewares.js:281-287`), so a blank header is not a token to look up and fail.
     let session_token = get(headers::SESSION_TOKEN)

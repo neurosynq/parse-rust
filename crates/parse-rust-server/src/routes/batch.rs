@@ -254,10 +254,7 @@ async fn run_one(
     // As over HTTP: a read that reached a class the batch's snapshot predates runs again on a
     // rebuilt one. Only that sub-request; the others keep the snapshot they share.
     if matches!(&outcome, Err(RouteError::Parse(e)) if e.is_schema_stale()) {
-        outcome = match state
-            .request_context(authority, crate::schema_cache::Freshness::Reload)
-            .await
-        {
+        outcome = match rc.with_rebuilt_schemas(state).await {
             Ok(fresh) => dispatch::dispatch(state, &fresh, authority, &incoming).await,
             Err(e) => Err(RouteError::Parse(e)),
         };

@@ -55,15 +55,14 @@ impl AccountLockout {
     }
 }
 
-/// One login attempt per account at a time, in this process.
+/// One login attempt per identifier at a time, in this process.
 ///
-/// The lockout is specified as a sequence of attempts, and this lock is what makes concurrent
-/// attempts on one account count as that sequence: it is held from before the password compare to
-/// after the bookkeeping, so a client sending in sequence sees exactly what it saw without it. It
-/// does not span a fleet; two nodes still race each other on the same two columns.
+/// Attempts on one account are handled one at a time, so they count as a sequence. The gate is held
+/// from before the password compare to after the bookkeeping, so a client sending in sequence sees
+/// exactly what it saw without it.
 ///
-/// Keyed by username alone, so two apps in one process that share a username serialize each other's
-/// logins. That costs time and decides nothing.
+/// Keyed by a hash of the identifier, so two apps in one process that share a username, or two
+/// identifiers sharing a hash, wait for each other. That costs time and decides nothing.
 pub async fn serialize_attempts(username: &str) -> tokio::sync::OwnedMutexGuard<()> {
     // Keyed by a hash of the identifier, not the identifier: a login names whatever it likes, and a
     // map holding each one held as much memory as the requests sent. Two identifiers sharing a hash

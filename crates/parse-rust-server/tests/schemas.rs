@@ -968,7 +968,7 @@ async fn a_non_string_class_name_in_the_body_is_a_mismatch() {
 ///
 /// **This does not assert byte fidelity, and must not be read as doing so.** A value carrying a
 /// `__type` envelope is decoded before it reaches storage, so an offset instant arrives as UTC and
-/// an extra envelope key is already gone. That is an open parity gap recorded in the register; what
+/// an extra envelope key is already gone. That is an open parity gap; what
 /// this covers is that nothing further is applied on the way down.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]

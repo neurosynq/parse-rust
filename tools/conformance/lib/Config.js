@@ -1,12 +1,12 @@
 'use strict';
 // `../lib/Config` for the vendored specs. Everything throws except the one shim 0.3.0 permits:
 // `Config.get(appId).database.loadSchema()`, whose `addClassIfNotExists` and `updateClass` become
-// `POST` and `PUT /schemas/:className` with the master key (Gate G). Those two are
+// `POST` and `PUT /schemas/:className` with the master key. Those two are
 // setup calls in the specs that use them, declaring a class and its CLP before asserting over
 // HTTP, and the schema API is the same operation upstream's controller performs.
 //
-// `schemaCache.clear()` is a no-op: parse-rust loads the schema on every request and has no cache
-// to clear, and the oracle's cache is updated by its own schema route.
+// `schemaCache.clear()` is a no-op: the shim's writes go through each server's schema routes, which
+// refresh that server's own cache, and the harness's reset between blocks clears it.
 //
 // Any other property throws, so a spec reaching further into the controller reports `not-run`
 // loudly rather than being quietly satisfied.

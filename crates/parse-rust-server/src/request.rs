@@ -34,6 +34,7 @@ use crate::schema_cache::{Freshness, SchemaCache};
 /// Owned rather than borrowed because [`Ctx`] borrows all three and a handler needs somewhere to
 /// keep them. Build it once at the top of a route, hand out [`RequestContext::ctx`] as often as
 /// needed.
+#[derive(Clone)]
 pub struct RequestContext {
     /// Shared with the schema cache and every other request served from the same entry. Never
     /// mutated: a request that needs a different schema gets a different snapshot.
@@ -57,6 +58,19 @@ impl RequestContext {
     pub fn ctx<'a>(&'a self, storage: &'a MongoAdapter) -> Ctx<'a, MongoAdapter> {
         Ctx::new(storage, &self.snapshot, &self.scope, &self.options)
             .maintenance(self.is_maintenance)
+    }
+
+    /// The same request on a rebuilt schema snapshot: everything about who is asking stays as it
+    /// was resolved. A read rerun after reaching a class its snapshot predated needs only the
+    /// schema; resolving the session again would see a logout an earlier sub-request of the same
+    /// batch made, which upstream's single resolution never does.
+    pub async fn with_rebuilt_schemas(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<RequestContext, ParseError> {
+        let mut fresh = self.clone();
+        fresh.snapshot = state.schema_snapshot(Freshness::Reload).await?;
+        Ok(fresh)
     }
 
     /// Is this a master or maintenance request?

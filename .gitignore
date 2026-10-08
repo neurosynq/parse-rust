@@ -29,3 +29,4 @@ logs/
 
 # parse-server log output from spec runs (its `logsFolder` in spec/helper.js).
 test_logs/
+__pycache__/

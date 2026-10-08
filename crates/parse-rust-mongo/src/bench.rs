@@ -1,8 +1,8 @@
 //! Per-request database time, for the benchmark harness. Compiled only with the
 //! `bench-instrumentation` feature.
 //!
-//! **The boundary is the driver's command monitoring** (the benchmark design, section
-//! 8.2): a command's interval runs from `CommandStarted` to `CommandSucceeded` or `CommandFailed`,
+//! **The boundary is the driver's command monitoring**, the same on both benchmark targets: a
+//! command's interval runs from `CommandStarted` to `CommandSucceeded` or `CommandFailed`,
 //! paired by request id. That covers the network and the database's own execution and excludes
 //! the Parse-to-BSON transform and the post-processing on either side, which are server work and
 //! are where a difference between the two servers would be. It is the same boundary parse-server

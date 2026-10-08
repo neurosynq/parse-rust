@@ -493,7 +493,7 @@ pub async fn signup_core(
     // `handleCreate`'s guard runs in the router, ahead of the `RestWrite` constructor and its
     // objectId policy (`ClassesRouter.js:111-118`, `RestWrite.js:50-65`).
     reject_role_prefixed_object_id(body, rc)?;
-    let mut body = parse_rust_rest::decode_write_body(body, parse_rust_core::op::OpPath::Create)?;
+    let body = parse_rust_rest::decode_write_body(body, parse_rust_core::op::OpPath::Create)?;
     // A signup body must not carry a `_hashed_password` of the caller's choosing.
     parse_rust_rest::reject_reserved_keys_in(body.keys().map(String::as_str))?;
     // Signup is a create like any other, so the objectId policy applies to it
@@ -545,9 +545,8 @@ pub async fn signup_core(
     // returning undefined achieves.
     //
     // Run by the pipeline once the schema's defaults and required fields are applied, as
-    // `transformUser` follows `setRequiredFieldsIfNeeded`, so a defaulted email is validated too.
-    prepare_user_write(&mut body, true).await?;
-
+    // `transformUser` follows `setRequiredFieldsIfNeeded`, so a defaulted email is validated too,
+    // and the password is hashed and the owner's ACL added only then. See `identity_check`.
     let ctx = rc.ctx(state.storage());
     let created =
         parse_rust_rest::create_checked(&ctx, USER_CLASS, body, Some(identity_check(state, rc)))
@@ -578,13 +577,18 @@ pub async fn signup_core(
     Ok(out)
 }
 
-/// The `_User` identity validation, as a [`parse_rust_rest::BeforeInsert`] for a create.
+/// `transformUser` for a create, as a [`parse_rust_rest::BeforeInsert`]: the identity checks, then
+/// the password hash and the owner's ACL, on the body as the schema's defaults left it.
 pub(crate) fn identity_check<'a>(
     state: &'a AppState,
     rc: &'a RequestContext,
 ) -> parse_rust_rest::BeforeInsert<'a> {
-    Box::new(move |body| {
-        Box::pin(async move { validate_user_identity(state, rc, &body, "").await })
+    Box::new(move |mut body| {
+        Box::pin(async move {
+            validate_user_identity(state, rc, &body, "").await?;
+            prepare_user_write(&mut body, true).await?;
+            Ok(body)
+        })
     })
 }
 
@@ -743,11 +747,12 @@ pub async fn login_core(
     // measurable across a network, so the shared error message stops hiding which accounts exist.
     // Upstream runs the same dummy compare in both branches (`UsersRouter.js:112-118`, `:132-136`).
     //
-    // **And both wait the same way.** With `accountLockout` on, attempts on one account are
-    // serialized (see `serialize_attempts`). A login that finds no account takes the same kind of
-    // gate, keyed on what was submitted, so a burst of concurrent attempts queues identically
-    // whether or not the account exists. Taking it only for a real account made a burst on a real
-    // name measurably slower than one on a made-up name, which told a caller which names exist.
+    // **And both queue.** With `accountLockout` on, attempts on one account are serialized (see
+    // `serialize_attempts`). A login that finds no account takes the same kind of gate, keyed on
+    // what was submitted, so concurrent attempts on a made-up name queue as attempts on a real one
+    // do. The queues are close, not identical: an attempt on a real account also holds the gate
+    // for its lockout bookkeeping. Taking the gate only for a real account made the difference
+    // the whole compare.
     let Some(row) = row else {
         let _attempt = match &state.config().account_lockout {
             Some(_) => Some(crate::lockout::serialize_attempts(&submitted).await),

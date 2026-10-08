@@ -70,9 +70,11 @@ a real parse-server and cannot run:
 
 - Gate B, data fidelity, which boots one on the same database.
 - Gate D, shared auth state, likewise.
-- Gate E, stock configuration, which boots four servers of its own.
+- Gates E and I, stock configuration, which boot servers of their own at several configurations.
 - The upstream half of Gate C, which is the half that makes it a comparison rather than a
   self-check. CI runs the parse-rust half only.
+- Gate F, upstream's own spec files, and Gate H, its reconfigure control plane, both of which run
+  against parse-server built at the pin as well as against parse-rust.
 - The differentials that compare against upstream's own modules: bcrypt interop, the
   `MongoTransform` oracle and the `_SCHEMA` format oracle.
 
@@ -88,15 +90,18 @@ bcrypt interop, the Parse/BSON transform and the `_SCHEMA` type strings are all 
 actual parse-server behavior rather than against expectations someone typed in. More than one bug
 in this codebase was found that way and would not have been found otherwise.
 
-Four of the five acceptance gates drive the whole flow through the unmodified Parse SDK. **Gate E
-is the exception and has to be**: it selects the socket's source address per request, which the SDK
-gives no way to do, so it speaks raw `node:http`. Gate A is the
-signup-to-logout flow; Gate B compares stored BSON types against a real parse-server on the same
-database; Gate C replays the authorization model against both servers and requires them to agree
-assertion for assertion; Gate D puts both servers on one database and checks that sessions, roles
-and `_SCHEMA` documents cross; Gate E boots its own servers at two configurations and from two
-source addresses, because the decisions it covers depend on both. If you change behavior a client
-can observe, a gate should notice.
+Gates A to D drive the whole flow through the unmodified Parse SDK. **Gates E and I are the
+exception and have to be**: they select the socket's source address per request, which the SDK gives
+no way to do, so they speak raw `node:http`. Gate A is the signup-to-logout flow; Gate B compares
+stored BSON types against a real parse-server on the same database; Gate C replays the authorization
+model against both servers and requires them to agree assertion for assertion; Gate D puts both
+servers on one database and checks that sessions, roles and `_SCHEMA` documents cross; Gates E and I
+boot their own servers at several configurations and from two source addresses, and run each
+assertion against both, stating each server's answer where parse-rust deliberately differs. Gate F
+runs upstream's own spec files against both servers; Gate H checks the reconfigure control plane
+they use; Gate J benchmarks the two (`tools/bench/gate-j.sh`); Gate K brings the demo up from a
+fresh clone (`tools/demo/check.sh`). If you change behavior a client can observe, a gate should
+notice.
 
 Three rules they live by, all of them scars. **Assert that a caller can see its own data before
 asserting it cannot see anyone else's**, or a server that hides everything passes. **Each gate

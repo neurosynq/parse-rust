@@ -149,8 +149,14 @@ pub fn parse_client_where(where_json: &Json) -> ParsedWhere {
         }
         other => other,
     };
-    if let Some(op) = malformed_logical(object) {
-        return deferred(DeferredWhere::MalformedLogical(op));
+    // The shape stays, so a protected key beside the malformed operator is still refused first,
+    // as `denyProtectedFields` checks a level's keys before that level's operators
+    // (`RestQuery.js:942-967`).
+    if let Some(message) = malformed_logical(object) {
+        return ParsedWhere {
+            clauses: shape_of(object),
+            deferred: Some(DeferredWhere::MalformedLogical(message)),
+        };
     }
     parse_where(object).unwrap_or_else(|e| ParsedWhere {
         clauses: shape_of(object),
@@ -396,7 +402,13 @@ fn parse_operators(
     // `validateQuery` checks `$options` whenever `$regex` is present at all
     // (`DatabaseController.js:169-178`), before any operand is converted, so these refusals
     // precede every operand's.
-    if regex.is_some() {
+    if let Some(regex) = regex {
+        // The pattern's type first, then the options' (`DatabaseController.js:166-178`).
+        if !regex.is_string() {
+            return Err(ParseError::invalid_query(
+                "$regex value must be a string".to_string(),
+            ));
+        }
         match options {
             Some(Json::String(o)) => {
                 if !o.chars().all(|c| matches!(c, 'i' | 'm' | 'x' | 's' | 'u')) || o.is_empty() {
@@ -436,13 +448,9 @@ fn parse_operators(
             continue;
         }
         if op == "$regex" {
+            // Its type was checked above, as `validateQuery` checks it.
             let Json::String(pattern) = operand else {
-                // `'bad regex: ' + s`, JavaScript's string conversion of whatever was sent.
-                let raw = parse_rust_core::classify_raw(operand.clone())?;
-                return Err(ParseError::invalid_json(format!(
-                    "bad regex: {}",
-                    parse_rust_core::js_number::to_ecma_display(&raw)
-                )));
+                continue;
             };
             let options = match options {
                 Some(Json::String(o)) => Some(o.clone()),
@@ -806,8 +814,11 @@ mod tests {
     #[test]
     fn regex_rejects_a_non_string_pattern_and_bad_options() {
         let e = parse_where(&j(r#"{"title":{"$regex":3}}"#)).unwrap_err();
-        assert_eq!(e.code, ErrorCode::InvalidJson);
-        assert_eq!(e.message, "bad regex: 3");
+        assert_eq!(e.code, ErrorCode::InvalidQuery);
+        assert_eq!(e.message, "$regex value must be a string");
+        // The pattern is checked before the options.
+        let e = parse_where(&j(r#"{"title":{"$regex":3,"$options":"z"}}"#)).unwrap_err();
+        assert_eq!(e.message, "$regex value must be a string");
         let e = parse_where(&j(r#"{"title":{"$regex":"a","$options":"z"}}"#)).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidQuery);
         assert!(e.message.contains("Bad $options value for query: z"));

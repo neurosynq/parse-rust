@@ -70,7 +70,7 @@ const FLOORS = {
   // Not in the original target set; added once `$text` landed, at its executable count.
   'ParseQuery.FullTextSearch.spec.js': 11,
 };
-// Gate G. A floor counts executed blocks, so it cannot say a file is green; this does.
+// A floor counts executed blocks, so it cannot say a file is green; this list does.
 const MUST_BE_GREEN = ['ParseGeoPoint.spec.js'];
 const WORK = path.join(REPO, 'target/conformance', TAG);
 
@@ -343,7 +343,7 @@ async function startRust(dbUri) {
         const key = Object.keys(flat).find(k => MAPPED[k] && Object.keys(MAPPED[k](flat[k])).some(v => reason.includes(v)));
         throw new Error(`reconfigure: parse-rust refused option '${key ?? 'unknown'}' at boot: ${reason}`);
       }
-      // Condition 2: every mapped key reads back as asked, so nothing was dropped on the way. A
+      // Every mapped key must read back as asked, so nothing was dropped on the way. A
       // mismatch restores the previous configuration before refusing, so later blocks do not run
       // on a configuration nobody asked for.
       const resolved = await (await fetch(`${current.base}/_control/config`)).json();
@@ -567,19 +567,18 @@ function notRunReason(r) {
 }
 
 /**
- * Every not-run reason but `upstream-skipped` must point at a register row or an upstream issue.
+ * Every not-run reason but `upstream-skipped` must point at an exclusion row or an upstream issue.
  *
  * - An issue is named in full, `parse-community/parse-server#NNNN`. A bare `#NNNN` is not
  *   enough: test names carry them (`regression test #1489`).
  * - A row is named as `scope exclusion: <the row's bold lead>`, and the lead must open a table row
- *   in the register (`| **<lead>**`), not merely appear somewhere in bold.
+ *   (`| **<lead>**`) in the exclusion register, not merely appear somewhere in bold.
  *
- * The register is kept with the development tree, so a checkout without it can check the form
- * only. That is the public tree, and it is why exclusions are reviewed where the register is.
+ * The register is a Markdown file named by `CONFORMANCE_REGISTER`. Without one, only the form of
+ * each reason is checked.
  */
-// The register lives with the development tree and does not cross to the public one.
-const REGISTER = path.join(REPO, 'docs', 'divergences.md');
-const registerText = fs.existsSync(REGISTER) ? fs.readFileSync(REGISTER, 'utf8') : null;
+const REGISTER = process.env.CONFORMANCE_REGISTER || null;
+const registerText = REGISTER && fs.existsSync(REGISTER) ? fs.readFileSync(REGISTER, 'utf8') : null;
 function authorized(reason) {
   if (reason === 'upstream-skipped') { return true; }
   if (/parse-community\/parse-server#\d+/.test(reason)) { return true; }
@@ -606,7 +605,7 @@ function judgeRust(results, stats, server) {
       row.failure_class = failureClass(r, server);
       row.failure = r.failures[0]?.slice(0, 300);
     }
-    // Condition 3, both directions, against what parse-rust itself counted.
+    // Each block's subject, checked both ways against what parse-rust itself counted.
     const seen = stats[r.key]?.body ?? 0;
     row.server_body_requests = seen;
     if (outcome === 'pass' && known.subject === 'server-dependent' && seen === 0) {
@@ -627,7 +626,7 @@ function judgeRust(results, stats, server) {
       problem(`[floors] ${file}: inventory floor ${inventory.files[file].floor} is below the committed ${floor}`);
     }
   }
-  // Gate G: these files are green(mongo), every committed block executed and passed.
+  // These files must be green(mongo): every committed block executed and passed.
   for (const file of MUST_BE_GREEN.filter(f => files.includes(f))) {
     const mine = rows.filter(x => x.file === file);
     const bad = mine.filter(x => x.outcome !== 'pass');
@@ -635,7 +634,7 @@ function judgeRust(results, stats, server) {
       problem(`[green] ${file} must be green(mongo): ${bad.length} of ${mine.length} blocks did not pass${bad[0] ? `, first: ${bad[0].name}` : ''}`);
     }
   }
-  // Condition 1: executed blocks at or above each committed floor.
+  // Executed blocks at or above each committed floor.
   for (const [file, spec] of Object.entries(inventory.files).filter(([f]) => files.includes(f))) {
     const executed = rows.filter(x => x.file === file && x.outcome !== 'not-run').length;
     if (executed < spec.floor) {
@@ -697,7 +696,7 @@ function judgeDead(results) {
 }
 
 /**
- * Condition 5, the positive control. Reported failures are not enough: a run that executed nothing,
+ * The positive control. Reported failures are not enough: a run that executed nothing,
  * left blocks pending, or failed outside any block reports no failed block at all. So every block
  * the inventory records as passing upstream must be present and passed, and the run itself must be
  * clean.

@@ -96,7 +96,7 @@ async fn run_attached(state: &AppState, authority: &Authority, incoming: Incomin
     // A read reached a class this snapshot predates. Only reads raise it, so running the request
     // again on a rebuilt snapshot repeats no write.
     if matches!(&outcome, Err(RouteError::Parse(e)) if e.is_schema_stale()) {
-        outcome = match state.request_context(authority, Freshness::Reload).await {
+        outcome = match rc.with_rebuilt_schemas(state).await {
             Ok(fresh) => dispatch::dispatch(state, &fresh, authority, &incoming).await,
             Err(e) => Err(RouteError::Parse(e)),
         };
@@ -135,6 +135,9 @@ fn effective_method(
 ) -> http::Method {
     match override_ {
         Some(axum::Extension(MethodOverride(m))) => m,
+        // Express serves HEAD with a path's GET handler and sends no body; the HTTP layer drops
+        // the body here too.
+        None if transport == http::Method::HEAD => http::Method::GET,
         None => transport,
     }
 }
@@ -246,6 +249,8 @@ pub async fn users_me(
     authority: Authority,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
+    ReadParams(params): ReadParams,
+    body: Option<Json<Json_>>,
 ) -> Response {
     // The SDK reaches this as a POST carrying `_method: "GET"`.
     let method = effective_method(transport, method);
@@ -255,8 +260,10 @@ pub async fn users_me(
         Incoming {
             method,
             route: Route::UsersMe,
-            params: Params::default(),
-            body: None,
+            // Any method but GET reaches the objectId route with `me` (see `Route::for_method`),
+            // which reads the request's parameters and body like any other.
+            params,
+            body: body.map(|b| b.0),
             path: "/users/me".to_string(),
         },
     )
@@ -480,6 +487,8 @@ pub async fn sessions_me(
     authority: Authority,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
+    ReadParams(params): ReadParams,
+    body: Option<Json<Json_>>,
 ) -> Response {
     let method = effective_method(transport, method);
     run(
@@ -488,8 +497,10 @@ pub async fn sessions_me(
         Incoming {
             method,
             route: Route::SessionsMe,
-            params: Params::default(),
-            body: None,
+            // Any method but GET reaches the objectId route with `me` (see `Route::for_method`),
+            // which reads the request's parameters and body like any other.
+            params,
+            body: body.map(|b| b.0),
             path: "/sessions/me".to_string(),
         },
     )

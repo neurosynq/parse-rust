@@ -390,8 +390,9 @@ acceptance gates are:
 Each gate carries an assertion floor and fails if it runs fewer checks than it declares, so a gate
 cannot quietly stop testing anything while still reporting green.
 
-Gates B, C, D and E also run against a real parse-server, so a failure there means parse-rust
-diverged rather than that an expectation was invented. Gate A's assertions hold against
+Gates B, C, D, E and I also run against a real parse-server, so a failure there means parse-rust
+diverged rather than that an expectation was invented. Where parse-rust deliberately differs, the
+Gate I assertion states each server's answer. Gate A's assertions hold against
 parse-server too, but it is executed only against parse-rust.
 
 What the gates do not do is check combinations. They walk stories, and the defects found late in

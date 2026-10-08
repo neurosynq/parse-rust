@@ -120,6 +120,16 @@ async fn run() -> std::io::Result<()> {
             "PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL",
         )?);
     }
+    // Sessions are always revoked when a password changes. Accepting `false` would promise an
+    // operator that they survive, and they do not.
+    if let Some(v) = env("PARSE_SERVER_REVOKE_SESSION_ON_PASSWORD_RESET") {
+        if !boolean(&v, "PARSE_SERVER_REVOKE_SESSION_ON_PASSWORD_RESET")? {
+            return Err(std::io::Error::other(
+                "PARSE_SERVER_REVOKE_SESSION_ON_PASSWORD_RESET=false is not supported by \
+                 parse-rust; a password change always revokes the user's other sessions",
+            ));
+        }
+    }
     // Change-stream invalidation is not implemented. Accepting `true` would promise a multi-node
     // deployment fresh schemas and deliver a cache that only the TTL refreshes.
     if let Some(v) = env("PARSE_SERVER_DATABASE_ENABLE_SCHEMA_HOOKS") {

@@ -2,8 +2,7 @@
  * The `node` benchmark target: parse-server at the pin, with the same database-time headers the
  * parse-rust benchmark build emits (`X-Bench-Db-Micros`, `X-Bench-Db-Ops`, `X-Bench-Db-Shape`).
  *
- * The boundary is the one the benchmark design defines for this side: the
- * driver's command monitoring, a command's interval from `commandStarted` to `commandSucceeded` or
+ * The boundary is the same as the parse-rust side's: the driver's command monitoring, a command's interval from `commandStarted` to `commandSucceeded` or
  * `commandFailed`, **attributed at `commandStarted`** through an `AsyncLocalStorage` context the
  * request middleware establishes, and **closed by `requestId`**, not by whatever context is current
  * when it completes. Commands with no request context, heartbeats and handshakes, belong to no

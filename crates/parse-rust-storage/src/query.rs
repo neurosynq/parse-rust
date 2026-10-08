@@ -129,8 +129,19 @@ impl Comparison {
                 ParseValue::Bool(b) => Comparison::Exists(b),
                 ParseValue::Number(n) => Comparison::Exists(n != 0.0),
                 ParseValue::Null => Comparison::Exists(false),
-                // Upstream refuses this as a bad atom on most fields and accepts it as `true` on an
-                // `Array` field or a dotted key (`MongoTransform.js:663-669`). It is malformed on
+                // A Parse value in envelope form is an atom upstream converts and MongoDB reads as
+                // true (`MongoTransform.js:620-640`), so it is accepted as `true`.
+                ParseValue::Object(ref map)
+                    if matches!(
+                        map.get("__type"),
+                        Some(ParseValue::String(t))
+                            if matches!(t.as_str(), "Pointer" | "Date" | "GeoPoint" | "File" | "Bytes")
+                    ) =>
+                {
+                    Comparison::Exists(true)
+                }
+                // Any other object or array: upstream refuses it as a bad atom on most fields and accepts it as `true` on an
+                // `Array` field or a dotted key (`MongoTransform.js:661-669`). It is malformed on
                 // every field, so it is refused on every field.
                 ParseValue::Object(_) | ParseValue::Array(_) => {
                     return Err(ParseError::invalid_json(format!(

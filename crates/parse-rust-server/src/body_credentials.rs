@@ -227,6 +227,12 @@ fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
         .is_some_and(|rest| rest == "/health" || rest == "/health/")
 }
 
+/// `PARSE_RUST_TRACE`, read once rather than from the environment on every request.
+fn tracing_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var("PARSE_RUST_TRACE").is_ok())
+}
+
 pub async fn extract(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let (mut parts, body) = request.into_parts();
 
@@ -361,7 +367,7 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
             parts.extensions.insert(BodyParams(map));
         }
         // A GET carries no body.
-        let trace = std::env::var("PARSE_RUST_TRACE").is_ok();
+        let trace = tracing_enabled();
         let (m, u) = (parts.method.clone(), parts.uri.clone());
         let res = next.run(Request::from_parts(parts, Body::empty())).await;
         if trace {
@@ -382,7 +388,7 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
         Ok(v) => Body::from(v),
         Err(_) => Body::from(bytes),
     };
-    let trace = std::env::var("PARSE_RUST_TRACE").is_ok();
+    let trace = tracing_enabled();
     let (m, u) = (parts.method.clone(), parts.uri.clone());
     let res = next.run(Request::from_parts(parts, body)).await;
     if trace {

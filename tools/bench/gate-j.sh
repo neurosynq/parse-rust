@@ -8,7 +8,7 @@
 # the diagnostic. A missing released binary is reported and skipped, never a failure.
 #
 # Writes the two record files and the report to $GATE_J_OUT, default target/bench/report. The
-# development tree commits its baseline by setting it to its own documents directory. The report is
+# baseline a repository commits is produced by pointing it at that directory. The report is
 # generated from the records beside it and is never edited by hand.
 #
 # Usage:

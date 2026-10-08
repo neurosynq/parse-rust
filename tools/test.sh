@@ -372,8 +372,9 @@ elif ! have_sdk; then
   skip "gate H: reconfigure control plane" "no parse SDK under $PS_ROOT/node_modules"
 else
   run "conformance: features.spec"  with_server run_features
-  # The five acceptance gates. Every assertion in them also holds against real parse-server, so a
-  # failure means parse-rust diverged rather than that the expectation was invented.
+  # The acceptance gates. Their assertions hold against real parse-server too, except the few in
+  # Gate I that state each server's answer where parse-rust deliberately differs, so a failure
+  # means parse-rust diverged rather than that the expectation was invented.
   run "gate A: SDK flow"            with_server run_gate_a
   # The second parse-rust is booted with `enableSanitizedErrorResponse` off, which is the only
   # way to exercise the detailed messages. The gate matches the upstream half to it.

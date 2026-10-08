@@ -244,7 +244,7 @@ fn zero_limit_checks<S: StorageAdapter>(
             ctx.options.error_detail,
         )?;
         // `denyProtectedFields` runs before the `limit=0` answer, so this refusal does too.
-        deny_malformed_logical(&where_, ctx.options.error_detail)?;
+        deny_malformed_logical(&where_)?;
     }
     Ok(())
 }
@@ -452,11 +452,7 @@ fn narrow_sessions(
 
 /// `checkWhere`'s refusal of a `$or`, `$and` or `$nor` that is not an array, for a caller other
 /// than master and maintenance, whether or not anything is protected (`RestQuery.js:956-963`).
-fn deny_malformed_logical(
-    where_: &ParsedWhere,
-    detail: parse_rust_core::ErrorDetail,
-) -> Result<(), ParseError> {
-    let _ = detail;
+fn deny_malformed_logical(where_: &ParsedWhere) -> Result<(), ParseError> {
     match &where_.deferred {
         // Upstream sanitizes this to `Permission denied`, which tells the client nothing about
         // its malformed query. The message says what is wrong instead.
@@ -609,7 +605,7 @@ fn plan_read<'a, S: StorageAdapter>(
                 order,
                 ctx.options.error_detail,
             )?;
-            deny_malformed_logical(&where_, ctx.options.error_detail)?;
+            deny_malformed_logical(&where_)?;
         }
         // `find` reads `query.objectId` before it loads the schema, so a null `where` fails here,
         // for every caller.
@@ -651,6 +647,7 @@ fn plan_read<'a, S: StorageAdapter>(
             // Master skips `checkWhere`; the same malformed shape is refused here with the same
             // message, where upstream answers a 500 for `$or` and `$and`.
             Some(DeferredWhere::MalformedLogical(message)) => {
+                where_.clauses.clear();
                 Err(ParseError::invalid_query(message))
             }
             // `addReadACL` assigns onto it for anyone but master; master's query has no keys.
@@ -1378,12 +1375,15 @@ pub async fn create<S: StorageAdapter>(
     create_checked(ctx, class_name, body, None).await
 }
 
-/// A check run on a create's body once its defaults and required fields are applied, before
-/// anything else about the object is checked or stored. A `_User` create's identity validation is
-/// one: upstream's `transformUser` follows `setRequiredFieldsIfNeeded` (`RestWrite.js:139-144`), so
-/// it sees the defaulted body, and a missing required field is reported before a taken username.
+/// A step run on a create's body once its defaults, required fields and the class's default ACL
+/// are applied, before anything else about the object is checked or stored, returning the body to
+/// store. A `_User` create's `transformUser` is one: it follows `setRequiredFieldsIfNeeded`
+/// (`RestWrite.js:139-144`), so its identity checks see the defaulted body, a missing required
+/// field is reported before a taken username, the password is hashed only after a `password`
+/// default or requirement was applied to the plain value, and the owner's ACL entry is added to
+/// the class's default ACL rather than replacing it.
 pub type BeforeInsert<'a> =
-    Box<dyn FnOnce(WriteBody) -> BoxFut<'a, Result<(), ParseError>> + Send + 'a>;
+    Box<dyn FnOnce(WriteBody) -> BoxFut<'a, Result<WriteBody, ParseError>> + Send + 'a>;
 
 /// [`create`], with a [`BeforeInsert`] check.
 pub async fn create_checked<S: StorageAdapter>(
@@ -1577,8 +1577,15 @@ pub async fn create_checked<S: StorageAdapter>(
         }
     }
 
-    if let Some(check) = before_insert {
-        check(body.clone()).await?;
+    if let Some(step) = before_insert {
+        body = step(body).await?;
+        // A default ACL the step extended is echoed as stored, as upstream echoes the field's
+        // final value.
+        if generated_acl.is_some() {
+            if let Some(FieldWrite::Value(acl)) = body.get("ACL") {
+                generated_acl = Some(acl.clone());
+            }
+        }
     }
 
     // **An `ACL` carrying an operation is lowered as upstream lowers it, before relation ops are
@@ -1610,7 +1617,7 @@ pub async fn create_checked<S: StorageAdapter>(
         echoed.insert("ACL".to_string(), acl);
     }
     // A default the server applied is reported as the default ACL is: both are pushed onto
-    // `fieldsChangedByTrigger` (`RestWrite.js:426-430`), which the response echoes.
+    // `fieldsChangedByTrigger` (`RestWrite.js:427-430`), which the response echoes.
     for (field, value) in defaulted {
         echoed.insert(field, value);
     }
@@ -1783,7 +1790,19 @@ pub async fn update<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     object_id: &str,
+    body: WriteBody,
+) -> Result<UpdateResponse, ParseError> {
+    update_checked(ctx, class_name, object_id, body, None).await
+}
+
+/// [`update`], with a [`BeforeInsert`] step run after the schema and the required fields are
+/// checked, as `transformUser` follows `setRequiredFieldsIfNeeded` on an update too.
+pub async fn update_checked<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    object_id: &str,
     mut body: WriteBody,
+    before_write: Option<BeforeInsert<'_>>,
 ) -> Result<UpdateResponse, ParseError> {
     let class_exists = ctx.snapshot.contains(class_name);
     let mut schema = ctx.snapshot.resolve_for_write(class_name);
@@ -1857,6 +1876,9 @@ pub async fn update<S: StorageAdapter>(
     reserve_schema(ctx, class_name, &schema, &delta.added).await?;
     apply(&mut schema, &delta);
     apply_field_options(&schema, &mut body, false)?;
+    if let Some(step) = before_write {
+        body = step(body).await?;
+    }
 
     let relation_updates = relations::collect_relation_updates(&mut body);
 
@@ -3852,5 +3874,99 @@ mod write_edge_tests {
         assert!(stored.get("ACL").is_none(), "ACL is not a stored column");
         assert!(matches!(stored.get("_rperm"), Some(ParseValue::Array(a)) if a.len() == 2));
         assert!(matches!(stored.get("_wperm"), Some(ParseValue::Array(a)) if a.len() == 1));
+    }
+}
+
+#[cfg(test)]
+mod field_option_tests {
+    use super::*;
+
+    /// A class with `d`, defaulted to `"x"`, and `r`, required.
+    fn schema() -> ClassSchema {
+        let mut s = ClassSchema::new("C")
+            .with_field("d", FieldType::String)
+            .with_field("r", FieldType::String);
+        let option = |pairs: Vec<(&str, ParseValue)>| {
+            ParseValue::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        };
+        let mut options = ParseMap::new();
+        options.insert(
+            "d".into(),
+            option(vec![("defaultValue", ParseValue::String("x".into()))]),
+        );
+        options.insert(
+            "r".into(),
+            option(vec![("required", ParseValue::Bool(true))]),
+        );
+        s.field_options = Some(options);
+        s
+    }
+
+    fn body(pairs: Vec<(&str, FieldWrite)>) -> WriteBody {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn present(r: &str) -> (&str, FieldWrite) {
+        ("r", FieldWrite::Value(ParseValue::String(r.into())))
+    }
+
+    #[test]
+    fn a_create_defaults_an_absent_or_deleted_field_and_keeps_a_null_or_empty_one() {
+        let mut absent = body(vec![present("y")]);
+        let applied = apply_field_options(&schema(), &mut absent, true).expect("applies");
+        assert!(matches!(&applied[..], [(f, ParseValue::String(v))] if f == "d" && v == "x"));
+
+        let mut deleted = body(vec![present("y"), ("d", FieldWrite::Op(Op::Delete))]);
+        apply_field_options(&schema(), &mut deleted, true).expect("applies");
+        assert!(
+            matches!(deleted.get("d"), Some(FieldWrite::Value(ParseValue::String(v))) if v == "x")
+        );
+
+        for kept in [ParseValue::Null, ParseValue::String(String::new())] {
+            let mut b = body(vec![present("y"), ("d", FieldWrite::Value(kept))]);
+            let applied = apply_field_options(&schema(), &mut b, true).expect("applies");
+            assert!(
+                applied.is_empty(),
+                "a null or empty value is not replaced by the default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_required_field_that_is_null_empty_absent_or_deleted_is_142_on_create() {
+        for r in [
+            None,
+            Some(FieldWrite::Value(ParseValue::Null)),
+            Some(FieldWrite::Value(ParseValue::String(String::new()))),
+            Some(FieldWrite::Op(Op::Delete)),
+        ] {
+            let mut b = body(vec![]);
+            if let Some(r) = r {
+                b.insert("r".into(), r);
+            }
+            let e = apply_field_options(&schema(), &mut b, true).expect_err("required");
+            assert_eq!(e.code, ErrorCode::ValidationError);
+            assert_eq!(e.message, "r is required");
+        }
+    }
+
+    #[test]
+    fn an_update_checks_only_what_it_names_and_applies_no_default() {
+        let mut untouched = body(vec![("other", FieldWrite::Value(ParseValue::Number(1.0)))]);
+        assert!(apply_field_options(&schema(), &mut untouched, false).is_ok());
+
+        let mut cleared = body(vec![("d", FieldWrite::Op(Op::Delete))]);
+        let applied = apply_field_options(&schema(), &mut cleared, false).expect("not required");
+        assert!(applied.is_empty(), "no default on an update");
+
+        for r in [
+            FieldWrite::Value(ParseValue::Null),
+            FieldWrite::Value(ParseValue::String(String::new())),
+            FieldWrite::Op(Op::Delete),
+        ] {
+            let mut b = body(vec![("r", r)]);
+            let e = apply_field_options(&schema(), &mut b, false).expect_err("required");
+            assert_eq!(e.message, "r is required");
+        }
     }
 }

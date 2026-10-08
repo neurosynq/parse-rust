@@ -80,6 +80,15 @@ whose name a client could use.
 
 ### Changed
 
+- **A signup applies the class's default ACL and the schema's defaults before hashing and the
+  owner's ACL**, as upstream does: a `password` field can be required, a class default ACL is kept
+  with the owner's entry added to it, and a missing required field is reported before a taken
+  username.
+- **`HEAD` is answered by a path's `GET` handler**, with no body, as Express answers it.
+- **An empty `X-Parse-Installation-Id` is no installation id.**
+- **`PARSE_SERVER_REVOKE_SESSION_ON_PASSWORD_RESET=false` is refused at boot**: a password change
+  always revokes the user's other sessions.
+
 - **A request's work runs to completion when its client disconnects**, as Express keeps running a
   request after its socket closes. A disconnect used to cancel it at its next step, part way through
   a write or a batch.
@@ -211,13 +220,14 @@ whose name a client could use.
 - A client delete or read is accepted only on a class whose name a client could use.
 - A malformed query is refused as one: `$or`, `$and` and `$nor` must be non-empty arrays of objects
   (102, with a message naming the problem), a lone `$options` is 102, and `$exists` given an object
-  or an array is 107 on every field. parse-server answers several of these with a 500, a
-  `Permission denied` or a widened result.
+  or an array that is not a Parse value is 107 on every field. parse-server answers several of
+  these with a 500, a `Permission denied` or a widened result.
 - The rows an `include` grafts into one response are capped at 128 MiB of JSON; past it the read
   answers the generic 500, which parse-server answers only when its response no longer fits in a
   JavaScript string.
-- A create sending `null` for a field that is both `required` and has a `defaultValue` is 142
-  `<field> is required`. parse-server answers a 500 there.
+- A create sending `null` for a field with a `defaultValue` stores the `null` (201), or answers 142
+  `<field> is required` when the field is also required. parse-server answers a 500 for both,
+  because its required-field step reads `.__op` off the `null` (`RestWrite.js:424-425`).
 - The on-demand geo index is built only for a field declared as a GeoPoint. A geo query on any
   other field fails.
 - A request naming a class the schema cache lacks and `_SCHEMA` does not have keeps the cache.
@@ -272,7 +282,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
 ### Fixed
 
 - **`masterKeyIps` is enforced, at upstream's default of `['127.0.0.1', '::1']`**
-  (`Options/Definitions.js:402-405`, `middlewares.js:452`). The option was unimplemented, and its
+  (`Options/Definitions.js:402-406`, `middlewares.js:452`). The option was unimplemented, and its
   default is a control rather than a convenience, so an absent implementation was an open one. A
   master key presented from an address outside the list is refused with upstream's bare 403
   `unauthorized` and is **not** demoted to an ordinary client request, matching upstream, which
