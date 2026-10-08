@@ -231,6 +231,15 @@ fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
         .uri
         .path()
         .strip_prefix(mount)
+        // One extra leading slash is ignored, as `allowDoubleForwardSlash` ignores it before
+        // routing, so `//health` is the health route too.
+        .map(|rest| {
+            if rest.starts_with("//") {
+                &rest[1..]
+            } else {
+                rest
+            }
+        })
         .is_some_and(|rest| rest == "/health" || rest == "/health/")
 }
 

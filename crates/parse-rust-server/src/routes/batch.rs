@@ -78,15 +78,24 @@ pub async fn handle(
     // `/batch/` and `/batch?x=1` to the handler all the same, so both are a bare 500 with nothing
     // run, after the shape checks above. Running them instead would perform writes upstream never
     // does.
-    if !original_url.ends_with(BATCH_PATH) {
+    let Some(url_prefix) = original_url.strip_suffix(BATCH_PATH) else {
         return Err(ParseError::internal(
             "internal routing problem - expected url to end with batch",
         ));
-    }
+    };
     // A second pass, as upstream's is a second loop: every path is a string before any is
     // routed or any method normalized.
     let mut parsed = Vec::with_capacity(checked.len());
     for (request, path) in checked {
+        // Upstream's prefix is the URL minus `/batch` (`batch.js:23-35`), which is the mount for
+        // every ordinary URL. Where the two differ, a sub-request must also start with the URL's
+        // own prefix: `/parse/batch/?x=/batch` leaves `/parse/batch/?x=`, which no sub-request path
+        // starts with, so upstream refuses each one before any runs.
+        if !path.starts_with(url_prefix) {
+            return Err(ParseError::invalid_json(format!(
+                "cannot route batch path {path}"
+            )));
+        }
         let routable = routable_path(path, mount_path)?;
         // `(restRequest.method || 'GET').toUpperCase()`: the nested-batch check normalizes the
         // method. Routing, below, does not. A truthy method that is not a string has no

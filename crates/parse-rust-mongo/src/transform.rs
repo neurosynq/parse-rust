@@ -227,6 +227,14 @@ fn interior_value_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
 fn interior_query_atom_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
     if let ParseValue::Object(map) = value {
         if let Some(pattern) = interior_regex(map) {
+            // `new RegExp(atom.$regex)` throws a `SyntaxError` for a pattern JavaScript cannot
+            // compile, synchronously, while the query is built: a bare 500 that comes before
+            // `$all`'s consistency check, which runs on the compiled values.
+            if !crate::js_regex::is_valid(&pattern) {
+                return Err(ParseError::internal(format!(
+                    "Invalid regular expression: /{pattern}/"
+                )));
+            }
             // A BSON regex is a pair of C strings, so a pattern with a NUL byte has no encoding.
             // Upstream's driver refuses it while serializing the read, inside the promise the read
             // path's `.catch` sanitizes, so a find answers `{"code":1,"error":"An internal server
@@ -2969,6 +2977,21 @@ mod eq_operator_tests {
 
         // Not a starts-with regex, so the `$all` check refuses it first.
         assert_eq!(all("a\0b").code, parse_rust_core::ErrorCode::InvalidJson);
+    }
+
+    /// A pattern JavaScript cannot compile is a bare internal error, before the `$all` check.
+    #[test]
+    fn an_invalid_regex_atom_is_an_internal_error_before_the_all_check() {
+        let mut regex = ParseMap::new();
+        regex.insert("$regex".to_string(), ParseValue::String("[".to_string()));
+        let mut query = Query::default();
+        query.push(Clause::Field(Constraint {
+            field: "tags".into(),
+            comparison: Comparison::All(vec![ParseValue::Object(regex)]),
+        }));
+        let err = transform_where(&schema(), &query).expect_err("refused");
+        assert_eq!(err.code, ParseError::internal("").code);
+        assert!(!err.info.at_query);
     }
 
     /// A `$`-carrying nested key is refused on a write, and the query path still accepts one.

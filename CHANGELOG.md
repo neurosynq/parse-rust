@@ -73,11 +73,14 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   same way on both sides.
 - **Paths below the mount match as parse-server's do.** One trailing slash is optional, so
   `/classes/Foo/` is `/classes/Foo`. One extra leading slash is ignored, as upstream's
-  `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes. An empty segment that
+  `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes, and `/parse//health` is
+  the health route, exempt from the body checks. An empty segment that
   remains matches no route, so `/classes//abc` is a 404 rather than a read of a class with an empty
   name.
 - **A `/batch` whose URL does not end with `/batch` is a bare 500 and runs nothing**, as upstream's
-  is, because upstream recovers its mount from that suffix. `/batch/` and `/batch?x=1` were a 404
+  is, because upstream recovers its mount from that suffix. The prefix it leaves must also start
+  every sub-request's path, so `/batch/?x=/batch` refuses its sub-requests with 107 before any
+  runs. `/batch/` and `/batch?x=1` were a 404
   in 0.3.0, and reached the handler during this release's development.
 - **An unrouted `HEAD` answers its 404 with `content-length: 0`**, as every other method does.
 - **Protected fields are left out of the database read when every row would lose them.** A read
@@ -85,7 +88,9 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   instead of reading them and stripping them afterwards. They are still stripped afterwards, so an
   adapter that ignores the new `exclude_keys` option stays correct. The projection is skipped
   wherever the set depends on the row or the caller: explicit `keys`, any `userField:` rule on the
-  class, `_User`, and the master and maintenance keys. `objectId`, `createdAt`, `updatedAt` and
+  class, `_User`, and the master and maintenance keys. It is also skipped when any protected entry
+  is not a plain top-level name, since MongoDB reads `profile.secret` as a path and refuses it
+  beside `profile`. `objectId`, `createdAt`, `updatedAt` and
   `ACL` are always read. Responses are unchanged; only what is read from the database differs.
   Measured on one machine against MongoDB 7.0.25, reading a whole class as a client with a 2 KB
   protected field: 1,000 rows went from 11.9 ms to 4.9 ms at the median, and 10,000 rows from about
@@ -98,7 +103,10 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   regexes, which upstream decides by testing the regex's JavaScript rendering for `/^\Q`, anything,
   then `\E/` (`MongoTransform.js:143-169`); a lone value must be one. So a lone `^ba` is now refused
   with 107, and an ordinary regex beside a plain value is accepted. The refusal's message renders
-  each value as JavaScript joins it, a regex as `/source/` and a nested array as its elements. This
+  each value as JavaScript joins it, a regex as `/source/` and a nested array as its elements. A
+  regex atom JavaScript cannot compile, such as `[`, is upstream's bare 500, ahead of that check,
+  because upstream compiles each atom with `new RegExp` while it builds the query; parse-rust
+  checks the pattern against JavaScript's grammar, tested against Node. This
   was listed as a known parity gap at 0.2.0.
 - **A body under the 20 MB limit is no longer refused for growing after it was parsed.** The parsed
   body was serialized again on its way to the route, which can lengthen it (`1e5` becomes

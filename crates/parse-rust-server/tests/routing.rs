@@ -83,6 +83,18 @@ async fn a_batch_url_not_ending_in_batch_runs_nothing() {
     }
     let rows = common::get(&server.host, "/classes/Quirk", &As::master()).await;
     assert_eq!(rows.results().len(), 0, "{}", rows.raw);
+    // Ends with `/batch`, but the prefix it leaves is `/parse/batch/?x=`, which no sub-request
+    // path starts with: refused before anything runs.
+    let r = common::post(&server.host, "/batch/?x=/batch", &As::master(), &body).await;
+    assert_eq!(
+        (r.status, r.body.clone()),
+        (
+            400,
+            json!({"code": 107, "error": "cannot route batch path /parse/classes/Quirk"})
+        )
+    );
+    let rows = common::get(&server.host, "/classes/Quirk", &As::master()).await;
+    assert_eq!(rows.results().len(), 0, "{}", rows.raw);
     // `//batch` still ends with `/batch`, so it runs.
     let r = common::post(&server.host, "//batch", &As::master(), &body).await;
     assert_eq!(r.status, 200, "{}", r.raw);

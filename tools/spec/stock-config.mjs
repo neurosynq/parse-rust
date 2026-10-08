@@ -92,7 +92,7 @@ const EXPECTED = {
   'I9 objectId operation': 3,
   'I10 user update authorization': 24,
   'I11 ACL operations': 28,
-  'I12 read path order': 46,
+  'I12 read path order': 48,
   'I13 body credentials': 42,
   'I14 routes and write order': 114,
   'I15 read parity': 62,
@@ -1218,6 +1218,9 @@ async function gateI12ReadPathOrder(servers) {
     // `$all` regexes must agree on being starts-with regexes, and a lone one must be one
     // (`MongoTransform.js:143-169`). A NUL in the pattern is refused by the driver, after that check
     // and inside the read path's sanitizing `.catch`.
+    // `new RegExp` compiles each atom while the query is built, before the consistency check.
+    ['an invalid regex in $all is a SyntaxError', { path: `/classes/$C?where=${e({ tags: { $all: [{ $regex: '[' }] } })}` },
+      r => `${r.status} ${J(r.body)}`, `500 ${J({ code: 1, message: 'Internal server error.' })}`],
     ['a lone plain regex in $all is refused', { path: `/classes/$C?where=${e({ tags: { $all: [{ $regex: '^ba' }] } })}` },
       error, '400 107 All $all values must be of regex type or none: /^ba/'],
     ['a NUL in a starts-with $all regex is the database refusal', { path: `/classes/$C?where=${e({

@@ -937,12 +937,20 @@ fn projected_away(
     if keys.is_some() || class_name == USER_CLASS || !plan.user_field_rules.is_empty() {
         return None;
     }
-    let fields: Vec<String> = plan
-        .strip
-        .iter()
-        .filter(|f| !ALWAYS_FETCHED.contains(&f.as_str()))
-        .cloned()
-        .collect();
+    // Only plain top-level names. A dotted entry is a path, and `profile` beside `profile.secret`
+    // is a projection MongoDB refuses as a path collision, which turned every read into an error;
+    // a `$` name is an operator to it. Any such entry is left to the strip after the query, and
+    // so is the rest of the set, since a partial projection would be reasoned about separately.
+    let plain = |f: &String| !f.is_empty() && !f.contains('.') && !f.starts_with('$');
+    if !plan.strip.iter().all(plain) {
+        return None;
+    }
+    let mut fields: Vec<String> = Vec::new();
+    for f in &plan.strip {
+        if !ALWAYS_FETCHED.contains(&f.as_str()) && !fields.contains(f) {
+            fields.push(f.clone());
+        }
+    }
     (!fields.is_empty()).then_some(fields)
 }
 
@@ -4047,6 +4055,27 @@ mod projection_exclusion_tests {
             projected_away("Post", None, Some(&plan(&[], false))),
             None,
             "empty"
+        );
+    }
+
+    /// A dotted or `$` entry is a path to MongoDB, and `profile` with `profile.secret` collides,
+    /// so a set containing one is never projected.
+    #[test]
+    fn a_set_with_a_path_is_not_projected() {
+        for strip in [
+            &["profile", "profile.secret"][..],
+            &["a.b"][..],
+            &["$x", "y"][..],
+        ] {
+            assert_eq!(
+                projected_away("Post", None, Some(&plan(strip, false))),
+                None,
+                "{strip:?}"
+            );
+        }
+        assert_eq!(
+            projected_away("Post", None, Some(&plan(&["a", "a"], false))),
+            Some(vec!["a".to_string()])
         );
     }
 

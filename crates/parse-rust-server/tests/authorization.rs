@@ -1037,3 +1037,51 @@ async fn a_malformed_clp_is_refused_and_creates_nothing() {
         );
     }
 }
+
+/// A protected set holding a path beside its root is not projected: MongoDB refuses `profile`
+/// with `profile.secret` as a path collision, which turned every client read into an error. The
+/// schema API refuses the dotted entry, so it arrives the way another fleet member would write it,
+/// straight into `_SCHEMA`. The strip after the query still applies.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_protected_path_beside_its_root_still_reads() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let created = common::post(
+        host,
+        "/classes/Nested",
+        &As::master(),
+        &json!({ "label": "kept", "profile": { "secret": "s", "open": "o" } }),
+    )
+    .await;
+    assert_eq!(created.status, 201, "{}", created.raw);
+    set_clp(
+        host,
+        "Nested",
+        json!({
+            "find": { "*": true },
+            "get": { "*": true },
+            "protectedFields": { "*": ["profile"] },
+        }),
+    )
+    .await;
+    let client = mongodb::Client::with_uri_str(common::mongo_uri())
+        .await
+        .expect("MongoDB");
+    client
+        .database(&server.database)
+        .collection::<bson::Document>("_SCHEMA")
+        .update_one(
+            bson::doc! { "_id": "Nested" },
+            bson::doc! { "$set": {
+                "_metadata.class_permissions.protectedFields": { "*": ["profile", "profile.secret"] }
+            } },
+        )
+        .await
+        .expect("write _SCHEMA");
+    let fresh = common::reboot(&server.database).await;
+    let read = get(&fresh, "/classes/Nested", &As::anonymous()).await;
+    assert_eq!(read.status, 200, "{}", read.raw);
+    assert_eq!(read.results()[0]["label"], json!("kept"));
+    assert!(read.results()[0].get("profile").is_none(), "{}", read.raw);
+}

@@ -219,3 +219,22 @@ async fn head_is_served_as_get() {
     let r = common::request(&server.host, "HEAD", "/serverInfo", &As::master(), None).await;
     assert_eq!(r.status, 200, "{}", r.raw);
 }
+
+/// `/health` is read before the body parser, and `//health` is `/health` once one leading slash is
+/// ignored, so neither refuses a malformed body.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn health_ignores_a_malformed_body_with_a_double_slash_too() {
+    let server = common::boot().await;
+    for path in ["/health", "//health"] {
+        let (status, out) = raw(
+            &server.host,
+            "POST",
+            path,
+            "application/json",
+            b"{not json".to_vec(),
+        )
+        .await;
+        assert_eq!(status, 200, "{path}: {out}");
+    }
+}

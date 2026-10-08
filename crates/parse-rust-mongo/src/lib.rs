@@ -13,6 +13,7 @@
 pub mod adapter;
 #[cfg(feature = "bench-instrumentation")]
 pub mod bench;
+mod js_regex;
 pub mod transform;
 
 pub use adapter::MongoAdapter;
