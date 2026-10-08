@@ -228,10 +228,13 @@ fn interior_query_atom_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
     if let ParseValue::Object(map) = value {
         if let Some(pattern) = interior_regex(map) {
             // A BSON regex is a pair of C strings, so a pattern with a NUL byte has no encoding.
-            // Upstream's serializer throws on it and the request is a 500; this is the same failure
-            // raised here rather than in the driver.
-            let pattern = bson::raw::CString::try_from(pattern)
-                .map_err(|_| ParseError::internal("regex pattern contains a NUL byte"))?;
+            // Upstream's driver refuses it while serializing the read, inside the promise the read
+            // path's `.catch` sanitizes, so a find answers `{"code":1,"error":"An internal server
+            // error occurred"}`. bson 3 refuses it here instead, so the error is marked as the
+            // query's own failure rather than a query-building one, or it would skip that rewrite.
+            let pattern = bson::raw::CString::try_from(pattern).map_err(|_| {
+                ParseError::internal("regex pattern contains a NUL byte").at_query()
+            })?;
             return Ok(Bson::RegularExpression(bson::Regex {
                 pattern,
                 options: bson::raw::cstr!("").into(),
@@ -307,6 +310,13 @@ fn unchanged_atom_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
         // Int32: the rule Gate B exists to protect, broken by a serializer chosen for convenience.
         other => plain_value_to_bson(other)?,
     })
+}
+
+/// `isStartsWithRegex` (`MongoTransform.js:143-150`): the regex's `toString()` contains
+/// `/^\Q`, anything, then `\E/`. A `RegExp`'s source escapes every `/` and line terminator, so the
+/// only bare slashes are the delimiters and that is a pattern opening `^\Q` and closing `\E`.
+fn is_starts_with_regex(pattern: &str) -> bool {
+    pattern.len() >= 5 && pattern.starts_with("^\\Q") && pattern.ends_with("\\E")
 }
 
 /// The `$regex` pattern of an interior `{"$regex": "..."}` atom, if that is what this object is.
@@ -393,8 +403,45 @@ fn js_join_element(value: &ParseValue) -> String {
         ParseValue::Number(n) => parse_rust_core::js_number::to_ecma_string(*n),
         ParseValue::Bool(b) => b.to_string(),
         ParseValue::Null => String::new(),
+        // Upstream joins the values *after* `transformInteriorAtom`, so a regex atom is a `RegExp`
+        // by then and renders as `/source/`.
+        ParseValue::Object(m) => match interior_regex(m) {
+            Some(pattern) => format!("/{}/", js_regex_source(&pattern)),
+            None => "[object Object]".to_string(),
+        },
         _ => "[object Object]".to_string(),
     }
+}
+
+/// `RegExp.prototype.source` for `new RegExp(pattern)`: `(?:)` for an empty pattern, a `/`
+/// outside a character class escaped unless it already is, and line terminators spelled as
+/// escapes (ECMA-262 `EscapeRegExpPattern`, as V8 implements it).
+fn js_regex_source(pattern: &str) -> String {
+    if pattern.is_empty() {
+        return "(?:)".to_string();
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    let mut in_class = false;
+    for c in pattern.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            '/' if !escaped && !in_class => out.push_str("\\/"),
+            _ => out.push(c),
+        }
+        if !escaped {
+            match c {
+                '[' => in_class = true,
+                ']' => in_class = false,
+                _ => {}
+            }
+        }
+        escaped = !escaped && c == '\\';
+    }
+    out
 }
 
 fn date_to_bson(d: &ParseDate) -> Bson {
@@ -994,38 +1041,61 @@ fn transform_where_as(
     count: bool,
 ) -> Result<Document, ParseError> {
     let mut out = Document::new();
+    // An error upstream raises only when the driver sends the query (see
+    // `ParseErrorInfo::at_query`) is held until every clause is lowered, so any error upstream
+    // throws while building the query still wins over it, as it does there.
+    let mut deferred = None;
     for clause in &query.clauses {
-        match clause {
-            // `$text` belongs to the whole filter, not to its field.
-            Clause::Field(Constraint {
-                comparison: Comparison::Text(search),
-                ..
-            }) => {
-                merge_constraint(&mut out, "$text".to_string(), text_to_bson(search)?)?;
+        match lower_clause(schema, clause, count, &mut out) {
+            Ok(()) => {}
+            Err(e) if e.info.at_query => {
+                deferred.get_or_insert(e);
             }
-            Clause::Field(constraint) => {
-                let key = storage_key(schema, &constraint.field);
-                let entry = match &constraint.comparison {
-                    Comparison::Geo(pairs) => geo_to_bson(pairs, count)?,
-                    _ => comparison_to_bson(schema, constraint)?,
-                };
-                // Several constraints on one field must merge rather than overwrite. Overwriting
-                // is the bug the `tbraun96/parse-rs` query builder shipped, and it silently drops
-                // a constraint, which broadens the result set.
-                merge_constraint(&mut out, key, entry)?;
-            }
-            Clause::Or(branches) => {
-                insert_logical(&mut out, "$or", lower_branches(schema, branches, count)?)
-            }
-            Clause::And(branches) => {
-                insert_logical(&mut out, "$and", lower_branches(schema, branches, count)?)
-            }
-            Clause::Nor(branches) => {
-                insert_logical(&mut out, "$nor", lower_branches(schema, branches, count)?)
-            }
+            Err(e) => return Err(e),
         }
     }
-    Ok(out)
+    match deferred {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+fn lower_clause(
+    schema: &ClassSchema,
+    clause: &Clause,
+    count: bool,
+    out: &mut Document,
+) -> Result<(), ParseError> {
+    match clause {
+        // `$text` belongs to the whole filter, not to its field.
+        Clause::Field(Constraint {
+            comparison: Comparison::Text(search),
+            ..
+        }) => {
+            merge_constraint(out, "$text".to_string(), text_to_bson(search)?)?;
+        }
+        Clause::Field(constraint) => {
+            let key = storage_key(schema, &constraint.field);
+            let entry = match &constraint.comparison {
+                Comparison::Geo(pairs) => geo_to_bson(pairs, count)?,
+                _ => comparison_to_bson(schema, constraint)?,
+            };
+            // Several constraints on one field must merge rather than overwrite. Overwriting
+            // is the bug the `tbraun96/parse-rs` query builder shipped, and it silently drops
+            // a constraint, which broadens the result set.
+            merge_constraint(out, key, entry)?;
+        }
+        Clause::Or(branches) => {
+            insert_logical(out, "$or", lower_branches(schema, branches, count)?)
+        }
+        Clause::And(branches) => {
+            insert_logical(out, "$and", lower_branches(schema, branches, count)?)
+        }
+        Clause::Nor(branches) => {
+            insert_logical(out, "$nor", lower_branches(schema, branches, count)?)
+        }
+    }
+    Ok(())
 }
 
 /// The branches of a logical operator, lowered the way the enclosing read is: a count's
@@ -1671,15 +1741,38 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
         // unreachable on the grounds that `ParseValue` has no regex variant, which is true of the
         // *variant* and irrelevant to the *shape*.
         Comparison::All(items) => {
-            let lowered = items
+            // Upstream maps every value first and checks the regexes after (`:743-751`). A NUL
+            // in a pattern is refused only by the driver, later still, so it waits for the check.
+            let mut lowered = Vec::with_capacity(items.len());
+            let mut deferred = None;
+            for item in items {
+                match lower(item, AtomPosition::Interior) {
+                    Ok(b) => lowered.push(b),
+                    Err(e) if e.info.at_query => {
+                        deferred.get_or_insert(e);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // `isAnyValueRegex` asks whether any value is a regex at all; `isAllValuesRegexOrNone`
+            // asks whether they agree on being a **starts-with** regex, `/^\Q...\E/`
+            // (`:143-169`). So a lone `^ba` is refused, every value a starts-with regex passes,
+            // and a plain regex beside a plain value passes too, because neither starts with.
+            let starts_with: Vec<Option<bool>> = items
                 .iter()
-                .map(|v| lower(v, AtomPosition::Interior))
-                .collect::<Result<Vec<_>, _>>()?;
-            let regexes = lowered
-                .iter()
-                .filter(|b| matches!(b, Bson::RegularExpression(_)))
-                .count();
-            if regexes > 0 && regexes != lowered.len() {
+                .map(|v| match v {
+                    ParseValue::Object(m) => interior_regex(m).map(|p| is_starts_with_regex(&p)),
+                    _ => None,
+                })
+                .collect();
+            let any_regex = starts_with.iter().any(Option::is_some);
+            let flags: Vec<bool> = starts_with.iter().map(|s| *s == Some(true)).collect();
+            let all_or_none = match flags.as_slice() {
+                [] => true,
+                [only] => *only,
+                [first, rest @ ..] => rest.iter().all(|f| f == first),
+            };
+            if any_regex && !all_or_none {
                 // Upstream appends the values through JavaScript string concatenation, so the
                 // message ends with the array rendered by `Array.prototype.join`
                 // (`MongoTransform.js:746-751`). Dropping them made the message a prefix of
@@ -1692,6 +1785,9 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
                         .collect::<Vec<_>>()
                         .join(",")
                 )));
+            }
+            if let Some(e) = deferred {
+                return Err(e);
             }
             operator("$all", Bson::Array(lowered))
         }
@@ -2793,7 +2889,10 @@ mod eq_operator_tests {
     #[test]
     fn an_all_of_regex_atoms_compiles_to_regular_expressions() {
         let mut regex = ParseMap::new();
-        regex.insert("$regex".to_string(), ParseValue::String("^ba".to_string()));
+        regex.insert(
+            "$regex".to_string(),
+            ParseValue::String("^\\Qba\\E".to_string()),
+        );
 
         let mut query = Query::default();
         query.push(Clause::Field(Constraint {
@@ -2809,7 +2908,7 @@ mod eq_operator_tests {
             .expect("$all");
         match &all[0] {
             Bson::RegularExpression(r) => {
-                assert_eq!(r.pattern.as_str(), "^ba");
+                assert_eq!(r.pattern.as_str(), "^\\Qba\\E");
                 // `new RegExp(atom.$regex)` passes no flags, so neither does this.
                 assert_eq!(r.options.as_str(), "");
             }
@@ -2817,20 +2916,31 @@ mod eq_operator_tests {
         }
     }
 
-    /// A regex atom with a NUL byte is an internal error, as it is upstream, and not a panic.
+    /// A regex atom with a NUL byte is an internal error the read path sanitizes, as upstream's is,
+    /// and only once the `$all` check has passed: upstream's driver refuses it after that check.
     #[test]
     fn a_regex_atom_with_a_nul_byte_is_refused() {
-        let mut regex = ParseMap::new();
-        regex.insert("$regex".to_string(), ParseValue::String("a\0b".to_string()));
+        let all = |pattern: &str| {
+            let mut regex = ParseMap::new();
+            regex.insert(
+                "$regex".to_string(),
+                ParseValue::String(pattern.to_string()),
+            );
+            let mut query = Query::default();
+            query.push(Clause::Field(Constraint {
+                field: "tags".into(),
+                comparison: Comparison::All(vec![ParseValue::Object(regex)]),
+            }));
+            transform_where(&schema(), &query).expect_err("refused")
+        };
 
-        let mut query = Query::default();
-        query.push(Clause::Field(Constraint {
-            field: "tags".into(),
-            comparison: Comparison::All(vec![ParseValue::Object(regex)]),
-        }));
-
-        let err = transform_where(&schema(), &query).expect_err("a NUL cannot be encoded");
+        let err = all("^\\Qa\0b\\E");
         assert_eq!(err.code, ParseError::internal("").code);
+        // Raised by the query, not while building it, so the read path sanitizes it.
+        assert!(!err.before_query().info.before_query);
+
+        // Not a starts-with regex, so the `$all` check refuses it first.
+        assert_eq!(all("a\0b").code, parse_rust_core::ErrorCode::InvalidJson);
     }
 
     /// A `$`-carrying nested key is refused on a write, and the query path still accepts one.
@@ -2876,24 +2986,46 @@ mod eq_operator_tests {
         );
     }
 
-    /// Upstream's all-or-none rule (`MongoTransform.js:746-751`), reachable now that an element
-    /// can be a regex.
+    /// Upstream's all-or-none rule (`MongoTransform.js:143-169`, `:746-751`), which is about
+    /// **starts-with** regexes, not regexes: the values must agree on being `/^\Q...\E/`, and a
+    /// lone value must be one.
     #[test]
     fn an_all_mixing_regexes_and_plain_values_is_refused() {
-        let mut regex = ParseMap::new();
-        regex.insert("$regex".to_string(), ParseValue::String("^ba".to_string()));
+        let regex = |pattern: &str| {
+            let mut m = ParseMap::new();
+            m.insert(
+                "$regex".to_string(),
+                ParseValue::String(pattern.to_string()),
+            );
+            ParseValue::Object(m)
+        };
+        let plain = || ParseValue::String("plain".to_string());
+        let lower = |values: Vec<ParseValue>| {
+            let mut query = Query::default();
+            query.push(Clause::Field(Constraint {
+                field: "tags".into(),
+                comparison: Comparison::All(values),
+            }));
+            transform_where(&schema(), &query)
+        };
 
-        let mut query = Query::default();
-        query.push(Clause::Field(Constraint {
-            field: "tags".into(),
-            comparison: Comparison::All(vec![
-                ParseValue::Object(regex),
-                ParseValue::String("plain".to_string()),
-            ]),
-        }));
+        let refused = |values| lower(values).expect_err("refused").code;
+        assert_eq!(
+            refused(vec![regex("^\\Qba\\E"), plain()]),
+            parse_rust_core::ErrorCode::InvalidJson
+        );
+        assert_eq!(
+            refused(vec![regex("^ba")]),
+            parse_rust_core::ErrorCode::InvalidJson
+        );
+        assert_eq!(
+            refused(vec![regex("^\\Qba\\E"), regex("^ba")]),
+            parse_rust_core::ErrorCode::InvalidJson
+        );
 
-        let err = transform_where(&schema(), &query).expect_err("mixed $all");
-        assert_eq!(err.code, parse_rust_core::ErrorCode::InvalidJson);
+        lower(vec![regex("^\\Qa\\E"), regex("^\\Qb\\E")]).expect("all starts-with");
+        // Neither value is a starts-with regex, so they agree.
+        lower(vec![regex("^ba"), plain()]).expect("none starts-with");
     }
 
     /// A bare objectId string against a Pointer field has to acquire the class prefix from the

@@ -1517,8 +1517,8 @@ pub async fn create_checked<S: StorageAdapter>(
     // Substituting a generated id here instead would create the row, report success, and hand the
     // client an id it did not ask for, for a body upstream rejects.
     let object_id = match body.get("objectId") {
-        None => new_object_id(),
-        Some(FieldWrite::Value(v)) if !parse_rust_core::is_js_truthy(v) => new_object_id(),
+        None => new_object_id()?,
+        Some(FieldWrite::Value(v)) if !parse_rust_core::is_js_truthy(v) => new_object_id()?,
         Some(FieldWrite::Value(ParseValue::String(id))) => id.clone(),
         Some(other) => {
             let got = match other {

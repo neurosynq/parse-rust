@@ -53,6 +53,12 @@ async fn run() -> std::io::Result<()> {
     }
     if let Some(m) = env("PARSE_SERVER_MOUNT_PATH") {
         config.mount_path = m;
+        config.check_mount_path().map_err(|why| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("PARSE_SERVER_MOUNT_PATH: {why}"),
+            )
+        })?;
     }
 
     // Every option below carries upstream's env var name and upstream's default, read at the pin.

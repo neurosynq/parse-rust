@@ -197,7 +197,7 @@ pub(crate) fn ensure_user_identity_and_acl(body: &mut WriteBody) -> Result<Strin
     let object_id = match existing {
         Some(id) => id,
         None => {
-            let id = parse_rust_core::new_object_id();
+            let id = parse_rust_core::new_object_id()?;
             body.insert(
                 "objectId".to_string(),
                 FieldWrite::Value(ParseValue::String(id.clone())),

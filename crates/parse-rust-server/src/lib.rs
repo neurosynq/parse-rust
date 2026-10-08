@@ -106,7 +106,15 @@ fn peer_of(parts: &http::request::Parts) -> Peer {
 /// Build the router.
 ///
 /// The mount path is applied here, from config, and is never inferred from the request path.
+///
+/// A mount path [`ServerConfig::check_mount_path`] refuses gets a router that serves nothing, so
+/// every request is a 404, and the refusal is written to standard error. [`serve`] and the binary
+/// refuse such a path before getting here; an embedder calling this directly should check first.
 pub fn router(state: AppState) -> Router {
+    if let Err(why) = state.config().check_mount_path() {
+        eprintln!("parse-rust: serving nothing: {why}");
+        return Router::new();
+    }
     let mount = state.config().mount_path.clone();
     // Cloned before `with_state` consumes it below, so the CORS layer can read the same config.
     let cors_state = state.clone();
@@ -157,6 +165,7 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             body_credentials::MAX_BODY,
         ))
+        .fallback(not_found)
         .with_state(state);
 
     // The normalization layer wraps the *whole* router rather than the routes inside it, because
@@ -167,11 +176,13 @@ pub fn router(state: AppState) -> Router {
     // middleware on the router (`ParseServer.ts:312`). Outermost is what makes the headers appear
     // on error responses too, and what lets an `OPTIONS` preflight be answered before anything
     // downstream can reject it for lacking credentials it is not allowed to send yet.
-    // Trimmed as `body_credentials` trims it, and merged at the root rather than nested there,
-    // because `nest` refuses a root or empty prefix by panicking.
+    // Trimmed as `body_credentials` trims it. Mounted as an opaque service, because `nest` and
+    // `merge` copy the API's routes into this router, where they are matched before the layers
+    // below run, and those layers rewrite the method and the path. At the root it is the fallback
+    // service, since `nest_service` refuses a root or empty prefix by panicking.
     let app = match mount.trim_end_matches('/') {
-        "" => Router::new().merge(api),
-        prefix => Router::new().nest(prefix, api),
+        "" => Router::new().fallback_service(api),
+        prefix => Router::new().nest_service(prefix, api).fallback(not_found),
     };
     // Inside the body layer, so it sees the method a `_method` override asked for.
     let app = app.layer(axum::middleware::from_fn_with_state(
@@ -186,14 +197,60 @@ pub fn router(state: AppState) -> Router {
     // Innermost of the outer layers, so the timing covers the request's own work only.
     #[cfg(feature = "bench-instrumentation")]
     let app = app.layer(axum::middleware::from_fn(bench::instrument));
-    app.layer(axum::middleware::from_fn_with_state(
-        cors_state.clone(),
-        body_credentials::extract,
-    ))
-    .layer(axum::middleware::from_fn_with_state(
-        cors_state,
-        cors::layer,
-    ))
+    app.layer(axum::middleware::from_fn(express_path))
+        .layer(axum::middleware::from_fn_with_state(
+            cors_state.clone(),
+            body_credentials::extract,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            cors_state,
+            cors::layer,
+        ))
+}
+
+/// An unrouted path: an empty 404. Since axum 0.8 the default one omits `content-length` on a
+/// `HEAD`, where it used to send `0` as it does for every other method, so it is stated here.
+async fn not_found() -> Response {
+    (
+        http::StatusCode::NOT_FOUND,
+        [(http::header::CONTENT_LENGTH, "0")],
+    )
+        .into_response()
+}
+
+/// Match paths as Express does, which axum does not by default.
+///
+/// Express routes are non-strict, so one trailing slash is optional and `/classes/Foo/` is
+/// `/classes/Foo`. And a `:param` matches one or more characters, so an empty segment matches no
+/// route: `/classes//abc` is a 404 there, where axum would hand a route an empty class name.
+async fn express_path(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let trimmed = match path.strip_suffix('/') {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => path,
+    };
+    if trimmed.contains("//") {
+        return not_found().await;
+    }
+    if trimmed.len() != path.len() {
+        let rewritten = match request.uri().query() {
+            Some(query) => format!("{trimmed}?{query}"),
+            None => trimmed.to_string(),
+        };
+        let mut parts = request.uri().clone().into_parts();
+        match rewritten.parse() {
+            Ok(path_and_query) => parts.path_and_query = Some(path_and_query),
+            Err(_) => return not_found().await,
+        }
+        match http::Uri::from_parts(parts) {
+            Ok(uri) => *request.uri_mut() = uri,
+            Err(_) => return not_found().await,
+        }
+    }
+    next.run(request).await
 }
 
 /// Bind and serve. Returns the bound address, which matters when the caller asked for port 0.
@@ -213,6 +270,10 @@ pub async fn serve(
     std::net::SocketAddr,
     impl std::future::Future<Output = std::io::Result<()>>,
 )> {
+    state
+        .config()
+        .check_mount_path()
+        .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
     state
         .ensure_indexes()
         .await

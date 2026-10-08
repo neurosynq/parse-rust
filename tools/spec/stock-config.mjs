@@ -92,7 +92,7 @@ const EXPECTED = {
   'I9 objectId operation': 3,
   'I10 user update authorization': 24,
   'I11 ACL operations': 28,
-  'I12 read path order': 38,
+  'I12 read path order': 42,
   'I13 body credentials': 42,
   'I14 routes and write order': 102,
   'I15 read parity': 62,
@@ -1215,6 +1215,14 @@ async function gateI12ReadPathOrder(servers) {
       '400 107 malformatted $within arg'],
     ['a negative skip alone is the database refusal', { path: '/classes/$C?skip=-1' }, error,
       '500 1 An internal server error occurred'],
+    // `$all` regexes must agree on being starts-with regexes, and a lone one must be one
+    // (`MongoTransform.js:143-169`). A NUL in the pattern is refused by the driver, after that check
+    // and inside the read path's sanitizing `.catch`.
+    ['a lone plain regex in $all is refused', { path: `/classes/$C?where=${e({ tags: { $all: [{ $regex: '^ba' }] } })}` },
+      error, '400 107 All $all values must be of regex type or none: /^ba/'],
+    ['a NUL in a starts-with $all regex is the database refusal', { path: `/classes/$C?where=${e({
+      tags: { $all: [{ $regex: '^\\Qa\u0000b\\E' }] } })}` }, r => `${r.status} ${J(r.body)}`,
+      `500 ${J({ code: 1, error: 'An internal server error occurred' })}`],
     // Operands as JavaScript reads them: a member of `null` is a `TypeError` and a bare 500, and
     // arithmetic and `isNaN` coerce (`MongoTransform.js:777-955`).
     ['$text: null is a TypeError', { cls: 'I12g', path: `/classes/$C?where=${e({ s: { $text: null } })}` },

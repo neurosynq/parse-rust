@@ -12,14 +12,13 @@
 
 use std::collections::HashMap;
 
-use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value as Json_;
 
 use crate::auth::Authority;
-use crate::body_credentials::{BodyParams, MethodOverride};
+use crate::body_credentials::{BodyParams, MethodOverride, ParsedBody};
 use crate::params::Params;
 use crate::response::{HttpError, ParseErrorResponse};
 use crate::routes::dispatch::{self, Incoming, Route, RouteError};
@@ -165,14 +164,36 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ReadParams {
     }
 }
 
+/// A request's JSON body, or none.
+///
+/// A write's object body arrives already parsed, as [`ParsedBody`]. Anything else is parsed here,
+/// and a body that is not JSON is no body, so the response stays in Parse's shape. Not
+/// `Option<Json<_>>`: since axum 0.8 that rejects a body whose content type is not JSON with
+/// axum's own plain-text 415 before the handler runs.
+pub struct JsonBody(pub Option<Json_>);
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for JsonBody {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request(
+        mut request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        if let Some(ParsedBody(body)) = request.extensions_mut().remove::<ParsedBody>() {
+            return Ok(Self(Some(body)));
+        }
+        Ok(Self(
+            Json::<Json_>::from_request(request, state)
+                .await
+                .ok()
+                .map(|Json(body)| body),
+        ))
+    }
+}
+
 // -------------------------------------------------------------------------------------------
 // Handlers
 // -------------------------------------------------------------------------------------------
-//
-// A body is taken as `Result<Json<_>, JsonRejection>` and read with `.ok()`, never as
-// `Option<Json<_>>`. Since axum 0.8 the `Option` form rejects a body whose content type is not
-// JSON, with axum's own plain-text 415, before the handler runs. Here, as under 0.7, a body
-// that is not JSON reaches the handler as no body, and the response stays in Parse's shape.
 
 pub async fn health(State(state): State<AppState>) -> Response {
     // Credential-free upstream, and the endpoint every bring-up script polls, so it does not go
@@ -207,7 +228,7 @@ pub async fn users_collection(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     run(
@@ -217,7 +238,7 @@ pub async fn users_collection(
             method,
             route: Route::Users,
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path: "/users".to_string(),
         },
     )
@@ -231,7 +252,7 @@ pub async fn users_object(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     let path = format!("/users/{object_id}");
@@ -242,7 +263,7 @@ pub async fn users_object(
             method,
             route: Route::UserObject { object_id },
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path,
         },
     )
@@ -255,7 +276,7 @@ pub async fn users_me(
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     ReadParams(params): ReadParams,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     // The SDK reaches this as a POST carrying `_method: "GET"`.
     let method = effective_method(transport, method);
@@ -268,7 +289,7 @@ pub async fn users_me(
             // Any method but GET reaches the objectId route with `me` (see `Route::for_method`),
             // which reads the request's parameters and body like any other.
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path: "/users/me".to_string(),
         },
     )
@@ -282,14 +303,14 @@ pub async fn login(
     method: Option<axum::Extension<MethodOverride>>,
     body_params: Option<axum::Extension<BodyParams>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     // An overridden `GET` had its body moved into [`BodyParams`]; upstream's `req.body` is still
     // that body, so it is put back here.
     let body = match body_params {
         Some(axum::Extension(BodyParams(map))) => Some(Json_::Object(map)),
-        None => body.ok().map(|b| b.0),
+        None => body,
     };
     run(
         &state,
@@ -368,7 +389,7 @@ pub async fn classes_collection(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     let path = format!("/classes/{class_name}");
@@ -379,7 +400,7 @@ pub async fn classes_collection(
             method,
             route: Route::Classes { class_name },
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path,
         },
     )
@@ -393,7 +414,7 @@ pub async fn classes_object(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     // There is no POST verb on an object route. A bare POST with no override used to fall through
     // to `update`, so an unrelated request could mutate a row; an override-free POST now reaches
@@ -410,7 +431,7 @@ pub async fn classes_object(
                 object_id,
             },
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path,
         },
     )
@@ -423,7 +444,7 @@ pub async fn roles_collection(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     run(
@@ -433,7 +454,7 @@ pub async fn roles_collection(
             method,
             route: Route::Roles,
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path: "/roles".to_string(),
         },
     )
@@ -447,7 +468,7 @@ pub async fn roles_object(
     ReadParams(params): ReadParams,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     let path = format!("/roles/{object_id}");
@@ -458,7 +479,7 @@ pub async fn roles_object(
             method,
             route: Route::RoleObject { object_id },
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path,
         },
     )
@@ -493,7 +514,7 @@ pub async fn sessions_me(
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     ReadParams(params): ReadParams,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     run(
@@ -505,7 +526,7 @@ pub async fn sessions_me(
             // Any method but GET reaches the objectId route with `me` (see `Route::for_method`),
             // which reads the request's parameters and body like any other.
             params,
-            body: body.ok().map(|b| b.0),
+            body,
             path: "/sessions/me".to_string(),
         },
     )
@@ -541,7 +562,7 @@ pub async fn schemas_collection(
     authority: Authority,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     run(
@@ -551,7 +572,7 @@ pub async fn schemas_collection(
             method,
             route: Route::Schemas,
             params: Params::default(),
-            body: body.ok().map(|b| b.0),
+            body,
             path: "/schemas".to_string(),
         },
     )
@@ -564,7 +585,7 @@ pub async fn schemas_class(
     Path(class_name): Path<String>,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     let path = format!("/schemas/{class_name}");
@@ -575,7 +596,7 @@ pub async fn schemas_class(
             method,
             route: Route::SchemaClass { class_name },
             params: Params::default(),
-            body: body.ok().map(|b| b.0),
+            body,
             path,
         },
     )
@@ -614,7 +635,7 @@ pub async fn batch(
     authority: Authority,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
-    body: Result<Json<Json_>, JsonRejection>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     if method != http::Method::POST {
@@ -629,7 +650,7 @@ pub async fn batch(
             Ok(rc) => rc,
             Err(e) => return ParseErrorResponse(e).into_response(),
         };
-        let body = body.ok().map(|b| b.0);
+        let body = body;
         match crate::routes::batch::handle(&state, &mut rc, &authority, &mount_path, body.as_ref())
             .await
         {

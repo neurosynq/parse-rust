@@ -183,6 +183,7 @@ echo
 # --- always available ------------------------------------------------------
 run "cargo fmt --check"        cargo fmt --all -- --check
 run "cargo clippy"             cargo clippy --workspace --all-targets -- -D warnings
+run "cargo clippy (features)"  cargo clippy --workspace --all-targets --all-features -- -D warnings
 run "cargo test (unit)"        cargo test --workspace
 
 # --- needs the upstream checkout at the pin --------------------------------

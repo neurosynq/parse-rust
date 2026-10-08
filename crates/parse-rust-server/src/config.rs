@@ -395,6 +395,30 @@ impl ServerConfig {
         self
     }
 
+    /// Refuse a mount path the router cannot serve as a literal prefix.
+    ///
+    /// The path becomes a route prefix, and axum reads `{name}` and `{*name}` in one as
+    /// parameters: `/{app}` would match any first segment rather than the text `{app}`. A segment
+    /// opening with `:` is the older parameter syntax, which axum refuses by panicking. An empty
+    /// path and `/` both mean the root.
+    pub fn check_mount_path(&self) -> Result<(), String> {
+        let path = self.mount_path.as_str();
+        if path.is_empty() {
+            return Ok(());
+        }
+        let refuse = |why: &str| Err(format!("invalid mount path {path:?}: {why}"));
+        if !path.starts_with('/') {
+            return refuse("it must start with `/`");
+        }
+        if path.contains(['{', '}', '*']) {
+            return refuse("`{`, `}` and `*` are route syntax, not literal text");
+        }
+        if path.split('/').any(|segment| segment.starts_with(':')) {
+            return refuse("a segment starting with `:` is route syntax, not literal text");
+        }
+        Ok(())
+    }
+
     /// True when any client key is configured. Upstream's rule is all-or-nothing: if *any* of
     /// these is set, a non-master request must present one that matches
     /// (`middlewares.js:255-265`). If none is configured, none is required.
@@ -409,6 +433,25 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_path_must_be_a_literal_prefix() {
+        let check = |p: &str| ServerConfig::new("a", "m").mount_path(p).check_mount_path();
+        for ok in ["", "/", "/parse", "/parse/", "/api/v1", "/a:b"] {
+            assert!(check(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "parse",
+            "/:app",
+            "/parse/:app",
+            "/{app}",
+            "/{*rest}",
+            "/a*",
+            "/a}",
+        ] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
+    }
 
     fn fields(config: &ProtectedFieldsConfig, class: &str, entity: &str) -> Vec<String> {
         config

@@ -11,21 +11,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
-## Unreleased
+## 0.3.1
+
+Dependency majors, and the fixes a review of them found.
+
+**This release breaks the Rust API despite its patch number.** Cargo treats 0.3.1 as compatible with
+0.3.0, so `cargo update` takes an embedder onto it. A project that embeds `parse-rust-server` or
+calls `parse-rust-mongo` directly should read the section below before updating, or pin
+`=0.3.0` until it can. The wire contract is unchanged: an SDK talking to the `parse-rust` binary
+sees no difference beyond the fixes listed under Fixed.
+
+### BREAKING
+
+- **`axum` 0.7 to 0.8, which is in `parse-rust-server`'s public API.** `router()` returns an axum
+  0.8 `Router`, and `Authority` and the handlers are axum 0.8 types, so serving, nesting or
+  layering the router with axum 0.7 no longer compiles. To migrate: depend on `axum = "0.8"`; write
+  path parameters in your own routes as `{name}` rather than `:name`, since a `:name` segment
+  panics when the router is built; and remove `#[async_trait]` from your own extractor impls.
+- **`bson` 2 to 3, which is in `parse-rust-mongo`'s public API.** The transform functions take and
+  return bson 3 `Document` and `Bson`. To migrate: depend on `bson = "3"` and follow bson's own
+  migration notes. The changes this codebase met were a regex's `pattern` and `options` becoming
+  `CString`, `into_relaxed_extjson` moving behind the `serde_json-1` feature, and `get_*` returning
+  bson's own error type.
+- **The `mongodb` driver is built with `bson-3`, and Cargo merges features across the whole
+  dependency tree.** A project that also depends on `mongodb = "3"` directly is switched to bson 3
+  types along with it, whether or not it calls parse-rust. Migrate that code to bson 3 too.
+- **Random generation is fallible.** `parse_rust_core::new_object_id` and `random_string` and
+  `parse_rust_auth::sessions::new_session_token` return `Result<String, ParseError>`.
+  `ParseErrorInfo` has a new field, so a struct literal of it needs `..Default::default()`.
+- **A mount path is checked when the server starts.** `PARSE_SERVER_MOUNT_PATH`, and
+  `ServerConfig::mount_path` through `serve`, must start with `/` and must not contain `{`, `}`,
+  `*` or a segment starting with `:`. Those are route syntax under axum 0.8: `/{app}` would have
+  matched any first segment, and `/:app` panicked at boot. `ServerConfig::check_mount_path` is the
+  check, for an embedder that builds the router itself.
 
 ### Changed
 
-- **`rand` 0.8 to 0.10.** Session tokens and `objectId`s still draw from the thread-local
-  cryptographic generator, and the session-token path still requires a `CryptoRng` at compile
-  time. No wire change.
-- **`bcrypt` 0.15 to 0.19.** Hashing and verification still truncate at 72 bytes, as
-  parse-server's bcrypt does, and hashes still verify in both directions against parse-server's.
-- **`bson` 2 to 3**, with the `mongodb` driver switched to its bson 3 support. Stored documents and
-  query encoding are unchanged.
-- **`axum` 0.7 to 0.8.** This is a breaking change for an embedder that adds its own routes or
-  extractors to the router `parse-rust-server` returns: path parameters are now written `{name}`
-  rather than `:name`, and `#[async_trait]` is gone from extractor impls. The routes parse-rust
-  serves and their responses are unchanged, including a request body that is not JSON.
+- **`rand` 0.8 to 0.10.** Session tokens and `objectId`s now draw from the operating system's
+  generator directly, as upstream's `crypto.randomBytes` does, and a failure there is an internal
+  error on the request rather than a panic. rand 0.10's thread-local generator panics when a
+  periodic reseed fails.
+- **`bcrypt` 0.15 to 0.19.** Hashing and verification still truncate at 72 bytes. Hashes verify in
+  both directions against both modules parse-server loads: `@node-rs/bcrypt`, which a stock install
+  uses and which writes `$2y$`, and `bcryptjs`, which writes `$2b$`. Passwords over 72 bytes and
+  passwords containing a NUL are checked to verify the same way on both sides.
+- **Paths match as Express matches them.** One trailing slash is optional, so `/classes/Foo/` is
+  `/classes/Foo`, and an empty segment matches no route, so `/classes//abc` is a 404 rather than a
+  read of a class with an empty name.
+- **An unrouted `HEAD` answers its 404 with `content-length: 0`**, as every other method does.
+
+### Fixed
+
+- **`$all` classifies regexes as upstream does.** The values must agree on being starts-with
+  regexes, the `^\Q...\E` form `containsAllStartingWith` sends, and a lone value must be one
+  (`MongoTransform.js:143-169`). So a lone `^ba` is now refused with 107, and an ordinary regex
+  beside a plain value is accepted. This was listed as a known parity gap at 0.2.0.
+- **A body under the 20 MB limit is no longer refused for growing after it was parsed.** The parsed
+  body was serialized again on its way to the route, which can lengthen it (`1e5` becomes
+  `100000.0`), and a body that crossed the limit that way was refused as `body must be a JSON
+  object`. It is now parsed once.
 
 ## 0.3.0
 

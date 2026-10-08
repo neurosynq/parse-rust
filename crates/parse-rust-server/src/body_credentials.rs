@@ -216,6 +216,11 @@ fn unroutable_method() -> http::Method {
 /// Upper bound on a buffered body. Without one, a request could exhaust memory.
 pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
 
+/// A write's JSON object body, parsed once here and read by the route's
+/// [`JsonBody`](crate::routes::http::JsonBody) extractor.
+#[derive(Debug, Clone)]
+pub struct ParsedBody(pub Json);
+
 /// The health endpoint exactly: the mount plus `/health`, with or without a trailing slash, as
 /// Express's `api.use('/health', ...)` matches it. A suffix test also matched `/classes/health`.
 fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
@@ -376,21 +381,13 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
         return res;
     }
 
-    // The body has just been shown to parse as JSON, so declaring it as such is a statement of
-    // fact. axum's `Json` extractor requires the header; Express's parser does not, and the SDK
-    // sends `text/plain`.
-    parts.headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-    );
-
-    let body = match serde_json::to_vec(&Json::Object(map)) {
-        Ok(v) => Body::from(v),
-        Err(_) => Body::from(bytes),
-    };
+    // The parsed body travels as an extension rather than being serialized again. Serializing
+    // can lengthen it, `1e5` becoming `100000.0`, so a body accepted under the limit above could
+    // exceed it on the way to the route and be refused there as not JSON at all.
+    parts.extensions.insert(ParsedBody(Json::Object(map)));
     let trace = tracing_enabled();
     let (m, u) = (parts.method.clone(), parts.uri.clone());
-    let res = next.run(Request::from_parts(parts, body)).await;
+    let res = next.run(Request::from_parts(parts, Body::empty())).await;
     if trace {
         eprintln!("[trace] {m} {u} -> {}", res.status());
     }

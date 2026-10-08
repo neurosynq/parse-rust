@@ -92,6 +92,26 @@ async fn a_body_over_twenty_megabytes_is_413() {
     assert_eq!(out["error"], json!("request entity too large"));
 }
 
+/// A body under the limit reaches its route whatever its numbers look like once parsed.
+///
+/// The body is parsed once, before the route. Serializing it again for the route lengthened it,
+/// `1e5` becoming `100000.0`, so this body, under 10 MB as sent and over 20 MB as rewritten, was
+/// refused as not JSON at all.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_body_under_the_limit_is_not_measured_after_parsing() {
+    let server = common::boot().await;
+    let mut body = br#"{"requests":[],"pad":["#.to_vec();
+    let count = 2_400_000;
+    for i in 0..count {
+        body.extend_from_slice(if i + 1 == count { b"1e5" } else { b"1e5," });
+    }
+    body.extend_from_slice(b"]}");
+    assert!(body.len() < 10 * 1024 * 1024);
+    let (status, out) = raw(&server.host, "POST", "/batch", "application/json", body).await;
+    assert_eq!((status, out), (200, json!([])));
+}
+
 /// `express.json` leaves a multipart body unparsed, so the route sees `{}`.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]

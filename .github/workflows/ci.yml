@@ -56,6 +56,12 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `test-harness` and `bench-instrumentation` are off in every release build, so the step
+      # above never compiles the code behind them. Both runs are needed: code under
+      # `cfg(not(feature = ...))` is linted only by the first.
+      - name: clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: test
         run: cargo test --workspace
 
