@@ -64,6 +64,13 @@ pub trait StorageAdapter: Send + Sync {
     /// full `getAllClasses`, and reproducing that shape keeps the caching behavior comparable.
     fn all_schemas(&self) -> impl Future<Output = Result<Vec<ClassSchema>, ParseError>> + Send;
 
+    /// Does `_SCHEMA` hold this class? A read that reaches a class its snapshot lacks asks this to
+    /// tell a class nobody has written from one another server created since.
+    fn class_exists(
+        &self,
+        class_name: &str,
+    ) -> impl Future<Output = Result<bool, ParseError>> + Send;
+
     /// Persist a class schema, creating the class if it does not exist.
     ///
     /// **Must not clobber metadata it was not given.** A field-adding write reaches here with
@@ -185,7 +192,7 @@ pub trait StorageAdapter: Send + Sync {
     /// Insert a row, or do nothing if one already matches.
     ///
     /// Exists for join tables, whose membership rows carry no objectId and must be idempotent:
-    /// adding a user to a role twice is one membership (`DatabaseController.js:794-806`).
+    /// adding a user to a role twice is one membership (`DatabaseController.js:795-807`).
     fn upsert_one(
         &self,
         schema: &ClassSchema,
@@ -201,11 +208,28 @@ pub trait StorageAdapter: Send + Sync {
         options: &QueryOptions,
     ) -> impl Future<Output = Result<Vec<Row>, ParseError>> + Send;
 
+    /// Describe how the database would run a find, rather than running it.
+    ///
+    /// The result is the database's own explain document, returned to the client verbatim as
+    /// `results` (`MongoStorageAdapter.js:774-776`). It is not a Parse value and nothing reads it
+    /// back, so it is plain JSON rather than a [`Row`].
+    fn explain(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        options: &QueryOptions,
+        verbosity: crate::ExplainVerbosity,
+    ) -> impl Future<Output = Result<serde_json::Value, ParseError>> + Send;
+
     /// Count rows matching the query.
+    ///
+    /// `options` carries the `hint` and `comment` a client sent with `count=1`. A backend that
+    /// cannot honour a hint must refuse it rather than drop it, as `find` does.
     fn count(
         &self,
         schema: &ClassSchema,
         query: &Query,
+        options: &crate::CountOptions,
     ) -> impl Future<Output = Result<u64, ParseError>> + Send;
 
     /// Update matching rows.
@@ -225,7 +249,7 @@ pub trait StorageAdapter: Send + Sync {
     ///
     /// Needed because an update carrying an op has to tell the client the resulting value:
     /// `_sanitizeDatabaseResult` reads it off the document the adapter returns
-    /// (`DatabaseController.js:2129-2157`), and upstream gets it from `findOneAndUpdate` with
+    /// (`DatabaseController.js:2141-2169`), and upstream gets it from `findOneAndUpdate` with
     /// `returnDocument: 'after'` (`MongoStorageAdapter.js:660-665`). `Ok(None)` means nothing
     /// matched.
     fn update_one_returning(
@@ -290,6 +314,28 @@ pub trait StorageAdapter: Send + Sync {
         class_name: &str,
         name: &str,
     ) -> impl Future<Output = Result<(), ParseError>> + Send;
+
+    /// What each of a class's indexes reads, for authorization rather than for planning.
+    ///
+    /// A read can reach a field through an index without naming it, so the read path checks the
+    /// fields an index covers against what the caller may see. Field names are Parse names, not
+    /// storage columns. A class with no collection has no indexes.
+    fn index_fields(
+        &self,
+        class_name: &str,
+    ) -> impl Future<Output = Result<Vec<IndexFields>, ParseError>> + Send;
+}
+
+/// One index as [`StorageAdapter::index_fields`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexFields {
+    pub name: String,
+    /// The key names exactly as stored, in order, which is what a key-pattern `hint` names.
+    pub columns: Vec<String>,
+    /// The Parse fields the index reads. A wildcard index reports `$**`.
+    pub fields: Vec<String>,
+    /// A full-text index, which answers a text search on any field with the fields it covers.
+    pub text: bool,
 }
 
 /// One entry of the schema API's `indexes` block: a name, and the key document under it.

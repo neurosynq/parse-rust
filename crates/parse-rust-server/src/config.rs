@@ -19,11 +19,11 @@ use crate::ip_allowlist::IpAllowlist;
 /// SDKs branch on it: the Ruby SDK warns below 7.0.0, and features gate on version comparisons.
 /// Reporting `parse-rust 0.0.0` would fail every one of those checks, so the wire-compatible
 /// answer is the parse-server version whose behavior this server implements. It is the same
-/// number recorded in `PIN`.
+/// number recorded in `PIN`, and a test below fails when the two disagree.
 ///
 /// If parse-rust ever needs to advertise itself distinctly, that belongs in a separate field
 /// that upstream does not define, not in this one.
-pub const REPORTED_PARSE_SERVER_VERSION: &str = "9.10.1-alpha.6";
+pub const REPORTED_PARSE_SERVER_VERSION: &str = "9.10.3";
 
 /// What this server can actually do, as reported by `GET /serverInfo`.
 ///
@@ -75,12 +75,12 @@ impl Default for FeatureSupport {
 }
 
 /// Server-level `protectedFields`: class name, then entity, then the fields that entity may not
-/// see (`Options/Definitions.js:491-500`).
+/// see (`Options/Definitions.js:497-506`).
 ///
 /// Order-preserving because the intersection that consumes it is order-sensitive on the wire.
 pub type ProtectedFieldsConfig = IndexMap<String, IndexMap<String, Vec<String>>>;
 
-/// The upstream default, `{_User: {'*': ['email']}}` (`Options/Definitions.js:495-499`).
+/// The upstream default, `{_User: {'*': ['email']}}` (`Options/Definitions.js:501-505`).
 ///
 /// **Merged as a set union per entity key over the class's own block**
 /// (`SchemaController.js:577-586`), so it composes with a configured `protectedFields` rather
@@ -153,7 +153,7 @@ pub struct ServerConfig {
     pub app_id: String,
     pub master_key: String,
 
-    /// `masterKeyIps`, default `['127.0.0.1', '::1']` (`Options/Definitions.js:396-399`), enforced
+    /// `masterKeyIps`, default `['127.0.0.1', '::1']` (`Options/Definitions.js:402-405`), enforced
     /// at `middlewares.js:452`.
     ///
     /// **The default is a control and 0.2.0 shipped without it**, so the master key was honoured
@@ -164,7 +164,7 @@ pub struct ServerConfig {
 
     /// `maintenanceKey`. Grants the same ACL treatment as the master key and is **not** the same
     /// authority: `validateClientClassCreation` exempts both on a write and master alone on a read
-    /// (`RestWrite.js:200-202`, `RestQuery.js:486-489`).
+    /// (`RestWrite.js:206-208`, `RestQuery.js:486-489`).
     ///
     /// **Reachable only from Rust, deliberately.** The binary exposes no variable for it, and the
     /// reason changed in 0.2.1: it used to be that parse-rust had no IP filter, and now it has one.
@@ -176,7 +176,7 @@ pub struct ServerConfig {
     /// `isMaster` upstream (`Auth.js:63`), and is not modeled at all.
     pub maintenance_key: Option<String>,
 
-    /// `maintenanceKeyIps`, same default and same enforcement (`Options/Definitions.js:385-388`,
+    /// `maintenanceKeyIps`, same default and same enforcement (`Options/Definitions.js:391-394`,
     /// `middlewares.js:438`).
     ///
     /// Carried alongside `master_key_ips` rather than deferred. The two options are one mechanism
@@ -192,7 +192,7 @@ pub struct ServerConfig {
     /// request path**: axum's `nest` and Express's `app.use` differ here, and every generated
     /// file URL is built from this value.
     pub mount_path: String,
-    /// `enableSanitizedErrorResponse`, default true (`Options/Definitions.js:253-258`).
+    /// `enableSanitizedErrorResponse`, default true (`Options/Definitions.js:259-264`).
     ///
     /// When true, every denial upstream routes through `createSanitizedError` or
     /// `createSanitizedHttpError` (`Error.js:13-43`) says `Permission denied` instead of naming
@@ -207,17 +207,17 @@ pub struct ServerConfig {
     pub features: FeatureSupport,
 
     /// `sessionLength` and `expireInactiveSessions`, which together decide `_Session.expiresAt`.
-    /// Defaults are upstream's (`Options/Definitions.js:629-634`, `:269-274`).
+    /// Defaults are upstream's (`Options/Definitions.js:635-640`, `:275-280`).
     pub session: SessionConfig,
 
     /// `protectedFields`. See [`default_protected_fields`] for the merge rule.
     pub protected_fields: ProtectedFieldsConfig,
 
-    /// `protectedFieldsOwnerExempt`, default true (`Options/Definitions.js:501-506`). When true a
+    /// `protectedFieldsOwnerExempt`, default true (`Options/Definitions.js:507-512`). When true a
     /// user reading their own `_User` row sees every field regardless of `protectedFields`.
     pub protected_fields_owner_exempt: bool,
 
-    /// `protectedFieldsSaveResponseExempt`, default true (`Options/Definitions.js:507-512`).
+    /// `protectedFieldsSaveResponseExempt`, default true (`Options/Definitions.js:513-518`).
     ///
     /// When true, a create or update response carries protected fields the write touched. When
     /// false they are stripped from the response as they are from a query result. parse-rust only
@@ -235,6 +235,24 @@ pub struct ServerConfig {
     /// The two are one option because a CLP naming a user by id has to be able to name a user
     /// whose id the client chose.
     pub allow_custom_object_id: bool,
+
+    /// `defaultLimit`, default 100 (`Options/Definitions.js:185-190`): the page size of a find that
+    /// names no `limit`. Must be positive, as upstream's `validateDefaultLimit` requires.
+    pub default_limit: u32,
+
+    /// `maxLimit`, default none (`Options/Definitions.js:413-417`). Caps the `limit` a find may
+    /// request, and not the default page size: upstream applies it to the option only.
+    pub max_limit: Option<u32>,
+
+    /// `accountLockout`, default none, meaning off. See [`crate::lockout`].
+    pub account_lockout: Option<crate::lockout::AccountLockout>,
+
+    /// `databaseOptions.allowPublicExplain`, default **false** (`Options/Definitions.js:1264-1270`).
+    ///
+    /// Whether a caller without the master key may use `explain`. The default is the security
+    /// boundary: an explain document discloses index names, the query plan and the server's
+    /// version, so `explain` ships with this check or not at all.
+    pub allow_public_explain: bool,
 
     /// `allowClientClassCreation`, default **false** (`Options/Definitions.js:67-72`).
     ///
@@ -260,17 +278,22 @@ pub struct ServerConfig {
     pub allow_headers: Vec<String>,
 
     /// `requestComplexity.batchRequestLimit`, default `-1`, which disables it
-    /// (`Options/Definitions.js:733-738`). Master and maintenance bypass it (`batch.js:73`).
+    /// (`Options/Definitions.js:739-744`). Master and maintenance bypass it (`batch.js:73`).
     pub batch_request_limit: i64,
 
-    /// `databaseOptions.createIndexRoleName`, default true (`Options/Definitions.js:1318-1323`),
-    /// created at `DatabaseController.js:2033-2038`.
+    /// `databaseOptions.createIndexRoleName`, default true (`Options/Definitions.js:1324-1329`),
+    /// created at `DatabaseController.js:2045-2050`.
     ///
     /// **Not cosmetic.** Without the index two `_Role` rows can carry the same `name`, and an ACL
     /// entry of `role:X` then grants every member of both, which is a privilege-escalation path
     /// rather than a duplicate-data annoyance. Upstream tests `!== false`, so anything other than
     /// an explicit `false` creates it.
     pub create_index_role_name: bool,
+
+    /// `databaseOptions.schemaCacheTtl`, default none, which never expires
+    /// (`Options/Definitions.js:1482-1486`). See [`crate::schema_cache`] for the units and for
+    /// what invalidates the cache without it.
+    pub schema_cache_ttl: Option<std::time::Duration>,
 }
 
 impl ServerConfig {
@@ -297,10 +320,23 @@ impl ServerConfig {
             protected_fields_save_response_exempt: true,
             allow_custom_object_id: false,
             allow_client_class_creation: false,
+            default_limit: parse_rust_storage::DEFAULT_LIMIT,
+            max_limit: None,
+            allow_public_explain: false,
+            account_lockout: None,
             allow_origin: vec!["*".to_string()],
             allow_headers: Vec::new(),
             batch_request_limit: -1,
             create_index_role_name: true,
+            schema_cache_ttl: None,
+        }
+    }
+
+    /// The row-count settings a find reads.
+    pub fn limit_policy(&self) -> crate::params::LimitPolicy {
+        crate::params::LimitPolicy {
+            default_limit: self.default_limit,
+            max_limit: self.max_limit,
         }
     }
 
@@ -462,5 +498,22 @@ mod tests {
         merge_protected_fields_defaults(&mut configured, false);
 
         assert_eq!(fields(&configured, "_User", "*"), vec!["email".to_string()]);
+    }
+
+    /// The reported version is the pin's. Read from `PIN` at test time rather than compiled in,
+    /// because `PIN` sits outside the crate and a published crate cannot include it; the same
+    /// reason the test passes vacuously when run from an unpacked crate archive, which has no `PIN`.
+    #[test]
+    fn the_reported_version_is_the_pinned_one() {
+        let Ok(pin) = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../PIN"))
+        else {
+            return;
+        };
+        let version = pin
+            .lines()
+            .find_map(|line| line.strip_prefix("parse-server "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("a parse-server line in PIN");
+        assert_eq!(REPORTED_PARSE_SERVER_VERSION, version);
     }
 }

@@ -1,0 +1,7 @@
+[
+  "find BenchHolder {_rperm:{$in:[null,string,string]}} projection={} sort={\"n\":1} limit=20",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} projection={}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} projection={}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} projection={}",
+  "find BenchTarget {_id:string,_rperm:{$in:[null,string,string]}} projection={}"
+]

@@ -31,11 +31,38 @@ pub fn decode_write_body(value: &Json, path: OpPath) -> Result<WriteBody, ParseE
     let Json::Object(map) = value else {
         return Err(ParseError::invalid_json("body must be an object"));
     };
+    reject_invalid_files(value)?;
     let mut out = WriteBody::new();
     for (key, value) in map {
         out.insert(key.clone(), classify_field(value.clone(), path)?);
     }
     Ok(out)
+}
+
+/// `resolveFileUrls`'s validation (`RestWrite.js:240-249`, from 9.10.3): any object at any depth,
+/// operation payloads included, whose `__type` is `File` must carry a non-empty string `name`, or
+/// the write is refused with 111 `This is not a valid File`.
+///
+/// It walks the raw JSON rather than the classified body because classification stops at the
+/// top level: a nested file was stored as it arrived, including one with no name at all, which
+/// upstream answered with a crash before GHSA-gpr6-gr9g-pfw6 and refuses since. A `File` is not
+/// descended into, as upstream's `collect` returns on one.
+fn reject_invalid_files(value: &Json) -> Result<(), ParseError> {
+    match value {
+        Json::Object(map) => {
+            if map.get("__type").and_then(Json::as_str) == Some("File") {
+                return match map.get("name") {
+                    Some(Json::String(name)) if !name.is_empty() => Ok(()),
+                    _ => Err(ParseError::incorrect_type(
+                        "This is not a valid File".to_string(),
+                    )),
+                };
+            }
+            map.values().try_for_each(reject_invalid_files)
+        }
+        Json::Array(items) => items.iter().try_for_each(reject_invalid_files),
+        _ => Ok(()),
+    }
 }
 
 /// The body as plain values, for the checks that run against the raw REST body.
@@ -166,7 +193,7 @@ pub fn enforce_object_id_policy(
 /// The keys whose post-write value the response echoes back.
 ///
 /// Exactly the five operations in `_sanitizeDatabaseResult`'s allow-list
-/// (`DatabaseController.js:2129-2157`): `Add`, `AddUnique`, `Remove`, `Increment` and
+/// (`DatabaseController.js:2141-2169`): `Add`, `AddUnique`, `Remove`, `Increment` and
 /// `SetOnInsert`. Nothing else, so a plain set and a `Delete` both produce `{updatedAt}` and
 /// nothing more.
 pub fn echoed_keys(body: &WriteBody) -> Vec<String> {
@@ -193,6 +220,26 @@ pub fn echo_response(body: &WriteBody, row: Option<&ParseMap>) -> ParseMap {
 
 #[cfg(test)]
 mod tests {
+
+    /// `resolveFileUrls` rejects a nameless `File` at any depth, an operation's payload included,
+    /// and leaves a well-formed nested one alone. Each case measured against 9.10.3.
+    #[test]
+    fn an_invalid_file_is_refused_at_any_depth() {
+        for json in [
+            r#"{"f":{"__type":"File","name":""}}"#,
+            r#"{"f":{"__type":"File"}}"#,
+            r#"{"o":{"a":{"__type":"File","name":5}}}"#,
+            r#"{"o":[{"__type":"File","name":""}]}"#,
+            r#"{"arr":{"__op":"Add","objects":[{"__type":"File"}]}}"#,
+        ] {
+            let e = decode_write_body(&serde_json::from_str(json).expect("json"), OpPath::Create)
+                .expect_err(json);
+            assert_eq!(e.code, ErrorCode::IncorrectType, "{json}");
+            assert_eq!(e.message, "This is not a valid File", "{json}");
+        }
+        let ok = r#"{"o":{"a":{"__type":"File","name":"x.txt","url":"http://h/x.txt"}}}"#;
+        decode_write_body(&serde_json::from_str(ok).expect("json"), OpPath::Create).expect(ok);
+    }
     use super::*;
 
     fn body(json: &str, path: OpPath) -> WriteBody {

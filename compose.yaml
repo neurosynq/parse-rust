@@ -1,0 +1,65 @@
+# A demo: `docker compose up`, then talk to http://127.0.0.1:27800/parse with any Parse SDK.
+#
+# **This is not a deployment artifact.** The keys below are public, the database has no
+# authentication, and nothing is tuned. It exists so that a reader with Docker and nothing else can
+# see parse-rust answer a Parse SDK. parse-rust is built from this checkout, not pulled from a
+# registry, so what runs is this source.
+#
+#   docker compose up -d       start, building the image the first time
+#   docker compose down -v     stop and delete the database
+#
+# App id `demo`, master key `demo-master-key`, mount path `/parse`.
+
+name: parse-rust-demo
+
+services:
+  mongo:
+    # Pinned by digest: MongoDB 7.0.25, the version the project's tests run against.
+    image: mongo:7.0.25@sha256:82db6c6c8103eee46ca820c190742b7c280d02d6f993903a603cec9d56be374b
+    volumes:
+      - mongo-data:/data/db
+    networks: [demo]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  parse-rust:
+    build: .
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      PARSE_SERVER_APPLICATION_ID: demo
+      PARSE_SERVER_MASTER_KEY: demo-master-key
+      PARSE_SERVER_DATABASE_URI: mongodb://mongo:27017/parse
+      PARSE_SERVER_MOUNT_PATH: /parse
+      PARSE_SERVER_HOST: 0.0.0.0
+      PORT: "27800"
+      PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION: "true"
+      # **Why the master key's address allowlist is widened, and only this far.** `masterKeyIps`
+      # defaults to loopback, as parse-server's does. A request to a published port does not
+      # arrive from loopback inside the container: it arrives from the bridge network's gateway.
+      # Left at the default, the master key would be refused from the host, which is the one
+      # place a reader runs it from. So the allowlist adds this compose network's subnet, which
+      # holds the gateway, the database and nothing else. It is not opened to every address.
+      PARSE_SERVER_MASTER_KEY_IPS: 127.0.0.1,::1,172.29.80.0/24
+    # Published on the host's loopback only, so the demo is not reachable from the network.
+    ports:
+      - "127.0.0.1:27800:27800"
+    networks: [demo]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:27800/parse/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+networks:
+  demo:
+    ipam:
+      config:
+        - subnet: 172.29.80.0/24
+
+volumes:
+  mongo-data:

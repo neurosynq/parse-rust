@@ -102,14 +102,21 @@ pub async fn boot_fresh_with(mut build: impl FnMut(ServerConfig) -> ServerConfig
     Server { host, database }
 }
 
+/// The MongoDB the integration tests use: `PARSE_RUST_TEST_MONGO`, or the local default. Set it
+/// to run the same tests against another server version, as CI does for each one it supports.
+pub fn mongo_uri() -> String {
+    std::env::var("PARSE_RUST_TEST_MONGO")
+        .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string())
+}
+
 async fn boot_on(database: &str, config: ServerConfig) -> String {
     let config = config
         .rest_api_key(REST_KEY)
         .javascript_key(JS_KEY)
         .mount_path("/parse");
-    let storage = MongoAdapter::connect("mongodb://127.0.0.1:27017", database)
+    let storage = MongoAdapter::connect(&mongo_uri(), database)
         .await
-        .expect("MongoDB must be running on 27017");
+        .expect("MongoDB must be reachable at PARSE_RUST_TEST_MONGO");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     let (bound, server) = parse_rust_server::serve(AppState::new(config, storage), addr)
         .await
@@ -123,9 +130,9 @@ async fn boot_on(database: &str, config: ServerConfig) -> String {
 /// Asserted against directly rather than through `_SCHEMA`, because the whole point of the index
 /// tests is that `_metadata.indexes` can claim something the database does not have.
 pub async fn index_names(database: &str, collection: &str) -> Vec<String> {
-    let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1:27017")
+    let client = mongodb::Client::with_uri_str(mongo_uri())
         .await
-        .expect("MongoDB must be running on 27017");
+        .expect("MongoDB must be reachable at PARSE_RUST_TEST_MONGO");
     client
         .database(database)
         .collection::<bson::Document>(collection)
@@ -369,7 +376,7 @@ pub fn urlencode(s: &str) -> String {
 pub async fn create_unique_index(database: &str, collection: &str, field: &str) {
     use mongodb::options::IndexOptions;
     use mongodb::{Client, IndexModel};
-    let client = Client::with_uri_str("mongodb://127.0.0.1:27017")
+    let client = Client::with_uri_str(mongo_uri())
         .await
         .expect("mongo client");
     client

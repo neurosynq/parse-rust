@@ -1,7 +1,7 @@
 //! One route table, two entry points.
 //!
 //! Upstream's `/batch` re-enters its own router: `handleBatch` calls
-//! `router.tryRouteRequest(method, routablePath, request)` (`batch.js:171`) against the same
+//! `router.tryRouteRequest(method, routablePath, request)` (`batch.js:172`) against the same
 //! `PromiseRouter` every HTTP request goes through, so a sub-request and a top-level request are
 //! the same code. That includes the route middlewares, because `PromiseRouter.route` folds them
 //! into the handler (`PromiseRouter.js:66-84`), which is why a `/schemas` sub-request still needs
@@ -11,6 +11,7 @@
 //! The axum handlers build a [`Route`] from their path extractors; `/batch` builds one from a
 //! string. Both then call [`dispatch`].
 
+use crate::schema_cache::Freshness;
 use parse_rust_core::ParseError;
 use serde_json::Value as Json;
 
@@ -33,6 +34,9 @@ pub enum Route {
     ServerInfo,
     Users,
     UsersMe,
+    UserObject {
+        object_id: String,
+    },
     Login,
     Logout,
     Classes {
@@ -59,6 +63,46 @@ pub enum Route {
         class_name: String,
     },
     Batch,
+}
+
+impl Route {
+    /// The route a method actually reaches. Upstream registers `/users/me` and `/sessions/me` for
+    /// `GET` only (`UsersRouter.js:838`, `SessionsRouter.js:113`), so any other method falls through
+    /// to `/:objectId` with the objectId `me`, and a `DELETE /sessions/me` is a delete of a session
+    /// that does not exist.
+    pub fn for_method(&self, method: &http::Method) -> Route {
+        match self {
+            Route::UsersMe if method != http::Method::GET => Route::UserObject {
+                object_id: "me".to_string(),
+            },
+            Route::SessionsMe if method != http::Method::GET => Route::SessionObject {
+                object_id: "me".to_string(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// What this route needs from the schema cache.
+    ///
+    /// The class a route names is the one upstream would fetch with `getOneSchema`, whose miss
+    /// reloads (`SchemaController.js:812-822`). The schema routes load with `clearCache: true`
+    /// (`SchemasRouter.js:19-20`).
+    pub fn schema_freshness(&self) -> Freshness<'_> {
+        match self {
+            Route::Classes { class_name }
+            | Route::ClassObject { class_name, .. }
+            | Route::Purge { class_name } => Freshness::Containing(class_name),
+            Route::Users | Route::UserObject { .. } | Route::UsersMe | Route::Login => {
+                Freshness::Containing("_User")
+            }
+            Route::Roles | Route::RoleObject { .. } => Freshness::Containing("_Role"),
+            Route::Logout | Route::Sessions | Route::SessionsMe | Route::SessionObject { .. } => {
+                Freshness::Containing("_Session")
+            }
+            Route::Schemas | Route::SchemaClass { .. } => Freshness::Reload,
+            Route::Health | Route::ServerInfo | Route::Batch => Freshness::Cached,
+        }
+    }
 }
 
 /// What a handler produced.
@@ -127,6 +171,9 @@ pub fn route_of(path: &str) -> Option<Route> {
 
         ["users"] => Route::Users,
         ["users", "me"] => Route::UsersMe,
+        ["users", object_id] => Route::UserObject {
+            object_id: (*object_id).to_string(),
+        },
         ["login"] => Route::Login,
         ["logout"] => Route::Logout,
 
@@ -193,15 +240,17 @@ pub async fn dispatch(
     } = incoming;
     let path = path.as_str();
 
-    // The body every write path needs. A route that reaches here with no body is a malformed
-    // request, not an empty write: `Option<Json>` is `None` for an unparsable or oversized body
-    // as well as an absent one, so treating it as `{}` would turn a rejection into a write.
+    // The body every write path needs. The body middleware has already turned an absent body and
+    // a multipart one into `{}`, answered an unparsable one with 400, a top-level scalar with 400
+    // and an oversized one with 413, so a write reaching here with no body is one whose request
+    // carried something the JSON extractor still refused, and that stays a refusal.
     let body = || -> Result<&Json, RouteError> {
         body.as_ref().ok_or_else(|| {
             RouteError::Parse(ParseError::invalid_json("body must be a JSON object"))
         })
     };
 
+    let route = &route.for_method(method);
     let response = match (route, method) {
         (Route::Health, &M::GET | &M::POST) => RouteResponse::ok(crate::routes::health::body()),
 
@@ -210,12 +259,40 @@ pub async fn dispatch(
             RouteResponse::ok(crate::routes::features::server_info_body(state.config()))
         }
 
+        // `UsersRouter extends ClassesRouter` with `className()` pinned to `_User`, so a find and
+        // the three object verbs are the class cores (`UsersRouter.js:832-849`).
+        (Route::Users, &M::GET) => RouteResponse::ok(
+            classes::find_core(state, rc, authority, users::USER_CLASS, params).await?,
+        ),
         (Route::Users, &M::POST) => {
             RouteResponse::created(users::signup_core(state, rc, authority, body()?).await?)
         }
         (Route::UsersMe, &M::GET) => RouteResponse::ok(users::me_core(state, rc).await?),
-        (Route::Login, &M::POST) => {
-            RouteResponse::ok(users::login_core(state, rc, authority, body()?).await?)
+        (Route::UserObject { object_id }, &M::GET) => RouteResponse::ok(
+            classes::get_core(state, rc, authority, users::USER_CLASS, object_id, params).await?,
+        ),
+        (Route::UserObject { object_id }, &M::PUT) => RouteResponse::ok(
+            classes::update_core(state, rc, authority, users::USER_CLASS, object_id, body()?)
+                .await?,
+        ),
+        (Route::UserObject { object_id }, &M::DELETE) => RouteResponse::ok(
+            classes::delete_core(state, rc, authority, users::USER_CLASS, object_id).await?,
+        ),
+        // `GET /login` and `POST /login` are one handler (`UsersRouter.js:850-855`). The payload
+        // was chosen by the entry point, which is the only place that can see the query string;
+        // see `users::login_payload`. A login with no body is `{}`, as `req.body || {}` makes it,
+        // and is refused for its missing username rather than as malformed.
+        (Route::Login, &M::GET | &M::POST) => {
+            let empty = Json::Object(serde_json::Map::new());
+            RouteResponse::ok(
+                users::login_core(
+                    state,
+                    rc,
+                    authority,
+                    incoming.body.as_ref().unwrap_or(&empty),
+                )
+                .await?,
+            )
         }
         (Route::Logout, &M::POST) => RouteResponse::ok(users::logout_core(state, rc).await?),
 
@@ -331,6 +408,39 @@ pub async fn dispatch(
 /// `_Role`, pinned by `RolesRouter.className()`.
 const ROLE_CLASS: &str = "_Role";
 
+/// Whether upstream's `PromiseRouter` registers this method on this route, which is what decides
+/// whether a `/batch` sub-request routes at all (`PromiseRouter.js:90-105`).
+///
+/// **The same table as [`dispatch`], and it has to stay that way.** A pair that dispatch serves
+/// and this refuses fails a batch upstream would run; the reverse reaches dispatch's fallback and
+/// is reported per item where upstream fails the whole batch. Two routes differ on purpose:
+/// `/health` is mounted on Express directly, not on the router (`ParseServer.ts:324`), so a batch
+/// cannot reach it, and `/batch` is refused before routing as a nested batch.
+pub fn serves(route: &Route, method: &http::Method) -> bool {
+    use http::Method as M;
+    let route = &route.for_method(method);
+    let (get, post, put, delete) = (
+        method == M::GET,
+        method == M::POST,
+        method == M::PUT,
+        method == M::DELETE,
+    );
+    match route {
+        Route::Health | Route::Batch => false,
+        Route::ServerInfo | Route::UsersMe | Route::SessionsMe => get,
+        Route::Users | Route::Classes { .. } | Route::Roles | Route::Schemas => get || post,
+        Route::Login => get || post,
+        Route::Logout => post,
+        Route::UserObject { .. } | Route::ClassObject { .. } | Route::RoleObject { .. } => {
+            get || put || delete
+        }
+        Route::Sessions => get,
+        Route::SessionObject { .. } => get || delete,
+        Route::SchemaClass { .. } => get || post || put || delete,
+        Route::Purge { .. } => delete,
+    }
+}
+
 fn unroutable(method: &http::Method, path: &str) -> RouteError {
     RouteError::NotFound {
         method: method.clone(),
@@ -355,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_literal_me_routes_win_over_the_parameterized_ones() {
-        // The trap upstream depends on registration order for (`UsersRouter.js:827-832`,
+        // The trap upstream depends on registration order for (`UsersRouter.js:838-843`,
         // `SessionsRouter.js:113-121`). Here it is spelled out, so it cannot depend on the order
         // axum happens to try patterns in.
         assert_eq!(route_of("/users/me"), Some(Route::UsersMe));

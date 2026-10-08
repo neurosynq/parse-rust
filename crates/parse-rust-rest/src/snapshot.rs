@@ -1,7 +1,7 @@
 //! One schema snapshot per request.
 //!
 //! Upstream threads a `validSchemaController` down through every controller entry point
-//! (`DatabaseController.js:553`, `:843`, `:906`, `:1407`) so that one request cannot evaluate half
+//! (`DatabaseController.js:554`, `:844`, `:907`, `:1408`) so that one request cannot evaluate half
 //! its work under one schema and half under another. A batch that saw two schemas mid-flight would
 //! decide what a caller may write and what a caller may see under two different rule sets, and the
 //! second half would carry no error.
@@ -10,11 +10,10 @@
 //! class other than the one being queried, and a per-class fetch at the point of use would be a
 //! second snapshot.
 //!
-//! No caching here. 0.2.0 reloads every schema on every request, which is correct and slow. A
-//! cache is the obvious next step and deliberately not taken yet: a schema carries the CLP, so the
-//! staleness window of a schema cache is the window in which a revoked permission is still
-//! honored. That makes it an authorization decision rather than a tuning knob, and it wants to be
-//! designed as one rather than added for the throughput.
+//! No caching here: a snapshot is immutable once built. The server keeps one between requests in
+//! its schema cache (`parse_rust_server::schema_cache`), which decides how new the next request's
+//! snapshot is. A schema carries the CLP, so that cache's staleness window is the window in which a
+//! revoked permission is still honored, and its invalidation rules are written down there.
 
 use std::borrow::Cow;
 
@@ -50,7 +49,7 @@ impl SchemaSnapshot {
     }
 
     /// Does this class exist? Upstream's `classExists`, which decides whether a count short
-    /// circuits to zero rather than reaching the adapter (`DatabaseController.js:1524-1527`).
+    /// circuits to zero rather than reaching the adapter (`DatabaseController.js:1525-1528`).
     pub fn contains(&self, class_name: &str) -> bool {
         self.classes.contains_key(class_name)
     }
@@ -58,7 +57,7 @@ impl SchemaSnapshot {
     /// The schema to read a class under.
     ///
     /// A missing class behaves as `{fields: {}}` rather than as an error
-    /// (`DatabaseController.js:1422-1432`), so a query against a class nobody has written yet
+    /// (`DatabaseController.js:1423-1433`), so a query against a class nobody has written yet
     /// returns nothing instead of failing. Note that this is **not** [`Self::resolve_for_write`]:
     /// the read fallback has no default columns at all, which is what makes every sort key on a
     /// non-existent class get dropped.
@@ -72,7 +71,7 @@ impl SchemaSnapshot {
     /// The schema to write a class under.
     ///
     /// A missing class resolves to the injected default schema, matching `enforceClassExists`
-    /// followed by `getOneSchema` on the create path (`DatabaseController.js:939-940`). The
+    /// followed by `getOneSchema` on the create path (`DatabaseController.js:940-941`). The
     /// difference from [`Self::get_or_default`] is load bearing: without `_Role.users` typed as a
     /// Relation, the first write to a role infers it from whatever it happens to carry.
     pub fn resolve_for_write(&self, class_name: &str) -> ClassSchema {

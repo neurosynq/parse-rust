@@ -8,13 +8,13 @@
 # Do not restate these values in prose anywhere else. Reference this file. Four copies of one
 # pin means three stale copies, which is how a verified-looking citation stops resolving.
 #
-# The commit is written in full. An abbreviated SHA cannot be fetched: `git fetch origin ca75b1fe`
+# The commit is written in full. An abbreviated SHA cannot be fetched: `git fetch origin 4ec73c57`
 # fails with "couldn't find remote ref", so CI could not reconstruct the checkout from it. Prose
-# elsewhere may say `ca75b1fe`; tooling reads this line.
+# elsewhere may say `4ec73c57`; tooling reads this line.
 #
 # format: <name> <version> <commit>
 
-parse-server 9.10.1-alpha.6 ca75b1fed69921f7843dc20b921d9b02dc352626
+parse-server 9.10.3 4ec73c57725d0157157e2a918ca518e5853c98ea
 
 # Recorded but not yet pinned. Citations into these are not mechanically checkable until a
 # commit is recorded here.

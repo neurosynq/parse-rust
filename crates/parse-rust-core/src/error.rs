@@ -4,8 +4,9 @@
 //! `src/Error.js`, and `spec/` asserts on these numbers directly. Never invent a code and
 //! never change one to a better-fitting one.
 //!
-//! Codes extracted from the `parse` npm SDK bundled with parse-server 9.10.1-alpha.6, which is
-//! the same table `src/Error.js` re-exports.
+//! Codes extracted from the `parse` npm SDK that parse-server bundles at the pin, which is the same
+//! table `src/Error.js` re-exports. Every code in that table is here; the two here that it lacks,
+//! 135 and 136, are upstream literals, as their variants say.
 
 use std::fmt;
 
@@ -105,7 +106,7 @@ impl fmt::Display for ErrorCode {
 /// fixed one and the detail goes only to the log. So the same detail is a disclosure or not
 /// depending on which of the two it travelled in, and the code alone cannot tell them apart:
 /// upstream throws `Parse.Error(INTERNAL_SERVER_ERROR, ...)` deliberately in several places
-/// (`Auth.js:195`, `DatabaseController.js:1590-1595`) and those keep their messages.
+/// (`Auth.js:195`, `DatabaseController.js:1591-1596`) and those keep their messages.
 ///
 /// **No `Default` impl, deliberately.** A forgotten field would select the disclosing variant,
 /// which is the failure this enum exists to prevent. Every value is chosen by a constructor.
@@ -131,6 +132,17 @@ pub struct ParseErrorInfo {
     /// `err.userInfo.duplicated_field` (`MongoStorageAdapter.js:584`). The field whose unique
     /// index a write collided on.
     pub duplicated_field: Option<String>,
+    /// The adapter raised this while building the query, before it had a database call to
+    /// await. Upstream's adapters do that work synchronously (`transformWhere` in
+    /// `MongoStorageAdapter.js:730`), so the throw escapes before `DatabaseController.find`
+    /// attaches the `.catch` that rewrites storage failures (`DatabaseController.js:1583-1596`).
+    /// [`ParseError::before_query`] sets it, and the read path leaves such an error as it is.
+    pub before_query: bool,
+    /// A read reached a class its request's schema snapshot lacks, and `_SCHEMA` has it: another
+    /// server created the class after the snapshot was taken. Never sent to a client. The server
+    /// rebuilds its schema cache and runs the read again, as upstream's `getOneSchema` reloads on
+    /// a miss (`SchemaController.js:812-822`). Without it the read would run under no CLP at all.
+    pub schema_stale: bool,
 }
 
 /// A Parse error: a code plus a message, plus how much of it may be seen.
@@ -187,6 +199,26 @@ impl ParseError {
         self
     }
 
+    /// Mark an error as raised before the database was asked. See [`ParseErrorInfo::before_query`].
+    #[must_use]
+    pub fn before_query(mut self) -> Self {
+        self.info.before_query = true;
+        self
+    }
+
+    /// See [`ParseErrorInfo::schema_stale`].
+    pub fn schema_stale(class_name: &str) -> Self {
+        let mut e = Self::internal(format!(
+            "schema snapshot lacks class {class_name}, which now exists"
+        ));
+        e.info.schema_stale = true;
+        e
+    }
+
+    pub fn is_schema_stale(&self) -> bool {
+        self.info.schema_stale
+    }
+
     /// The field whose unique index collided, if the adapter could recover it.
     pub fn duplicated_field(&self) -> Option<&str> {
         self.info.duplicated_field.as_deref()
@@ -195,7 +227,7 @@ impl ParseError {
 
 /// Whether a denial tells the client *why* it was denied.
 ///
-/// `enableSanitizedErrorResponse` (`Options/Definitions.js:253-258`). Upstream's default is
+/// `enableSanitizedErrorResponse` (`Options/Definitions.js:259-264`). Upstream's default is
 /// `true`, and its check is `config?.enableSanitizedErrorResponse !== false` (`Error.js:21`), so
 /// an absent config withholds too. [`ErrorDetail::Withheld`] is therefore what a stock deployment
 /// runs, and it is the message every unmodified SDK sees.
@@ -247,7 +279,7 @@ impl ParseError {
     /// call here means finding the matching `createSanitizedError` at the pin first.
     ///
     /// `generic` is upstream's `sanitizedMessage` parameter, which defaults to `Permission
-    /// denied` and is overridden at exactly one call site (`DatabaseController.js:1590-1595`).
+    /// denied` and is overridden at exactly one call site (`DatabaseController.js:1591-1596`).
     /// It is required here rather than defaulted, because the two upstream spellings are
     /// different strings on the wire and picking the wrong one silently is the failure this
     /// argument exists to prevent.

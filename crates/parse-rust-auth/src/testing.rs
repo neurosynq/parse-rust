@@ -136,6 +136,10 @@ impl StorageAdapter for FakeStorage {
         Ok(self.lock().schemas.values().cloned().collect())
     }
 
+    async fn class_exists(&self, class_name: &str) -> Result<bool, ParseError> {
+        Ok(self.lock().schemas.contains_key(class_name))
+    }
+
     async fn insert_schema(&self, schema: &ClassSchema) -> Result<(), ParseError> {
         let mut state = self.lock();
         if state.schemas.contains_key(&schema.class_name) {
@@ -304,11 +308,15 @@ impl StorageAdapter for FakeStorage {
                 match direction {
                     SortDirection::Ascending => ord,
                     SortDirection::Descending => ord.reverse(),
+                    SortDirection::TextScore => std::cmp::Ordering::Equal,
                 }
             });
         }
         if let Some(skip) = options.skip {
-            rows = rows.into_iter().skip(skip as usize).collect();
+            rows = rows
+                .into_iter()
+                .skip(usize::try_from(skip).unwrap_or(0))
+                .collect();
         }
         if let Some(limit) = options.limit {
             rows.truncate(limit as usize);
@@ -331,7 +339,24 @@ impl StorageAdapter for FakeStorage {
         Ok(rows)
     }
 
-    async fn count(&self, schema: &ClassSchema, query: &Query) -> Result<u64, ParseError> {
+    /// A fixed document naming the verbosity. Only the plumbing is under test here; what a real
+    /// database says is the adapter integration test's business.
+    async fn explain(
+        &self,
+        _schema: &ClassSchema,
+        _query: &Query,
+        _options: &QueryOptions,
+        verbosity: parse_rust_storage::ExplainVerbosity,
+    ) -> Result<serde_json::Value, ParseError> {
+        Ok(serde_json::json!({ "fake": verbosity.as_str() }))
+    }
+
+    async fn count(
+        &self,
+        schema: &ClassSchema,
+        query: &Query,
+        _options: &parse_rust_storage::CountOptions,
+    ) -> Result<u64, ParseError> {
         let state = self.lock();
         Ok(state
             .rows
@@ -406,6 +431,13 @@ impl StorageAdapter for FakeStorage {
 
     async fn drop_index(&self, _class_name: &str, _name: &str) -> Result<(), ParseError> {
         Ok(())
+    }
+
+    async fn index_fields(
+        &self,
+        _class_name: &str,
+    ) -> Result<Vec<parse_rust_storage::IndexFields>, ParseError> {
+        Ok(Vec::new())
     }
 }
 

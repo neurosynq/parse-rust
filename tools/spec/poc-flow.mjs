@@ -8,7 +8,7 @@
  * headers and interprets responses in ways a curl command does not exercise.
  *
  * Point it at a real parse-server to check the harness itself. Every assertion here has been
- * verified to pass against parse-server 9.10.1-alpha.6, so a failure means parse-rust diverged
+ * verified to pass against parse-server at the pin, so a failure means parse-rust diverged
  * rather than that the expectation was invented.
  *
  * Usage:

@@ -1,0 +1,37 @@
+# The benchmark stack: MongoDB and the toxiproxy that injects the database latency rungs.
+#
+# **Namespaced, on the 28xxx block** reserved for benchmarks, so it can run beside other stacks:
+# project and
+# container names carry `PRBENCH_PREFIX` (default `prbench`), the three published ports are
+# `PRBENCH_MONGO_PORT`, `PRBENCH_MONGO_PROXY_PORT` and `PRBENCH_TOXIPROXY_API_PORT` (defaults 28017,
+# 28018 and 28474), which the driver reads with the same names and defaults, and everything binds
+# 127.0.0.1. A run with no environment set cannot attach
+# to another stack's database, which is the failure that looks like a performance finding.
+#
+# The servers under test are not in here. They run on the host, one at a time, as the driver
+# starts them, so a target never shares a container's CPU with the database it is measured against.
+
+name: ${PRBENCH_PREFIX:-prbench}
+
+services:
+  mongo:
+    image: mongo:7.0.25@sha256:82db6c6c8103eee46ca820c190742b7c280d02d6f993903a603cec9d56be374b
+    container_name: ${PRBENCH_PREFIX:-prbench}-mongo
+    ports:
+      - "127.0.0.1:${PRBENCH_MONGO_PORT:-28017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    container_name: ${PRBENCH_PREFIX:-prbench}-toxiproxy
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      # The control API, and MongoDB through the proxy.
+      - "127.0.0.1:${PRBENCH_TOXIPROXY_API_PORT:-28474}:8474"
+      - "127.0.0.1:${PRBENCH_MONGO_PROXY_PORT:-28018}:28018"

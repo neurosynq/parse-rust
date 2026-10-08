@@ -49,7 +49,7 @@ fn status(response: &str) -> u16 {
 /// unless this header is present, so its absence is a total outage for a browser-hosted SDK while
 /// the server log shows nothing but 200s.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn every_response_carries_the_headers_a_browser_needs() {
     let server = common::boot().await;
     let host = &server.host;
@@ -97,7 +97,7 @@ async fn every_response_carries_the_headers_a_browser_needs() {
 /// that cannot read a 403 reports a network error instead, and the client cannot tell an
 /// authorization failure from an unreachable server.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_error_response_carries_them_as_well() {
     let server = common::boot().await;
     let host = &server.host;
@@ -123,7 +123,7 @@ async fn an_error_response_carries_them_as_well() {
 /// The preflight. Nothing registers `OPTIONS` on any route, so without the short-circuit this is a
 /// 405 and every client that preflights, which includes parse-dashboard, fails on the first call.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_preflight_is_answered_rather_than_routed() {
     let server = common::boot().await;
     let host = &server.host;
@@ -158,7 +158,7 @@ async fn a_preflight_is_answered_rather_than_routed() {
 /// A configured allowlist. The header takes one value and the browser compares it to its own
 /// origin, so a listed origin has to be echoed back and an unlisted one must not be.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_configured_allowlist_echoes_a_listed_origin_and_refuses_an_unlisted_one() {
     let server = common::boot_fresh_with(|mut config| {
         config.allow_origin = vec![
@@ -212,7 +212,7 @@ async fn a_configured_allowlist_echoes_a_listed_origin_and_refuses_an_unlisted_o
 /// an empty list to `*` reverses a closed configuration into an open one, which is the single
 /// direction a CORS bug must never fail in.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_explicitly_empty_allow_origin_is_not_a_wildcard() {
     let server = common::boot_fresh_with(|mut c| {
         c.allow_origin = Vec::new();

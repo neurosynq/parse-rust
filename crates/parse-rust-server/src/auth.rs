@@ -18,6 +18,7 @@ pub mod headers {
     pub const DOT_NET_KEY: &str = "x-parse-windows-key";
     pub const SESSION_TOKEN: &str = "x-parse-session-token";
     pub const INSTALLATION_ID: &str = "x-parse-installation-id";
+    pub const CLOUD_CONTEXT: &str = "x-parse-cloud-context";
 }
 
 /// How a request authenticated.
@@ -46,7 +47,7 @@ pub enum Credentials {
 ///
 /// `installationId` is not a credential and grants nothing. It is carried because exactly one
 /// behavior reads it: `destroyDuplicatedSessions` revokes a user's other sessions for the *same*
-/// installation when a new one is minted (`RestWrite.js:1153`), so a request that drops the
+/// installation when a new one is minted (`RestWrite.js:1245`), so a request that drops the
 /// header logs the user in twice on one device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authority {
@@ -82,7 +83,7 @@ pub enum HeaderRejection {
     /// Wrong or missing appId, or a required client key was absent or wrong.
     ///
     /// Upstream answers all of these identically: HTTP 403, body `{"error":"unauthorized"}`,
-    /// with **no `code` field** (`middlewares.js:829-832`). Collapsing the reasons is
+    /// with **no `code` field** (`middlewares.js:845-848`). Collapsing the reasons is
     /// deliberate upstream, and reproducing it means not adding a more helpful message.
     Unauthorized,
 }
@@ -144,8 +145,17 @@ pub fn resolve_with_peer(
 ) -> Result<Authority, HeaderRejection> {
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
 
-    let installation_id = get(headers::INSTALLATION_ID).map(str::to_string);
-    let session_token = get(headers::SESSION_TOKEN).map(str::to_string);
+    // An empty id is no id: upstream's session code tests it for truthiness before using it
+    // (`RestWrite.js:1216-1218`, `:1260-1262`), so two logins sending an empty header do not
+    // replace each other's sessions as duplicates.
+    let installation_id = get(headers::INSTALLATION_ID)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    // Empty is absent: upstream builds an anonymous `Auth` on `!info.sessionToken`
+    // (`middlewares.js:281-287`), so a blank header is not a token to look up and fail.
+    let session_token = get(headers::SESSION_TOKEN)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let with = |credentials: Credentials| Authority {
         credentials,
         session_token: session_token.clone(),

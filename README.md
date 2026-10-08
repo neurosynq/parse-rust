@@ -23,7 +23,14 @@ the same database. 0.1.0 could talk to a Parse client; 0.2.0 can be pointed at a
 0.2.1 closes the stock-configuration gaps found while testing that milestone: the master key is
 limited to loopback unless `masterKeyIps` says otherwise, CLP-declared default ACLs are applied on
 create, and falsy or object-shaped `_User` ACLs no longer leave the row public or remove its
-owner's access. Everything else is ahead of that, not behind it.
+owner's access.
+
+0.3.0 is the conformance milestone. parse-rust is now measured against parse-server's own test suite
+rather than only against tests this project wrote for itself: upstream's spec files run block by
+block against a parse-rust process, with a server-less control run and parse-server itself as the
+reference. It adds the read surface those files need first (geo queries, `$text`, `explain`, `hint`
+and `comment`), a benchmark harness, and a one-command demo. Everything else is ahead of that, not
+behind it.
 
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
@@ -36,42 +43,44 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 | Area | Endpoints and behavior |
 |---|---|
 | Objects | `POST`, `GET`, `PUT`, `DELETE` on `/classes/:class`, and `GET` with `where`, `limit`, `skip`, `order`, `keys`, `excludeKeys`, `count` |
-| Queries | `$or`, `$and`, `$nor`, `$regex` with `$options`, `$all`, `$relatedTo`, and `include` with dotted paths |
-| Users | `POST /users` (signup, bcrypt), `POST /login`, `GET /users/me`, `POST /logout` |
+| Queries | `$or`, `$and`, `$nor`, `$regex` with `$options`, `$all`, `$relatedTo`, `include` with dotted paths and through arrays of pointers, geo (`$nearSphere`, `$within`, `$geoWithin`, `$geoIntersects`), `$text` with `$score` ordering, and `explain`, `hint` and `comment` |
+| Users | `POST /users` (signup, bcrypt), `GET` and `POST /login`, `GET /users/me`, `GET /users`, `GET`, `PUT` and `DELETE /users/:objectId`, `POST /logout`, and account lockout |
+| Installations | `/classes/_Installation` with upstream's write checks; not its deduplication |
 | Sessions | `_Session` rows in upstream's format, surviving a restart and readable by parse-server. `/sessions` with `me`, list, get and delete |
 | Roles | `_Role` with its `users` and `roles` relations, the five `/roles` verbs, and transitive role graph expansion |
 | Access control | Object ACLs, class-level permissions with pointer permissions and default ACLs, and `protectedFields` |
 | Schema | Classes and fields created by first write with types inferred, plus the full `/schemas` API and `/purge`, master-key only |
 | Relations | `_Join` tables, `AddRelation` and `RemoveRelation`, and constraints on a `Relation`-typed field |
 | Writes | The atomic update operations: `Increment`, `Add`, `AddUnique`, `Remove`, `Delete` |
-| Batch | `/batch` with per-operation results and upstream's error shape |
+| Batch | `/batch` with per-operation results and upstream's error shape, its sub-requests run concurrently as upstream runs them |
 | Types | Pointer, Date, Bytes, GeoPoint, File, Polygon, Relation and the update operations, encoded as upstream encodes them |
 | Errors | Upstream's numeric codes, messages and both error envelopes |
-| Transport | The JavaScript SDK's `POST`-everything form, normalized before routing |
+| Transport | The JavaScript SDK's `POST`-everything form, normalized before routing, and upstream's 20 MB request body limit, answered with a 413 |
 | Server | `GET /serverInfo`, `GET /health`, the master key gate with source-address filtering, client-key validation |
 | Browsers | Upstream's CORS headers on every response including errors, and an `OPTIONS` preflight answered directly. `allowOrigin` and `allowHeaders` are configurable |
 
 ### What is not there yet
 
 LiveQuery, Cloud Code and triggers, files, push, aggregate, GraphQL, `$inQuery`, `$notInQuery`,
-`$select`, `$dontSelect`, geo and `$text` queries, password reset, email verification, auth
-adapters, MFA, account lockout, password policy, rate limiting, idempotency, and PostgreSQL. Of
-the `_User` routes, `/users/:objectId` does not exist and `/classes/_User` refuses an ordinary
-client's create and delete, so `signUp`, `logIn` and `user.save()` on an existing user all work,
-while creating or deleting a user outside `POST /users` does not.
+`$select`, `$dontSelect`, password reset, email verification, auth adapters, MFA, password
+policy, rate limiting, idempotency, and PostgreSQL. An ordinary client cannot create a `_User`
+through `POST /classes/_User`, or delete one through `/classes/_User/:objectId` or
+`/users/:objectId`, so `signUp`, `logIn` and `user.save()` on an existing user all work, while
+creating a user outside `POST /users`, or a client deleting one, does not.
 
 Three of those absences are not inert, and matter before you try anything against real data:
 
 - **Retried writes duplicate**, because idempotency is not implemented. This matches upstream's
   default configuration, where the feature is off unless paths are configured.
 - **Query constraints that are not implemented are refused, not ignored.** A request using
-  `$inQuery`, `$select`, geo or `$text` gets an error naming the operator. That is deliberate: a
+  `$inQuery` or `$select` gets an error naming the operator. That is deliberate: a
   silently dropped constraint broadens a result set, which is an authorization failure rather than
   a missing feature. Code written against parse-server will fail loudly here rather than return
   too much.
-- **Nothing is cached.** Every request reloads every schema and role expansion issues one query
-  per level of the graph. Correct and slow, deferred on purpose because a cache's staleness window
-  decides how long a revoked permission keeps working.
+- **Schemas are cached; roles are not.** A schema change made through this server applies to the
+  next request, and one made by another server sharing the database waits for
+  `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL` or a restart, as it does between parse-server nodes.
+  Role expansion issues one query per level of the graph on every request.
 
 `CHANGELOG.md` carries the full list, including the deliberate differences from upstream.
 
@@ -80,12 +89,10 @@ Three of those absences are not inert, and matter before you try anything agains
 Roughly in order. Each step should be gated on the upstream spec files for that subsystem passing,
 not on the code existing, which is why the first item is the instrument rather than a feature.
 
-1. **The conformance harness.** Parse Server ships an executable specification, and nothing runs it
-   against parse-rust yet. Until that exists, every claim made here rests on hand-written
-   differential runners that check what someone thought to check. This is the largest gap in the
-   project and it is judged on its own, not bundled with a feature.
+1. **The conformance harness.** Built in 0.3.0. Parse Server ships an executable specification,
+   and `tools/conformance/run.mjs` now runs it against parse-rust. Coverage grows file by file.
 2. **Auth and users.** Password reset, email verification, auth adapters, MFA, account lockout,
-   password policy.
+   password policy. Account lockout landed in 0.3.0.
 3. **Triggers.** A `TriggerHost` trait with native Rust triggers and a webhook host. Existing
    `main.js` cloud code runs in a Node sidecar reached over that same webhook protocol, so
    JavaScript is a compatibility path rather than a requirement.
@@ -93,7 +100,7 @@ not on the code existing, which is why the first item is the instrument rather t
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
 
-0.1.0, 0.2.0 and 0.2.1 are done; `CHANGELOG.md` says what each one actually landed.
+0.1.0, 0.2.0, 0.2.1 and 0.3.0 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
@@ -122,8 +129,19 @@ parse-server.
 
 ## Quick start
 
-Requires a stable Rust toolchain and a MongoDB you can write to. Anything 7.0 or later; a single
-node is fine, no replica set needed.
+The fastest way to see it answer a Parse SDK, with Docker and nothing else:
+
+```
+docker compose up
+```
+
+That builds parse-rust from the checkout, starts a MongoDB beside it, and serves
+`http://127.0.0.1:27800/parse` with application id `demo` and master key `demo-master-key`. It is a
+demo, not a deployment: the keys are public and the database has no authentication.
+`tools/demo/check.sh` checks it from a fresh clone.
+
+To run it yourself, it requires a stable Rust toolchain and a MongoDB you can write to. The test
+suite runs against MongoDB 7 and 9; a single node is fine, no replica set needed.
 
 Install the server:
 
@@ -197,6 +215,11 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION` | `false` | whether a non-master caller may create a class |
 | `PARSE_SERVER_ALLOW_ORIGIN` | `*` | comma-separated; an explicitly empty value allows no origin |
 | `PARSE_SERVER_ALLOW_HEADERS` | unset | comma-separated, added to upstream's default list |
+| `PARSE_SERVER_DEFAULT_LIMIT` | `100` | rows a find returns when it names no `limit` |
+| `PARSE_SERVER_MAX_LIMIT` | unset | caps the rows a find returns |
+| `PARSE_SERVER_DATABASE_ALLOW_PUBLIC_EXPLAIN` | `false` | whether `explain` works without the master key |
+| `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL` | unset | milliseconds before a cached schema is reloaded; unset or `0` never expires |
+| `PARSE_SERVER_ACCOUNT_LOCKOUT` | unset | JSON, as upstream's option: `{"duration":5,"threshold":3}` |
 
 The client keys are all-or-nothing, as upstream: configure none and none is required; configure
 any one and every non-master request must present a matching key.
@@ -333,7 +356,8 @@ tools/test.sh --quick    # skip steps needing node, MongoDB or an upstream check
 Steps that need more than a Rust toolchain skip with a stated reason rather than silently passing.
 
 Several suites compare against a real parse-server checkout. They expect it as a sibling directory
-(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points. The five acceptance gates are:
+(`../parse-server`), or wherever `PARSE_SERVER_ROOT` points, built at the revision in `PIN`. The
+acceptance gates are:
 
 - **Gate A** drives the whole flow through the unmodified `parse` npm SDK, including ACL round
   trips, cross-user read and write isolation, and rejection of invalid session tokens.
@@ -349,13 +373,25 @@ Several suites compare against a real parse-server checkout. They expect it as a
   and that a failed write leaves the same `_SCHEMA` state behind under both.
 - **Gate E** boots parse-rust and parse-server at stock and configured settings, then exercises
   both from loopback and a second source address. It compares master-key IP filtering,
-  CLP-declared default ACLs and the `_User` identity cases fixed in 0.2.1.
+  CLP-declared default ACLs and the `_User` identity cases fixed in 0.2.1. Gate I extends it to
+  the options and checks 0.3.0 adds.
+- **Gate F** runs upstream's own spec files against parse-rust, block by block. Every request
+  carries the block that sent it and parse-rust counts them; the suite runs again with no server,
+  and the blocks that still pass must be exactly the ones declared not to need one; and the same
+  patched suite must pass against parse-server.
+- **Gate H** checks that `reconfigureServer` refuses, by name, any option parse-rust cannot honour,
+  so a spec cannot pass by having its configuration silently ignored.
+- **Gate J** benchmarks seven workloads against parse-server at three injected database latencies,
+  after checking both servers give the same answer, and microbenchmarks the JSON and BSON
+  transforms. It publishes distributions only, with no faster or slower verdict yet.
+- **Gate K** brings the demo up twice from a fresh clone.
 
 Each gate carries an assertion floor and fails if it runs fewer checks than it declares, so a gate
 cannot quietly stop testing anything while still reporting green.
 
-Gates B, C, D and E also run against a real parse-server, so a failure there means parse-rust
-diverged rather than that an expectation was invented. Gate A's assertions hold against
+Gates B, C, D, E and I also run against a real parse-server, so a failure there means parse-rust
+diverged rather than that an expectation was invented. Where parse-rust deliberately differs, the
+Gate I assertion states each server's answer. Gate A's assertions hold against
 parse-server too, but it is executed only against parse-rust.
 
 What the gates do not do is check combinations. They walk stories, and the defects found late in
@@ -366,7 +402,7 @@ running the upstream spec suite rather than for adding more gates.
 
 ## Reference implementation
 
-Parse Server 9.10.1-alpha.6 is the target, pinned at the commit recorded in `PIN`. Claims about
+Parse Server 9.10.3 is the target, pinned at the commit recorded in `PIN`. Claims about
 upstream behavior in this codebase carry a `File.js:LINE` citation against that pin rather than a
 recollection, because Parse's behavior is under-documented and the edge cases are exactly where
 the surprises are.

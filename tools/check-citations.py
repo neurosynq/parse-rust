@@ -40,6 +40,11 @@ CITATION = re.compile(
     r"(?<![\w/.-])((?:[\w./-]+/)?\.?[\w.-]+\.(?:js|ts|jsx|tsx)):(\d+)(?:-(\d+))?\b"
 )
 
+# A continuation of the citation before it, in the house style `` (`File.js:12`, `:40-44`) ``: the
+# file is the previous citation's. These were never checked, which is how `:386` went on citing the
+# line above the option it named.
+CONTINUATION = re.compile(r"`?(?:,\s*(?:and\s+)?|\s+and\s+)`:(\d+)(?:-(\d+))?\b`?")
+
 # Citations that name a file we cannot resolve because no pin is recorded for its repository.
 # These are reported separately and do not fail the build, because there is nothing to check
 # them against yet. Record a pin in PIN and they become checkable. Keep this list honest: an
@@ -128,8 +133,15 @@ def main():
     # tool works in a checkout that carries the design documents.
     scan_roots = [d for d in ("crates", "tools", "docs") if os.path.isdir(os.path.join(REPO, d))]
     scan_exts = (".rs", ".md", ".js", ".mjs", ".py", ".sh", ".toml", ".yml")
+    # The top-level documents that cite upstream too. The changelog was skipped for a release and
+    # a pin change, and nine of its citations went on pointing at the previous pin's lines.
+    walks = [
+        (REPO, [], [f for f in ("CHANGELOG.md", "CONTRIBUTING.md", "README.md")
+                    if os.path.isfile(os.path.join(REPO, f))])
+    ]
     for top in scan_roots:
-      for root, dirs, files in os.walk(os.path.join(REPO, top)):
+        walks.extend(os.walk(os.path.join(REPO, top)))
+    for root, dirs, files in walks:
         dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "target")]
         for name in files:
             if not name.endswith(scan_exts):
@@ -150,6 +162,16 @@ def main():
                         # so its last line is usually a closing brace: checking that one flagged
                         # half of every citation in the repository the first time this was written.
                         found.append((rel, i, cited, max(start, int(end or start)), start))
+                        pos = m.end()
+                        # Continuations are checked where a public reader meets them: the code, the
+                        # tools and the top-level documents. The private design and review notes
+                        # carry many written against earlier pins and are not held to it yet.
+                        while not rel.startswith("docs/") and (
+                            c := CONTINUATION.match(text, pos)
+                        ) is not None:
+                            cstart, cend = int(c.group(1)), c.group(2)
+                            found.append((rel, i, cited, max(cstart, int(cend or cstart)), cstart))
+                            pos = c.end()
 
     # Resolve each cited name to a path at the pin.
     wanted, unresolved, skipped, ambiguous = {}, [], [], []

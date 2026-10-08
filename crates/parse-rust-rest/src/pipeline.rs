@@ -4,7 +4,7 @@
 //! nothing at runtime and a future Postgres adapter drops in by type rather than by trait object.
 //!
 //! Every entry point takes a [`SchemaSnapshot`] and an [`AclScope`] and runs the stages in
-//! upstream's order. The read order is `DatabaseController.js:1418-1598`:
+//! upstream's order. The read order is `DatabaseController.js:1419-1599`:
 //!
 //! load the schema, once per request; resolve the class, a missing one behaving as empty;
 //! validate the sort, dropping unknown keys; the CLP gate; `$relatedTo` with its authorization;
@@ -14,7 +14,7 @@
 //! Two orderings differ from a naive reading and both are upstream's. `denyProtectedFields` runs
 //! in `RestQuery.execute` *before* the CLP gate (`RestQuery.js:284-288`), so a query naming a
 //! protected field reports that rather than the CLP denial. And `canAddField` runs before the
-//! per-operation gate on a write (`DatabaseController.js:526-536`), so an unauthorized field
+//! per-operation gate on a write (`DatabaseController.js:527-537`), so an unauthorized field
 //! addition is reported ahead of an unauthorized create.
 
 use std::future::Future;
@@ -36,12 +36,12 @@ use parse_rust_storage::{
 
 use crate::acl::{default_acl_for_create, lower_acl, raise_acl, AclScope};
 use crate::clp::{
-    adds_field, apply_pointer_permissions, deny_protected_fields, filter_sensitive_data,
+    self, adds_field, apply_pointer_permissions, deny_protected_fields, filter_sensitive_data,
     plan_protected_fields, validate_permission, PermissionOptions, PointerPermOutcome,
     ProtectedFieldPlan, WriteAction,
 };
 use crate::include;
-use crate::query_parse::{ParsedClause, ParsedWhere};
+use crate::query_parse::{DeferredWhere, ParsedClause, ParsedWhere};
 use crate::relations::{self, RelationConstraint};
 use crate::snapshot::SchemaSnapshot;
 use crate::write::{
@@ -66,7 +66,7 @@ pub struct Ctx<'a, S: StorageAdapter> {
     /// [`AclScope::Unrestricted`] covers both, because they apply the same ACL treatment: none. But
     /// they are not the same authority, and at least one decision reads them differently.
     /// `validateClientClassCreation` exempts master *and* maintenance on a write
-    /// (`RestWrite.js:200-202`) and only master on a read (`RestQuery.js:486-489`), so the read path
+    /// (`RestWrite.js:206-208`) and only master on a read (`RestQuery.js:486-489`), so the read path
     /// needs to tell them apart and the scope cannot.
     ///
     /// A separate flag rather than an `AclScope` variant, deliberately and narrowly: a variant
@@ -107,7 +107,9 @@ impl<'a, S: StorageAdapter> Ctx<'a, S> {
 #[derive(Debug, Clone)]
 pub struct FindOptions {
     pub limit: Option<u32>,
-    pub skip: Option<u32>,
+    /// Signed, because a negative skip is refused by the database rather than by the parser, and
+    /// that position is what the client sees. See [`QueryOptions::skip`].
+    pub skip: Option<i64>,
     pub order: Vec<(String, SortDirection)>,
     pub keys: Option<Vec<String>>,
     /// Subtracted from the projection before it reaches storage, so an adapter only ever sees the
@@ -116,6 +118,8 @@ pub struct FindOptions {
     /// Include paths, every prefix materialized and sorted by depth. Build with
     /// [`crate::query_parse::parse_include`].
     pub include: Vec<Vec<String>>,
+    pub hint: Option<parse_rust_storage::Hint>,
+    pub comment: Option<String>,
 }
 
 impl Default for FindOptions {
@@ -127,6 +131,8 @@ impl Default for FindOptions {
             keys: None,
             exclude_keys: None,
             include: Vec::new(),
+            hint: None,
+            comment: None,
         }
     }
 }
@@ -137,7 +143,7 @@ impl Default for FindOptions {
 pub struct CreateResponse {
     pub object_id: String,
     pub created_at: ParseDate,
-    /// Empty unless the body carried an `Add`, `AddUnique`, `Remove` or `Increment`.
+    /// The results of `Add`, `AddUnique`, `Remove` and `Increment`, and any defaults applied.
     pub echoed: ParseMap,
 }
 
@@ -167,8 +173,13 @@ pub async fn find<S: StorageAdapter>(
     where_: ParsedWhere,
     options: FindOptions,
 ) -> Result<Vec<ParseMap>, ParseError> {
+    if options.limit == Some(0) {
+        zero_limit_checks(ctx, class_name, where_, &options)?;
+        return Ok(Vec::new());
+    }
+
     // `op` is derived, not passed: a query whose only constraint pins one objectId is a `get` for
-    // CLP purposes (`DatabaseController.js:1412-1413`), so a class that grants `get` and denies
+    // CLP purposes (`DatabaseController.js:1413-1414`), so a class that grants `get` and denies
     // `find` still serves it.
     let op = derived_op(&where_);
     let mut results = find_core(
@@ -184,6 +195,58 @@ pub async fn find<S: StorageAdapter>(
     .await?;
     expand_includes(ctx, &mut results, &options).await?;
     Ok(results)
+}
+
+/// What a `limit=0` find still checks before answering `[]`.
+///
+/// **`limit=0` asks the database nothing, and so asks no permission either**
+/// (`RestQuery.js:864-867`): `runFind` answers an empty result before `DatabaseController.find`,
+/// where the CLP gate lives. It is what `query.count()` sends, `limit=0&count=1`, so a class whose
+/// CLP grants `count` and not `find` is countable. An explain takes the same branch, because the
+/// explain is a find option that only `DatabaseController.find` reads, and the `include` pass that
+/// fails on an explain document walks an empty list instead.
+///
+/// What runs before `runFind` still runs, in upstream's order: the constructor's class security
+/// and `_Session` refusal (`RestQuery.js:54`, `:118-120`), the class-creation check in
+/// `buildRestWhere`, and `denyProtectedFields` (`RestQuery.js:287`). Skipping them let
+/// `GET /classes/_Session?limit=0` with no session answer 200 where upstream answers 209.
+fn zero_limit_checks<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    where_: ParsedWhere,
+    options: &FindOptions,
+) -> Result<(), ParseError> {
+    let master = ctx.scope.is_master();
+    crate::class_security::enforce_class_security(
+        class_name,
+        master,
+        ReadMethod::Find.as_str(),
+        ctx.options.error_detail,
+    )?;
+    let mut where_ = where_;
+    narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
+    if !ctx.snapshot.contains(class_name) {
+        validate_client_class_creation(ctx, class_name, false)?;
+    }
+    if !master {
+        let protected = plan_protected_fields(
+            class_name,
+            ctx.snapshot.clp(class_name),
+            ctx.scope,
+            where_.pinned_object_id(),
+            ctx.options,
+        );
+        deny_protected_fields(
+            protected.as_ref(),
+            class_name,
+            &where_,
+            &options.order,
+            ctx.options.error_detail,
+        )?;
+        // `denyProtectedFields` runs before the `limit=0` answer, so this refusal does too.
+        deny_malformed_logical(&where_)?;
+    }
+    Ok(())
 }
 
 /// Fetch one object by id.
@@ -211,10 +274,16 @@ pub async fn get<S: StorageAdapter>(
 }
 
 /// Count objects.
+///
+/// `order` is the find's. A count never sorts, but upstream's `runCount` sends the find's options
+/// through `DatabaseController.find` again (`RestQuery.js:917-925`), which validates every sort
+/// key, so `limit=0&count=1&order=$bad` is 105 there and must be here.
 pub async fn count<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     where_: ParsedWhere,
+    order: &[(String, SortDirection)],
+    options: &parse_rust_storage::CountOptions,
 ) -> Result<u64, ParseError> {
     let schema = ctx.snapshot.get_or_default(class_name);
     // A count is served by the find route, so the class-security method is `find` (`rest.js:136`).
@@ -223,26 +292,36 @@ pub async fn count<S: StorageAdapter>(
         class_name,
         &schema,
         where_,
-        &[],
+        order,
         Operation::Count,
         ReadMethod::Find,
     )
     .await?;
-    let query = match plan {
+    let (query, protected) = match plan {
         // A count denied by a pointer permission is zero.
         //
         // UPSTREAM-QUIRK, deliberately not reproduced: upstream returns the literal `[]` from the
-        // shared deny branch (`DatabaseController.js:1509-1515`) whatever the operation, so a
+        // shared deny branch (`DatabaseController.js:1510-1516`) whatever the operation, so a
         // denied count answers `{"count": []}` on the wire. That is a type confusion rather than
         // a behavior a client can depend on, and reproducing it would mean giving this function a
         // return type that can hold an array.
         ReadPlan::Denied => return Ok(0),
-        ReadPlan::Run { query, .. } => query,
+        ReadPlan::Run {
+            query, protected, ..
+        } => (query, protected),
     };
     if !ctx.snapshot.contains(class_name) {
         return Ok(0);
     }
-    ctx.storage.count(&schema, &query).await
+    deny_protected_index_fields(
+        ctx,
+        class_name,
+        protected.as_ref(),
+        &query,
+        options.hint.as_ref(),
+    )
+    .await?;
+    ctx.storage.count(&schema, &query, options).await
 }
 
 /// `RestQuery.Method` (`RestQuery.js:80-83`): which read this is, as opposed to what the CLP gate
@@ -251,7 +330,7 @@ pub async fn count<S: StorageAdapter>(
 /// **These are two different questions and upstream answers them from two different places.** The
 /// method comes from the route (`rest.js:136` and `:150` name it literally) or, on the include
 /// path, from how many ids were collected (`RestQuery.js:1250-1251`). The CLP operation is derived
-/// from the query shape instead (`DatabaseController.js:1412-1413`), and the include path pins it
+/// from the query shape instead (`DatabaseController.js:1413-1414`), and the include path pins it
 /// to `get` regardless of the method it just chose (`RestQuery.js:1259`).
 ///
 /// Collapsing the two loses `enforceRoleSecurity`'s method-sensitive rules. `_Installation` is the
@@ -350,6 +429,7 @@ fn narrow_sessions(
                 object_id: user_id.to_string(),
             },
         ))],
+        deferred: None,
     };
     // `$and: [restWhere, {user}]` and not a pushed constraint (`RestQuery.js:121-131`). A client
     // is free to send its own `user` constraint, and two equalities on one field spliced side by
@@ -358,13 +438,110 @@ fn narrow_sessions(
     //
     // The one departure: an empty `restWhere` is dropped rather than nested as `{}`. Upstream
     // nests it, and `$and: [{}, ...]` is a valid but pointless branch.
+    // A deferred failure stays at the top, where the read path looks for it.
+    let deferred = where_.deferred.take();
     if where_.is_empty() {
         *where_ = mine;
     } else {
         let client = std::mem::take(where_);
         where_.push(ParsedClause::And(vec![client, mine]));
     }
+    where_.deferred = deferred;
     Ok(())
+}
+
+/// `checkWhere`'s refusal of a `$or`, `$and` or `$nor` that is not an array, for a caller other
+/// than master and maintenance, whether or not anything is protected (`RestQuery.js:956-963`).
+fn deny_malformed_logical(where_: &ParsedWhere) -> Result<(), ParseError> {
+    match &where_.deferred {
+        // Upstream sanitizes this to `Permission denied`, which tells the client nothing about
+        // its malformed query. The message says what is wrong instead.
+        Some(DeferredWhere::MalformedLogical(message)) => {
+            Err(ParseError::invalid_query(message.clone()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A field of an index that only the server reads: an `_`-prefixed column such as a token or the
+/// password hash, or `authData`, which the adapter stores under `_auth_data_*`.
+///
+/// `_rperm` and `_wperm` are not among them: they are the ACL, which every row a caller can read
+/// already shows it.
+fn internal_index_field(fields: &[String]) -> Option<&str> {
+    fields
+        .iter()
+        .find(|field| {
+            (field.starts_with('_') && !matches!(field.as_str(), "_rperm" | "_wperm"))
+                || field.as_str() == "authData"
+        })
+        .map(String::as_str)
+}
+
+/// [`deny_protected_fields`] for a field a read reaches through an index rather than by name.
+///
+/// Held to the same rule, with the same refusals. Only a caller with something protected pays for
+/// listing the class's indexes. A deliberate difference: upstream accepts any `hint`.
+async fn deny_protected_index_fields<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    protected: Option<&ProtectedFieldPlan>,
+    query: &Query,
+    hint: Option<&parse_rust_storage::Hint>,
+) -> Result<(), ParseError> {
+    // A hinted index is checked for every caller but master, because an internal column is
+    // never readable by one. A text index is checked only when something is protected.
+    let has_protected = protected.is_some_and(|p| !p.strip.is_empty());
+    let text = has_protected && has_text_search(query);
+    if ctx.scope.is_master() || (hint.is_none() && !text) {
+        return Ok(());
+    }
+    let indexes = ctx.storage.index_fields(class_name).await?;
+    let refuse = |verb: &str, field: &str| {
+        ParseError::permission_denied(
+            ErrorCode::OperationForbidden,
+            format!("This user is not allowed to {verb} {field} on class {class_name}"),
+            ctx.options.error_detail,
+        )
+    };
+    if let Some(hint) = hint {
+        // A hint naming no index is the database's refusal, which reveals nothing protected.
+        let hinted = indexes.iter().find(|index| match hint {
+            parse_rust_storage::Hint::Name(name) => index.name == *name,
+            parse_rust_storage::Hint::Keys(keys) => {
+                index.columns.len() == keys.len()
+                    && index.columns.iter().zip(keys.keys()).all(|(c, k)| c == k)
+            }
+        });
+        if let Some(field) = hinted.and_then(|index| {
+            clp::protected_index_field(protected, &index.fields)
+                .or_else(|| internal_index_field(&index.fields))
+        }) {
+            return Err(refuse("sort by", field));
+        }
+    }
+    if text {
+        for index in indexes.iter().filter(|index| index.text) {
+            if let Some(field) = clp::protected_index_field(protected, &index.fields) {
+                return Err(refuse("query", field));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does the query carry a `$text` search anywhere?
+fn has_text_search(query: &Query) -> bool {
+    query.clauses.iter().any(|clause| match clause {
+        Clause::Field(Constraint {
+            comparison: Comparison::Text(_),
+            ..
+        }) => true,
+        Clause::Field(_) => false,
+        Clause::Or(subs) | Clause::And(subs) | Clause::Nor(subs) => {
+            subs.iter().any(has_text_search)
+        }
+    })
 }
 
 /// Steps 2 through 11 of the read ordering.
@@ -378,6 +555,7 @@ fn plan_read<'a, S: StorageAdapter>(
     method: ReadMethod,
 ) -> BoxFut<'a, Result<ReadPlan, ParseError>> {
     Box::pin(async move {
+        refuse_unnamed_class(ctx, class_name, "find")?;
         let clp = ctx.snapshot.clp(class_name);
         let acl_group = ctx.scope.acl_group();
         let master = ctx.scope.is_master();
@@ -395,6 +573,15 @@ fn plan_read<'a, S: StorageAdapter>(
             ctx.options.error_detail,
         )?;
         narrow_sessions(&mut where_, class_name, ctx.scope, ctx.options.error_detail)?;
+
+        // **The read path runs the same option the write path does**, from `buildRestWhere`
+        // (`RestQuery.js:485-500`), so before the protected-field, sort and CLP checks. Answering
+        // an empty result instead tells a client that cannot create classes that the class simply
+        // has no rows, which is a different statement from upstream's refusal and hides a
+        // misconfigured client behind a plausible-looking 200.
+        if !ctx.snapshot.contains(class_name) {
+            validate_client_class_creation(ctx, class_name, false)?;
+        }
 
         // 8 (computed early, because the denial below needs it). Master never reaches it.
         let protected = if master {
@@ -418,6 +605,12 @@ fn plan_read<'a, S: StorageAdapter>(
                 order,
                 ctx.options.error_detail,
             )?;
+            deny_malformed_logical(&where_)?;
+        }
+        // `find` reads `query.objectId` before it loads the schema, so a null `where` fails here,
+        // for every caller.
+        if matches!(where_.deferred, Some(DeferredWhere::Null)) {
+            return Err(ParseError::internal("where is null".to_string()));
         }
 
         // 3. Sort validation. Unknown keys are dropped rather than refused, except `score`.
@@ -435,12 +628,34 @@ fn plan_read<'a, S: StorageAdapter>(
             )?;
         }
 
-        // 11. Query validation, hoisted above the resolution steps because the keys it inspects
-        //     are the client's. Upstream runs it after pointer rewriting, on a query that by then
-        //     also carries the server's own `_rperm`/`_wperm` and has had `$relatedTo` deleted;
-        //     both of those are keys it would allow anyway, so checking the client's keys here is
-        //     the same predicate over a smaller set.
-        crate::query_parse::validate_query_keys(&where_, master)?;
+        // 11. Query validation, computed over the client's keys before the resolution steps
+        //     consume them and raised at upstream's position, after pointer permissions. Upstream
+        //     runs it on a query that by then also carries the server's own `_rperm`/`_wperm` and
+        //     has had `$relatedTo` deleted; both of those are keys it would allow anyway, so
+        //     checking the client's keys is the same predicate over a smaller set. The position
+        //     matters: a query a pointer permission denies outright answers empty, whatever keys
+        //     it names (`DatabaseController.js:1510-1516` before `:1524`).
+        let keys_checked = match where_.deferred.take() {
+            // The conversion's own error, at the conversion's position, which follows the key-name
+            // check. The clauses are only the failed `where`'s shape, kept for the checks above
+            // and this one, so they go before anything resolves them.
+            Some(DeferredWhere::Error(e)) => {
+                let keys = crate::query_parse::validate_query_keys(&where_, master);
+                where_.clauses.clear();
+                keys.and(Err(e))
+            }
+            // Master skips `checkWhere`; the same malformed shape is refused here with the same
+            // message, where upstream answers a 500 for `$or` and `$and`.
+            Some(DeferredWhere::MalformedLogical(message)) => {
+                where_.clauses.clear();
+                Err(ParseError::invalid_query(message))
+            }
+            // `addReadACL` assigns onto it for anyone but master; master's query has no keys.
+            Some(DeferredWhere::Scalar) if !master => {
+                Err(ParseError::internal("where is not an object".to_string()))
+            }
+            _ => crate::query_parse::validate_query_keys(&where_, master),
+        };
 
         // 5 and 6. `$relatedTo` and relation-field constraints, both join-table reads.
         let mut query = resolve_where(ctx, class_name, schema, where_).await?;
@@ -454,6 +669,7 @@ fn plan_read<'a, S: StorageAdapter>(
                 PointerPermOutcome::DenyAll => return Ok(ReadPlan::Denied),
             }
         }
+        keys_checked?;
 
         // 10. The ACL clause.
         //
@@ -508,25 +724,46 @@ fn find_core<'a, S: StorageAdapter>(
                 order,
             } => (query, protected, order),
         };
+        deny_protected_index_fields(
+            ctx,
+            class_name,
+            protected.as_ref(),
+            &query,
+            options.hint.as_ref(),
+        )
+        .await?;
 
-        if !ctx.snapshot.contains(class_name) {
-            // **The read path runs the same option the write path does**
-            // (`RestQuery.js:485-500`). Answering an empty result instead tells a client that
-            // cannot create classes that the class simply has no rows, which is a different
-            // statement from upstream's refusal and hides a misconfigured client behind a
-            // plausible-looking 200.
-            validate_client_class_creation(ctx, class_name, false)?;
-            return Ok(Vec::new());
+        // **A class that does not exist is still read.** Upstream reads it under `{fields: {}}`
+        // and asks the adapter anyway (`DatabaseController.js:1423-1433`, `:1561-1563`), so the
+        // query is built and its errors raised: a malformed `$within` is 107 on any class.
+        // A `userField:` rule reads its pointer field, so a `keys` that leaves it out projects it
+        // anyway and the field is removed again after filtering (`DatabaseController.js:1865-1874`,
+        // `:285`). Without it the rule never matched and the caller's own fields stayed
+        // stripped.
+        let mut keys = projection(&schema, &options);
+        let mut temporary: Vec<String> = Vec::new();
+        if let (Some(keys), Some(plan)) = (keys.as_mut(), protected.as_ref()) {
+            for (field, _) in &plan.user_field_rules {
+                if !keys.iter().any(|k| k == field) {
+                    keys.push(field.clone());
+                    temporary.push(field.clone());
+                }
+            }
         }
-
         let query_options = QueryOptions {
             limit: options.limit,
             skip: options.skip,
             order,
-            keys: projection(&schema, &options),
+            keys,
             case_insensitive: false,
+            hint: options.hint.clone(),
+            comment: options.comment.clone(),
         };
-        let rows = ctx.storage.find(&schema, &query, &query_options).await?;
+        let rows = ctx
+            .storage
+            .find(&schema, &query, &query_options)
+            .await
+            .map_err(|e| find_failure(e, ctx.options.error_detail))?;
 
         // 13.
         let is_read = matches!(op, Operation::Get | Operation::Find);
@@ -542,10 +779,134 @@ fn find_core<'a, S: StorageAdapter>(
                     is_read,
                     ctx.options,
                 );
+                // Removed where upstream removes them: everywhere but a caller's own `_User` row
+                // under the owner exemption.
+                let own_user_row = class_name == USER_CLASS
+                    && ctx.options.protected_fields_owner_exempt
+                    && ctx.scope.user_id().is_some_and(|uid| {
+                        matches!(row.get("objectId"), Some(ParseValue::String(id)) if id == uid)
+                    });
+                if !own_user_row {
+                    for field in &temporary {
+                        row.shift_remove(field);
+                    }
+                }
                 row
             })
             .collect())
     })
+}
+
+/// A storage failure on the read path, as `DatabaseController.find` reports it.
+///
+/// Anything that is not already a Parse error is rethrown as a sanitized
+/// `INTERNAL_SERVER_ERROR` whose generic message is `An internal server error occurred`
+/// (`DatabaseController.js:1583-1596`), the one call site that overrides `Permission denied`. So
+/// a find the database refuses, a negative `skip` or a `hint` naming no index, answers
+/// `{"code":1,"error":"An internal server error occurred"}`, not the bare
+/// `{"code":1,"message":"Internal server error."}` a thrown `Error` gets elsewhere.
+///
+/// An error the adapter raised while building the query is left alone: upstream throws it
+/// synchronously, before that `.catch` is attached, so it answers the bare 500. A `$geoWithin`
+/// point with latitude 100 is the case that shows the difference.
+fn find_failure(e: ParseError, detail: parse_rust_core::ErrorDetail) -> ParseError {
+    if e.origin != parse_rust_core::ErrorOrigin::Internal || e.info.before_query {
+        return e;
+    }
+    ParseError::sanitized(
+        ErrorCode::InternalServerError,
+        e.message,
+        "An internal server error occurred",
+        detail,
+    )
+}
+
+/// Explain a find instead of running it.
+///
+/// The query is planned exactly as [`find`] plans it, so the explained query carries the same
+/// ACL, CLP and pointer-permission constraints the real one would; only the storage call differs.
+/// Upstream then returns the database's document as `results` and skips every post-processing
+/// step: no ACL raising, no sensitive-data filtering, no `afterFind` (`DatabaseController.js:1561`,
+/// `RestQuery.js:1125`).
+///
+/// Who may explain is decided by the route, before this is reached (`rest.js:39-48`).
+///
+/// **`verbosity` arrives unvalidated, as a result.** Upstream validates the value in the adapter's
+/// `find` (`MongoStorageAdapter.js:728`), so an invalid one is refused only once the query reaches
+/// storage: after the CLP gate, and never on a `limit=0` or pointer-denied read, which answer `[]`.
+pub async fn explain<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    where_: ParsedWhere,
+    options: FindOptions,
+    verbosity: Result<parse_rust_storage::ExplainVerbosity, ParseError>,
+) -> Result<serde_json::Value, ParseError> {
+    // Before the CLP gate, the include pass and the database, as on a find.
+    if options.limit == Some(0) {
+        zero_limit_checks(ctx, class_name, where_, &options)?;
+        return Ok(serde_json::Value::Array(Vec::new()));
+    }
+    let op = derived_op(&where_);
+    let schema = ctx.snapshot.get_or_default(class_name);
+    let plan = plan_read(
+        ctx,
+        class_name,
+        &schema,
+        where_,
+        &options.order,
+        op,
+        ReadMethod::Find,
+    )
+    .await?;
+    let (query, protected, order) = match plan {
+        ReadPlan::Denied => {
+            return if op == Operation::Get {
+                Err(object_not_found())
+            } else {
+                Ok(serde_json::Value::Array(Vec::new()))
+            };
+        }
+        ReadPlan::Run {
+            query,
+            protected,
+            order,
+        } => (query, protected, order),
+    };
+    deny_protected_index_fields(
+        ctx,
+        class_name,
+        protected.as_ref(),
+        &query,
+        options.hint.as_ref(),
+    )
+    .await?;
+    let verbosity = verbosity?;
+    // **No [`find_failure`] here.** Upstream's explain branch returns `this.adapter.find(...)`
+    // with no `.catch` (`DatabaseController.js:1561`); the sanitizing one belongs to the
+    // non-explain branch beside it. So a refused explain, a `hint` naming no index or a negative
+    // `skip`, answers the bare `{"code":1,"message":"Internal server error."}`.
+    let query_options = QueryOptions {
+        limit: options.limit,
+        skip: options.skip,
+        order,
+        keys: projection(&schema, &options),
+        case_insensitive: false,
+        hint: options.hint,
+        comment: options.comment,
+    };
+    let document = ctx
+        .storage
+        .explain(&schema, &query, &query_options, verbosity)
+        .await?;
+    // `include` walks `results` as rows, and an explain document is not rows, so upstream throws
+    // inside the include pass and answers a bare 500. Measured at the pin. It runs after the
+    // database answers (`RestQuery.js:298`), so a CLP refusal or a database error wins over it.
+    if !options.include.is_empty() {
+        return Err(ParseError::internal(
+            "include on an explain; upstream throws walking the explain document",
+        ));
+    }
+    Ok(document)
 }
 
 /// `keys` and `excludeKeys` folded into one positive projection.
@@ -555,7 +916,20 @@ fn find_core<'a, S: StorageAdapter>(
 fn projection(schema: &ClassSchema, options: &FindOptions) -> Option<Vec<String>> {
     // The four keys a projection can never drop (`AlwaysSelectedKeys`, `RestQuery.js:9`).
     const ALWAYS: [&str; 4] = ["objectId", "createdAt", "updatedAt", "ACL"];
-    match (&options.keys, &options.exclude_keys) {
+    // The database is asked for each key's root: `owner.email` projects `owner`
+    // (`RestQuery.js:869-872`). The dotted form is for an include's own `keys`, which
+    // `include::keys_for_path` reads from the options; projecting it here dropped the field.
+    let roots = options.keys.as_ref().map(|keys| {
+        let mut out: Vec<String> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let root = key.split('.').next().unwrap_or(key);
+            if !out.iter().any(|k| k == root) {
+                out.push(root.to_string());
+            }
+        }
+        out
+    });
+    match (&roots, &options.exclude_keys) {
         (None, None) => None,
         (Some(keys), None) => {
             let mut out = keys.clone();
@@ -601,7 +975,7 @@ fn resolve_where<'a, S: StorageAdapter>(
         // **Constraints on a `Relation` field are collected per field and resolved as a group**,
         // because upstream's gate is a truthiness test on `query[key]`, the whole operator
         // document, before it iterates that document's keys
-        // (`DatabaseController.js:1084-1112`). The parser has already split
+        // (`DatabaseController.js:1085-1113`). The parser has already split
         // `{"$ne": false, "$in": [...]}` into two constraints on one field, so a per-constraint
         // decision cannot see the sibling that satisfies the gate. Deciding one at a time returned
         // every owner for a falsy `$ne`, where upstream returns none.
@@ -616,7 +990,7 @@ fn resolve_where<'a, S: StorageAdapter>(
                 ParsedClause::Field(constraint) => {
                     match schema.field(&constraint.field) {
                         // A `Relation` field has no column, so a constraint on one is the reverse
-                        // join read (`DatabaseController.js:1050-1143`).
+                        // join read (`DatabaseController.js:1051-1144`).
                         Some(FieldType::Relation { .. }) => {
                             relation_groups
                                 .entry(constraint.field.clone())
@@ -649,7 +1023,7 @@ fn resolve_where<'a, S: StorageAdapter>(
                 ParsedClause::Nor(branches) => {
                     // **This is a real difference, not an equivalent spelling.** Upstream's
                     // `reduceInRelation` recurses into `$or` and `$and` but not `$nor`
-                    // (`DatabaseController.js:1054-1073`), so a relation constraint inside a
+                    // (`DatabaseController.js:1055-1074`), so a relation constraint inside a
                     // `$nor` reaches the adapter naming a column no document carries. It matches
                     // nothing, and the `$nor` negates that into matching everything. parse-rust
                     // resolves the join here instead, so the negated clause is an `objectId $in`
@@ -716,6 +1090,7 @@ async fn resolve_related_to<S: StorageAdapter>(
         let ids = relations::related_ids(ctx.storage, owning_class, key, owning_id).await?;
         return Ok(relations::RelatedToOutcome::Ids(ids));
     }
+    ensure_in_snapshot(ctx, owning_class).await?;
 
     let owning_protected = plan_protected_fields(
         owning_class,
@@ -776,8 +1151,22 @@ fn validate_sort(
     class_name: &str,
     order: &[(String, SortDirection)],
 ) -> Result<Vec<(String, SortDirection)>, ParseError> {
-    let mut out = Vec::new();
+    // The sort is a JavaScript object upstream: a repeated key keeps its first position and its
+    // last direction.
+    let mut sort: IndexMap<String, SortDirection> = IndexMap::new();
     for (field, direction) in order {
+        sort.insert(field.clone(), *direction);
+    }
+    // `_created_at` and `_updated_at` sort as `createdAt` and `updatedAt`
+    // (`DatabaseController.js:1435-1445`): the alias is deleted and the public name assigned, which
+    // keeps the public name's position if it was already there and appends it otherwise.
+    for (alias, public) in [("_created_at", "createdAt"), ("_updated_at", "updatedAt")] {
+        if let Some(direction) = sort.shift_remove(alias) {
+            sort.insert(public.to_string(), direction);
+        }
+    }
+    let mut out = Vec::new();
+    for (field, direction) in &sort {
         if is_auth_data_id_path(field) {
             return Err(ParseError::invalid_key_name(format!(
                 "Cannot sort by {field}"
@@ -807,7 +1196,19 @@ fn is_auth_data_id_path(field: &str) -> bool {
             && provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
-/// Expand every `include` path, one query per target class per level.
+/// Expand every `include` path, one query per target class per path.
+///
+/// **Concurrent the way upstream is.** `handleInclude` builds a tree of the paths and runs every
+/// sibling at once, a child only after its parent (`RestQuery.js:1057-1101`), and `includePath`
+/// queries its target classes at once (`RestQuery.js:1242-1266`). Here the paths arrive
+/// materialized and sorted by depth, so each depth is one wave: every path and class in it is
+/// queried together, then grafted in the original order before the next depth reads what was
+/// grafted. A child therefore waits for its whole depth rather than for its own parent, which costs
+/// time and changes nothing a client sees. Grafting in order keeps the key order of every result
+/// what the sequential version produced.
+///
+/// Which error a client sees when two of the queries fail is the first in path order here and the
+/// first to settle upstream; neither is a contract.
 async fn expand_includes<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     results: &mut [ParseMap],
@@ -818,66 +1219,147 @@ async fn expand_includes<S: StorageAdapter>(
     }
     let keys = options.keys.clone().unwrap_or_default();
     let exclude_keys = options.exclude_keys.clone().unwrap_or_default();
+    // `auth.isMaster`, which the maintenance key does not set (`middlewares.js:439`).
+    let master = ctx.scope.is_master() && !ctx.is_maintenance;
 
-    for path in &options.include {
-        let by_class = include::collect_pointers(results, path);
-        if by_class.is_empty() {
+    let mut budget = include::GraftBudget::new(include::GraftBudget::DEFAULT);
+    let mut remaining = options.include.as_slice();
+    while let Some(first) = remaining.first() {
+        let depth = first.len();
+        let level_len = remaining
+            .iter()
+            .take_while(|path| path.len() == depth)
+            .count();
+        let (level, rest) = remaining.split_at(level_len);
+        remaining = rest;
+
+        // Every query of this depth, collected before any of them runs. Same-depth paths cannot
+        // read what another one grafts, so collecting first is the same as collecting in turn.
+        let mut reads = Vec::new();
+        let mut has_pointers = vec![false; level.len()];
+        for (index, path) in level.iter().enumerate() {
+            for (target_class, ids) in include::collect_pointers(results, path) {
+                has_pointers[index] = true;
+                reads.push((index, target_class, ids));
+            }
+        }
+        if reads.is_empty() {
             continue;
         }
-        let mut fetched: IndexMap<String, ParseMap> = IndexMap::new();
-        for (target_class, ids) in by_class.iter() {
-            let mut where_ = ParsedWhere::default();
-            // One id is an equality, several are an `$in` (`RestQuery.js:1244-1249`), and the same
-            // count picks the method: `get` for one, `find` for several
-            // (`RestQuery.js:1250-1251`). The CLP operation does **not** follow it. Upstream pins
-            // that to `get` for every include regardless of how many ids it collected
-            // (`RestQuery.js:1259`), so a class granting `get` and denying `find` still serves an
-            // include of any size.
-            //
-            // What the method decides is `enforceRoleSecurity`: a multi-object include of
-            // `_Installation` is refused where a single-object one is allowed.
-            let method = if ids.len() == 1 {
-                ReadMethod::Get
-            } else {
-                ReadMethod::Find
-            };
-            let constraint = if ids.len() == 1 {
-                Constraint::equal("objectId", ParseValue::String(ids[0].clone()))
-            } else {
-                Constraint::one_of(
-                    "objectId",
-                    ids.iter()
-                        .map(|id| ParseValue::String(id.clone()))
-                        .collect(),
-                )
-            };
-            where_.push(ParsedClause::Field(constraint));
+        let fetches = reads.iter().map(|(index, target_class, ids)| {
+            include_read(ctx, target_class, ids, &level[*index], &keys, &exclude_keys)
+        });
+        let outcomes = futures::future::join_all(fetches).await;
 
-            let nested = FindOptions {
-                limit: Some(ids.len() as u32),
-                skip: None,
-                order: Vec::new(),
-                keys: include::keys_for_path(&keys, path),
-                exclude_keys: include::exclude_keys_for_path(&exclude_keys, path),
-                include: Vec::new(),
-            };
-
-            // The nested read is a full pipeline read with the caller's own scope, so the target
-            // class's CLP, ACL and protected fields all apply. Grafting the row in without this
-            // is the classic Parse data leak: the caller is authorized for the class holding the
-            // pointer, not for the class it points at.
-            let rows = find_core(ctx, target_class, where_, nested, Operation::Get, method).await?;
-            for mut row in rows {
+        let mut fetched: Vec<IndexMap<String, ParseMap>> = vec![IndexMap::new(); level.len()];
+        for ((index, target_class, _), rows) in reads.iter().zip(outcomes) {
+            for mut row in rows? {
                 let Some(ParseValue::String(id)) = row.get("objectId").cloned() else {
                     continue;
                 };
-                include::shape_included(&mut row, target_class, ctx.scope.is_master());
-                fetched.insert(id, row);
+                include::shape_included(&mut row, target_class, master);
+                fetched[*index].insert(id, row);
             }
         }
-        include::graft(results, path, &fetched);
+        for ((path, rows), has) in level.iter().zip(&fetched).zip(has_pointers) {
+            if has {
+                include::graft(results, path, rows, &mut budget)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// A client reads and deletes only in a class whose name a client could use.
+fn refuse_unnamed_class<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    operation: &str,
+) -> Result<(), ParseError> {
+    if ctx.scope.is_master() || parse_rust_schema::class_name_is_valid(class_name) {
+        return Ok(());
+    }
+    Err(ParseError::permission_denied(
+        ErrorCode::OperationForbidden,
+        format!(
+            "Clients aren't allowed to perform the {operation} operation on the {class_name} collection."
+        ),
+        ctx.options.error_detail,
+    ))
+}
+
+/// Refuse to read `class_name` under a snapshot that lacks it while `_SCHEMA` has it.
+///
+/// The request's own class is loaded before the request runs. A class reached through the data,
+/// an include target or a `$relatedTo` owner, is not, and a snapshot taken before another server
+/// created it would read it with no CLP, which is unrestricted. A class that exists nowhere reads
+/// as empty, as upstream reads it; one that exists sends the request back to be run on a rebuilt
+/// snapshot. See [`ParseError::schema_stale`].
+async fn ensure_in_snapshot<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+) -> Result<(), ParseError> {
+    if ctx.snapshot.contains(class_name) || !ctx.storage.class_exists(class_name).await? {
+        return Ok(());
+    }
+    Err(ParseError::schema_stale(class_name))
+}
+
+/// One include query: the rows of `target_class` that `path` points at.
+async fn include_read<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    target_class: &str,
+    ids: &[String],
+    path: &[String],
+    keys: &[String],
+    exclude_keys: &[String],
+) -> Result<Vec<ParseMap>, ParseError> {
+    ensure_in_snapshot(ctx, target_class).await?;
+    let mut where_ = ParsedWhere::default();
+    // One id is an equality, several are an `$in` (`RestQuery.js:1244-1249`), and the same
+    // count picks the method: `get` for one, `find` for several
+    // (`RestQuery.js:1250-1251`). The CLP operation does **not** follow it. Upstream pins
+    // that to `get` for every include regardless of how many ids it collected
+    // (`RestQuery.js:1259`), so a class granting `get` and denying `find` still serves an
+    // include of any size.
+    //
+    // What the method decides is `enforceRoleSecurity`: a multi-object include of
+    // `_Installation` is refused where a single-object one is allowed.
+    let method = if ids.len() == 1 {
+        ReadMethod::Get
+    } else {
+        ReadMethod::Find
+    };
+    let constraint = if ids.len() == 1 {
+        Constraint::equal("objectId", ParseValue::String(ids[0].clone()))
+    } else {
+        Constraint::one_of(
+            "objectId",
+            ids.iter()
+                .map(|id| ParseValue::String(id.clone()))
+                .collect(),
+        )
+    };
+    where_.push(ParsedClause::Field(constraint));
+
+    let nested = FindOptions {
+        limit: Some(ids.len() as u32),
+        skip: None,
+        order: Vec::new(),
+        keys: include::keys_for_path(keys, path),
+        exclude_keys: include::exclude_keys_for_path(exclude_keys, path),
+        include: Vec::new(),
+        // An include's own read carries neither: upstream builds it from
+        // `includeReadPreference` alone.
+        hint: None,
+        comment: None,
+    };
+
+    // The nested read is a full pipeline read with the caller's own scope, so the target
+    // class's CLP, ACL and protected fields all apply. Grafting the row in without this
+    // is the classic Parse data leak: the caller is authorized for the class holding the
+    // pointer, not for the class it points at.
+    find_core(ctx, target_class, where_, nested, Operation::Get, method).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -888,7 +1370,27 @@ async fn expand_includes<S: StorageAdapter>(
 pub async fn create<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
+    body: WriteBody,
+) -> Result<CreateResponse, ParseError> {
+    create_checked(ctx, class_name, body, None).await
+}
+
+/// A step run on a create's body once its defaults, required fields and the class's default ACL
+/// are applied, before anything else about the object is checked or stored, returning the body to
+/// store. A `_User` create's `transformUser` is one: it follows `setRequiredFieldsIfNeeded`
+/// (`RestWrite.js:139-144`), so its identity checks see the defaulted body, a missing required
+/// field is reported before a taken username, the password is hashed only after a `password`
+/// default or requirement was applied to the plain value, and the owner's ACL entry is added to
+/// the class's default ACL rather than replacing it.
+pub type BeforeInsert<'a> =
+    Box<dyn FnOnce(WriteBody) -> BoxFut<'a, Result<WriteBody, ParseError>> + Send + 'a>;
+
+/// [`create`], with a [`BeforeInsert`] check.
+pub async fn create_checked<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
     mut body: WriteBody,
+    before_insert: Option<BeforeInsert<'_>>,
 ) -> Result<CreateResponse, ParseError> {
     let class_exists = ctx.snapshot.contains(class_name);
     let mut schema = ctx.snapshot.resolve_for_write(class_name);
@@ -896,13 +1398,23 @@ pub async fn create<S: StorageAdapter>(
     let acl_group = ctx.scope.acl_group();
     let master = ctx.scope.is_master();
 
-    // The required-column check runs against the client body, before `ACL` is lowered into
-    // `_rperm`/`_wperm` and before relation ops are stripped. `_Role`'s ACL requirement is the
-    // load-bearing one: a role saved with no ACL is world-writable, so any client can add itself
-    // to it.
-    validate_required_columns(class_name, &as_plain_body(&body), false)?;
+    // **The `create` gate comes first**, as `validateWritePermission` does in 9.10.3
+    // (`RestWrite.js:794-805`, run at `:134` ahead of `validateSchema` at `:137`). Before it,
+    // upstream checked `addField` and the required columns first and so did this; a body failing
+    // two checks named the wrong one (parse-community/parse-server#10739).
+    // 0.1.0 left creation ungated: `let _ = scope; // ACL does not gate creation; CLP would`.
+    if !master {
+        validate_permission(
+            clp,
+            class_name,
+            &acl_group,
+            Operation::Create,
+            Some(WriteAction::Create),
+            ctx.options.error_detail,
+        )?;
+    }
 
-    // `canAddField` precedes the operation gate on a write.
+    // Then `canAddField`, which `validateSchema` reaches per field.
     if !master
         && adds_field(
             &schema,
@@ -921,17 +1433,11 @@ pub async fn create<S: StorageAdapter>(
         )?;
     }
 
-    // 0.1.0 left creation ungated: `let _ = scope; // ACL does not gate creation; CLP would`.
-    if !master {
-        validate_permission(
-            clp,
-            class_name,
-            &acl_group,
-            Operation::Create,
-            Some(WriteAction::Create),
-            ctx.options.error_detail,
-        )?;
-    }
+    // The required-column check runs against the client body, before `ACL` is lowered into
+    // `_rperm`/`_wperm` and before relation ops are stripped. `_Role`'s ACL requirement is the
+    // load-bearing one: a role saved with no ACL is world-writable, so any client can add itself
+    // to it.
+    validate_required_columns(class_name, &as_plain_body(&body), false)?;
 
     // **Before the objectId is looked at, because `enforceClassExists` runs before every one of
     // `validateObject`'s per-field checks** (`SchemaController.js:1288`), and the objectId type
@@ -939,20 +1445,19 @@ pub async fn create<S: StorageAdapter>(
     // has written answered `INCORRECT_TYPE` and left no `_SCHEMA` row, where parse-server answers
     // the same error and leaves one. Measured against a running parse-server; Gate D asserts it.
     //
-    // Still after the CLP gates above, which is a deliberate ordering difference from upstream and
-    // the one place this ordering is not a straight port. Upstream runs its `create` gate after
-    // `validateSchema`; here it runs first.
+    // After the CLP gates and the required columns. The `create` gate matches upstream's position
+    // as of 9.10.3. `addField` and the required columns still run before the class is created here
+    // and after it upstream, where `enforceClassExists` opens `validateSchema`.
     //
-    // **Do not reorder these to match upstream.** The rule this encodes is that a request
-    // parse-rust refuses leaves no durable state, and `_SCHEMA` is durable state on a database a
-    // parse-server node also reads. Without that rule the ordering looks arbitrary, which is why
-    // it is spelled out: for an otherwise-valid body the client-visible answer is the same denial
-    // either way, so nothing in the response shows the difference and no test that only reads
-    // responses catches a regression here. Recorded under the deliberate differences in
+    // **Do not move those two after this.** The rule this encodes is that a request parse-rust
+    // refuses leaves no durable state, and `_SCHEMA` is durable state on a database a
+    // parse-server node also reads. For an otherwise-valid body the client-visible answer is the
+    // same denial either way, so nothing in the response shows the difference and no test that
+    // only reads responses catches a regression here. Recorded under the deliberate differences in
     // `CHANGELOG.md`.
     ensure_class_exists(ctx, class_name, class_exists).await?;
 
-    // The class's CLP-declared default ACL (`RestWrite.js:378-395`).
+    // The class's CLP-declared default ACL (`RestWrite.js:438-455`).
     //
     // **0.2.0 accepted this setting, stored it, echoed it back from `GET /schemas` and never
     // applied it**, so a class an operator had configured as private created world-readable rows:
@@ -978,7 +1483,7 @@ pub async fn create<S: StorageAdapter>(
     // **The stamped ACL is returned in the create response**, which is a second thing the setting
     // owes a client and not a cosmetic one: the caller has no other way to learn the permissions
     // its object was given, and on a private class it cannot read the row back to find out.
-    // Upstream pushes `'ACL'` onto `fieldsChangedByTrigger` at `RestWrite.js:394` for exactly this
+    // Upstream pushes `'ACL'` onto `fieldsChangedByTrigger` at `RestWrite.js:454` for exactly this
     // reason. Measured against a parse-server at the pin: a create in such a class answers
     // `{"objectId":…,"createdAt":…,"ACL":{"<callerId>":{"read":true,"write":true}}}`, and an
     // anonymous create in the same class answers `"ACL":{}`. Both are reproduced, the empty object
@@ -1001,7 +1506,7 @@ pub async fn create<S: StorageAdapter>(
     // Honour one if it is already present rather than overwriting it, which would leave the ACL
     // pointing at an id the row does not have.
     //
-    // **Falsy, not absent, is the test upstream applies** (`RestWrite.js:429-431`, literally
+    // **Falsy, not absent, is the test upstream applies** (`RestWrite.js:489-491`, literally
     // `if (!this.data.objectId)`). An empty string and a `null` are therefore replaced with a
     // generated id rather than used, which is reachable at the default setting because
     // `enforce_object_id_policy` refuses only *truthy* client ids there.
@@ -1060,33 +1565,45 @@ pub async fn create<S: StorageAdapter>(
     let delta = validate_write_fields(&schema, &body)?;
     reserve_schema(ctx, class_name, &schema, &delta.added).await?;
     apply(&mut schema, &delta);
+    let defaulted = apply_field_options(&schema, &mut body, true)?;
+    // Upstream appends defaults to the body after its own default fields, and the Mongo transform
+    // then moves `createdAt` and `updatedAt` to the end of the stored document
+    // (`MongoTransform.js:481-488`), so a defaulted field is stored, and read back, ahead of them.
+    if !defaulted.is_empty() {
+        for key in ["objectId", "createdAt", "updatedAt"] {
+            if let Some(value) = body.shift_remove(key) {
+                body.insert(key.to_string(), value);
+            }
+        }
+    }
+
+    if let Some(step) = before_insert {
+        body = step(body).await?;
+        // A default ACL the step extended is echoed as stored, as upstream echoes the field's
+        // final value.
+        if generated_acl.is_some() {
+            if let Some(FieldWrite::Value(acl)) = body.get("ACL") {
+                generated_acl = Some(acl.clone());
+            }
+        }
+    }
+
+    // **An `ACL` carrying an operation is lowered as upstream lowers it, before relation ops are
+    // collected** (`DatabaseController.js:922` then `:931`): `transformObjectACL` walks the op
+    // object, finds no key carrying `read` or `write`, and writes two empty arrays, a master-only
+    // row. An empty object reproduces every op shape, because an op's keys are `__op`, `objects`
+    // and `amount` and none of them carries a permission. The update path collects relation ops
+    // first upstream (`:581` then `:656`), and so does this pipeline.
+    //
+    // `_User` never reaches this: `ensure_user_identity_and_acl` has already turned an op into the
+    // owner-only ACL that upstream's `ACL[objectId] = ...` produces there, or refused it.
+    neutralise_acl_op(&mut body)?;
 
     let relation_updates = relations::collect_relation_updates(&mut body);
 
-    // **An `ACL` carrying an operation is an object upstream and disappears here.**
-    // `flatten_for_create` removes a `Delete` op from the body entirely, so the `ACL` key is gone
-    // by the time `lower_acl` runs, no permission columns are written, and an absent `_rperm` is
-    // public. Upstream keeps `{"__op":"Delete"}` on `this.data.ACL`; `transformObjectACL` walks it,
-    // finds no key carrying `read` or `write`, and writes two **empty** arrays, which is a
-    // master-only row.
-    //
-    // Measured at the pin on an ordinary class: `{"ACL":{"__op":"Delete"}}` on a create answers
-    // 201 on both servers, and an anonymous read of the object then answers **200 here and 404
-    // upstream**. An empty object reproduces every op shape, because an op's keys are `__op`,
-    // `objects` and `amount` and none of them carries a permission.
-    //
-    // `_User` never reaches this: `ensure_user_identity_and_acl` has already turned an op into the
-    // owner-only ACL that upstream's `ACL[objectId] = ...` produces there.
-    if matches!(body.get("ACL"), Some(FieldWrite::Op(_))) {
-        body.insert(
-            "ACL".to_string(),
-            FieldWrite::Value(ParseValue::Object(ParseMap::new())),
-        );
-    }
-
     // `ACL` is lowered after validation, because `_rperm` and `_wperm` are not fields and would
     // otherwise be validated as though a client had named them.
-    let row = lower_acl(flatten_for_create(&body)?);
+    let row = lower_acl(flatten_for_create(&body)?)?;
     ctx.storage.create(&schema, &row).await?;
 
     relations::apply_relation_updates(ctx.storage, class_name, &object_id, &relation_updates)
@@ -1099,6 +1616,11 @@ pub async fn create<S: StorageAdapter>(
     if let Some(acl) = generated_acl {
         echoed.insert("ACL".to_string(), acl);
     }
+    // A default the server applied is reported as the default ACL is: both are pushed onto
+    // `fieldsChangedByTrigger` (`RestWrite.js:427-430`), which the response echoes.
+    for (field, value) in defaulted {
+        echoed.insert(field, value);
+    }
 
     Ok(CreateResponse {
         object_id,
@@ -1107,12 +1629,180 @@ pub async fn create<S: StorageAdapter>(
     })
 }
 
+/// A field's schema options, `required` and `defaultValue`, applied to a write
+/// (`setRequiredFieldsIfNeeded`, `RestWrite.js:408-436`, `:493-503`).
+///
+/// A field counts as unset when it is absent, `null`, `""` or a `Delete`. On a create every field
+/// the schema declares is checked: an absent or deleted one takes its `defaultValue` when the
+/// schema has one, and otherwise an unset `required` one is 142 `<field> is required`. A `null` or
+/// `""` is never replaced by a default, so on a required field it is the error. On an update only
+/// the fields the body names are checked, and no default is applied.
+///
+/// Runs after the body's fields are validated against the schema, as upstream's step follows
+/// `validateSchema`. Returns the defaults applied, which the create response reports.
+fn apply_field_options(
+    schema: &ClassSchema,
+    body: &mut WriteBody,
+    create: bool,
+) -> Result<Vec<(String, ParseValue)>, ParseError> {
+    let Some(options) = schema.field_options.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let fields: Vec<String> = if create {
+        schema.fields.keys().cloned().collect()
+    } else {
+        body.keys().cloned().collect()
+    };
+    let mut defaulted = Vec::new();
+    for field in fields {
+        let Some(ParseValue::Object(option)) = options.get(&field) else {
+            continue;
+        };
+        let (unset, replaceable) = match body.get(&field) {
+            None => (true, true),
+            Some(FieldWrite::Op(Op::Delete)) => (true, true),
+            Some(FieldWrite::Value(ParseValue::Null)) => (true, false),
+            Some(FieldWrite::Value(ParseValue::String(s))) if s.is_empty() => (true, false),
+            Some(_) => (false, false),
+        };
+        if !unset {
+            continue;
+        }
+        let default = option
+            .get("defaultValue")
+            .filter(|v| !matches!(v, ParseValue::Null));
+        match default {
+            Some(value) if create && replaceable => {
+                // Stored in `_SCHEMA` as the JSON a client would send, so it is decoded the way a
+                // client's value is: a Pointer or Date default becomes that type rather than a
+                // plain object.
+                let value = parse_rust_core::classify(value.to_serde_json())?;
+                body.insert(field.clone(), FieldWrite::Value(value.clone()));
+                defaulted.push((field, value));
+            }
+            _ if matches!(option.get("required"), Some(ParseValue::Bool(true))) => {
+                return Err(ParseError::new(
+                    ErrorCode::ValidationError,
+                    format!("{field} is required"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(defaulted)
+}
+
+/// The query an update runs, carrying every authorization constraint a non-master caller is under:
+/// pointer permissions for `update`, and for `addField` when the write introduces a field, then the
+/// write ACL. Shared by [`update`] and [`authorize_update`], so the probe and the write cannot
+/// disagree about who may write.
+fn update_query<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    schema: &ClassSchema,
+    object_id: &str,
+    introduces_field: bool,
+) -> Result<Query, ParseError> {
+    let clp = ctx.snapshot.clp(schema.class_name.as_str());
+    let acl_group = ctx.scope.acl_group();
+    let mut query = Query::from_constraints(vec![Constraint::equal(
+        "objectId",
+        ParseValue::String(object_id.to_string()),
+    )]);
+    if ctx.scope.is_master() {
+        return Ok(query);
+    }
+    match apply_pointer_permissions(schema, clp, Operation::Update, &acl_group, &query)? {
+        PointerPermOutcome::Unconstrained => {}
+        PointerPermOutcome::Constrained(narrowed) => query = narrowed,
+        // An update denied here resolves with no result upstream, which the caller's
+        // `if (!result)` turns into `OBJECT_NOT_FOUND` (`DatabaseController.js:606-608`,
+        // `:694-697`).
+        PointerPermOutcome::DenyAll => return Err(object_not_found()),
+    }
+    if introduces_field {
+        // The `addField` clause is conjoined on top of the `update` one
+        // (`DatabaseController.js:591-604`).
+        match apply_pointer_permissions(schema, clp, Operation::AddField, &acl_group, &query)? {
+            PointerPermOutcome::Unconstrained => {}
+            PointerPermOutcome::Constrained(narrowed) => query = narrowed,
+            PointerPermOutcome::DenyAll => return Err(object_not_found()),
+        }
+    }
+    if let Some(constraint) = ctx.scope.write_constraint() {
+        query.push_constraint(constraint);
+    }
+    Ok(query)
+}
+
+/// Could this caller update this object at all? `OBJECT_NOT_FOUND` if not.
+///
+/// Upstream's `authorizeUserUpdate` (`RestWrite.js:806-838`) runs this as a `validateOnly` update
+/// with an empty body: the `update` CLP, pointer permissions and the write ACL, then a find
+/// (`DatabaseController.js:660-666`). It exists so that nothing which reads the target account,
+/// a uniqueness query above all, answers before authorization has.
+pub async fn authorize_update<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    object_id: &str,
+) -> Result<(), ParseError> {
+    let schema = ctx.snapshot.resolve_for_write(class_name);
+    update_gate(ctx, class_name)?;
+    let query = update_query(ctx, &schema, object_id, false)?;
+    if ctx
+        .storage
+        .count(
+            &schema,
+            &query,
+            &parse_rust_storage::CountOptions::default(),
+        )
+        .await?
+        == 0
+    {
+        return Err(object_not_found());
+    }
+    Ok(())
+}
+
+/// The class-level `update` gate alone, `validateWritePermission` (`RestWrite.js:794-805`).
+///
+/// Separate from [`authorize_update`] for the caller who owns the row: upstream skips the ACL probe
+/// for them but still runs this gate before `transformUser`, so it has to precede any uniqueness
+/// check that reads other rows.
+pub fn update_gate<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+) -> Result<(), ParseError> {
+    if ctx.scope.is_master() {
+        return Ok(());
+    }
+    validate_permission(
+        ctx.snapshot.clp(class_name),
+        class_name,
+        &ctx.scope.acl_group(),
+        Operation::Update,
+        Some(WriteAction::Update),
+        ctx.options.error_detail,
+    )
+}
+
 /// Update one object by id.
 pub async fn update<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
     object_id: &str,
+    body: WriteBody,
+) -> Result<UpdateResponse, ParseError> {
+    update_checked(ctx, class_name, object_id, body, None).await
+}
+
+/// [`update`], with a [`BeforeInsert`] step run after the schema and the required fields are
+/// checked, as `transformUser` follows `setRequiredFieldsIfNeeded` on an update too.
+pub async fn update_checked<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    object_id: &str,
     mut body: WriteBody,
+    before_write: Option<BeforeInsert<'_>>,
 ) -> Result<UpdateResponse, ParseError> {
     let class_exists = ctx.snapshot.contains(class_name);
     let mut schema = ctx.snapshot.resolve_for_write(class_name);
@@ -1124,7 +1814,18 @@ pub async fn update<S: StorageAdapter>(
     body.shift_remove("objectId");
     body.shift_remove("createdAt");
 
-    validate_required_columns(class_name, &as_plain_body(&body), true)?;
+    // The `update` gate first, as `validateWritePermission` does in 9.10.3 (`RestWrite.js:794-805`);
+    // see the create path.
+    if !master {
+        validate_permission(
+            clp,
+            class_name,
+            &acl_group,
+            Operation::Update,
+            Some(WriteAction::Update),
+            ctx.options.error_detail,
+        )?;
+    }
 
     let introduces_field = adds_field(
         &schema,
@@ -1143,44 +1844,9 @@ pub async fn update<S: StorageAdapter>(
         )?;
     }
 
-    if !master {
-        validate_permission(
-            clp,
-            class_name,
-            &acl_group,
-            Operation::Update,
-            Some(WriteAction::Update),
-            ctx.options.error_detail,
-        )?;
-    }
+    validate_required_columns(class_name, &as_plain_body(&body), true)?;
 
-    let mut query = Query::from_constraints(vec![Constraint::equal(
-        "objectId",
-        ParseValue::String(object_id.to_string()),
-    )]);
-    if !master {
-        match apply_pointer_permissions(&schema, clp, Operation::Update, &acl_group, &query)? {
-            PointerPermOutcome::Unconstrained => {}
-            PointerPermOutcome::Constrained(narrowed) => query = narrowed,
-            // An update denied here resolves with no result upstream, which the caller's
-            // `if (!result)` turns into `OBJECT_NOT_FOUND` (`DatabaseController.js:605-607`,
-            // `:694-697`).
-            PointerPermOutcome::DenyAll => return Err(object_not_found()),
-        }
-        if introduces_field {
-            // The `addField` clause is conjoined on top of the `update` one
-            // (`DatabaseController.js:590-603`).
-            match apply_pointer_permissions(&schema, clp, Operation::AddField, &acl_group, &query)?
-            {
-                PointerPermOutcome::Unconstrained => {}
-                PointerPermOutcome::Constrained(narrowed) => query = narrowed,
-                PointerPermOutcome::DenyAll => return Err(object_not_found()),
-            }
-        }
-        if let Some(constraint) = ctx.scope.write_constraint() {
-            query.push_constraint(constraint);
-        }
-    }
+    let query = update_query(ctx, &schema, object_id, introduces_field)?;
 
     let updated_at = ParseDate::now();
     body.insert(
@@ -1192,7 +1858,7 @@ pub async fn update<S: StorageAdapter>(
     //
     // **An update to a class nobody has written yet still creates the class row**, and then
     // matches nothing and answers `OBJECT_NOT_FOUND`. That reads like a bug and it is upstream's:
-    // `validateSchema` is one step of the write chain (`RestWrite.js:127-128`) whichever path the
+    // `validateSchema` is one step of the write chain (`RestWrite.js:133-137`) whichever path the
     // write is on, it calls `validateObject`, and that calls `enforceClassExists` before looking
     // at a single field (`SchemaController.js:1288`).
     //
@@ -1209,11 +1875,20 @@ pub async fn update<S: StorageAdapter>(
     let delta = validate_write_fields(&schema, &body)?;
     reserve_schema(ctx, class_name, &schema, &delta.added).await?;
     apply(&mut schema, &delta);
+    apply_field_options(&schema, &mut body, false)?;
+    if let Some(step) = before_write {
+        body = step(body).await?;
+    }
 
     let relation_updates = relations::collect_relation_updates(&mut body);
 
+    // A `Batch` on `ACL` is upstream's bare 500, and `lower_update` would otherwise refuse it first
+    // with the 108 it gives a `Batch` on any other field.
+    if matches!(body.get("ACL"), Some(FieldWrite::Op(Op::Batch(_)))) {
+        return Err(batch_acl_error());
+    }
     let mut update = lower_update(&body)?;
-    lower_acl_into_update(&mut body, &mut update);
+    lower_acl_into_update(&mut body, &mut update)?;
 
     // Only an update carrying a result-bearing operation needs the post-image read back.
     let echoed = if echoed_keys(&body).is_empty() {
@@ -1244,9 +1919,12 @@ pub async fn update<S: StorageAdapter>(
 /// UPSTREAM-QUIRK: `transformObjectACL` iterates whatever the `ACL` value happens to be
 /// (`DatabaseController.js:93-110`), so an `{"__op":"Delete"}` on `ACL` produces two empty arrays
 /// rather than unsetting the columns, which leaves the row readable and writable by master only.
-fn lower_acl_into_update(body: &mut WriteBody, update: &mut parse_rust_storage::Update) {
+fn lower_acl_into_update(
+    body: &mut WriteBody,
+    update: &mut parse_rust_storage::Update,
+) -> Result<(), ParseError> {
     let Some(write) = body.shift_remove("ACL") else {
-        return;
+        return Ok(());
     };
     update.shift_remove("ACL");
     let value = match write {
@@ -1260,15 +1938,16 @@ fn lower_acl_into_update(body: &mut WriteBody, update: &mut parse_rust_storage::
         // an empty ACL as a disabled account and refuses every later login, and
         // `force_owner_into_acl` does not defend against it because that only reinstates the owner
         // into an ACL that is an *object*. `{"ACL": {}}` is neutralised; `{"ACL": false}` was not.
-        FieldWrite::Value(v) if !parse_rust_core::is_js_truthy(&v) => return,
+        FieldWrite::Value(v) if !parse_rust_core::is_js_truthy(&v) => return Ok(()),
         FieldWrite::Value(value) => value,
+        FieldWrite::Op(Op::Batch(_)) => return Err(batch_acl_error()),
         // An op envelope is a truthy object upstream, so it falls through to the loop that reads
         // `read`/`write` off each entry and finds none. See the quirk note above.
         FieldWrite::Op(_) => ParseValue::Object(ParseMap::new()),
     };
     let mut carrier = ParseMap::new();
     carrier.insert("ACL".to_string(), value);
-    let lowered = lower_acl(carrier);
+    let lowered = lower_acl(carrier)?;
     for key in ["_rperm", "_wperm"] {
         let value = lowered
             .get(key)
@@ -1276,6 +1955,30 @@ fn lower_acl_into_update(body: &mut WriteBody, update: &mut parse_rust_storage::
             .unwrap_or(ParseValue::Array(Vec::new()));
         update.insert(key.to_string(), UpdateValue::Set(value));
     }
+    Ok(())
+}
+
+/// Replace an operation on `ACL` with the empty object upstream's lowering effectively sees.
+///
+/// A `Batch` is the exception: upstream answers a bare 500 for `{"__op":"Batch","ops":[]}` as an
+/// `ACL` on every path and writes nothing, measured at the pin on a create, a `_User` signup and an
+/// update alike. parse-rust's decoder accepts the op, so without this it answered 201.
+fn neutralise_acl_op(body: &mut WriteBody) -> Result<(), ParseError> {
+    match body.get("ACL") {
+        Some(FieldWrite::Op(Op::Batch(_))) => Err(batch_acl_error()),
+        Some(FieldWrite::Op(_)) => {
+            body.insert(
+                "ACL".to_string(),
+                FieldWrite::Value(ParseValue::Object(ParseMap::new())),
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn batch_acl_error() -> ParseError {
+    ParseError::internal("a Batch operation on ACL; upstream throws before writing")
 }
 
 /// Delete one object by id.
@@ -1288,6 +1991,8 @@ pub async fn delete<S: StorageAdapter>(
     let clp = ctx.snapshot.clp(class_name);
     let acl_group = ctx.scope.acl_group();
     let master = ctx.scope.is_master();
+
+    refuse_unnamed_class(ctx, class_name, "delete")?;
 
     if !master {
         validate_permission(
@@ -1308,7 +2013,7 @@ pub async fn delete<S: StorageAdapter>(
         match apply_pointer_permissions(&schema, clp, Operation::Delete, &acl_group, &query)? {
             PointerPermOutcome::Unconstrained => {}
             PointerPermOutcome::Constrained(narrowed) => query = narrowed,
-            // A destroy denied here is `OBJECT_NOT_FOUND` (`DatabaseController.js:861-863`).
+            // A destroy denied here is `OBJECT_NOT_FOUND` (`DatabaseController.js:862-864`).
             PointerPermOutcome::DenyAll => return Err(object_not_found()),
         }
         if let Some(constraint) = ctx.scope.write_constraint() {
@@ -1373,7 +2078,7 @@ async fn ensure_class_exists<S: StorageAdapter>(
     ctx.storage.upsert_schema(&default_schema(class_name)).await
 }
 
-/// `validateClientClassCreation` (`RestWrite.js:196-219`).
+/// `validateClientClassCreation` (`RestWrite.js:202-225`).
 ///
 /// Refuses a write that would bring a class into existence, unless the caller is privileged, the
 /// option is on, or the class is one Parse defines itself. Upstream's option defaults to `false`
@@ -1394,7 +2099,7 @@ fn validate_client_class_creation<S: StorageAdapter>(
     maintenance_is_exempt: bool,
 ) -> Result<(), ParseError> {
     // **The two call sites do not agree about maintenance, and that is upstream's shape.** The
-    // write path tests `!isMaster && !isMaintenance` (`RestWrite.js:200-202`); the read path tests
+    // write path tests `!isMaster && !isMaintenance` (`RestWrite.js:206-208`); the read path tests
     // `!isMaster` alone (`RestQuery.js:486-489`), so a maintenance-key *read* of a class that does
     // not exist is refused there. Sharing one predicate silently gave maintenance the write path's
     // exemption on reads too.
@@ -1409,7 +2114,7 @@ fn validate_client_class_creation<S: StorageAdapter>(
     {
         return Ok(());
     }
-    // `createSanitizedError` (`RestWrite.js:209-213`), so the detailed string is withheld at
+    // `createSanitizedError` (`RestWrite.js:215-219`), so the detailed string is withheld at
     // upstream's default and the class name reaches the log instead.
     Err(ParseError::permission_denied(
         ErrorCode::OperationForbidden,
@@ -1562,6 +2267,45 @@ mod tests {
         );
     }
 
+    /// **The operation gate runs before `addField`**, as `validateWritePermission` does from 9.10.3
+    /// (parse-community/parse-server#10739). With both denied, the message names the operation.
+    /// Before it, both servers named `addField`.
+    #[tokio::test]
+    async fn the_operation_gate_precedes_add_field() {
+        let mut existing = ParseMap::new();
+        existing.insert("objectId".into(), ParseValue::String("p1".into()));
+        let storage = FakeStorage::new()
+            .with_schema(default_schema("Post").with_clp(clp(
+                r#"{"create":{"role:Writers":true},"update":{"role:Writers":true},"addField":{"role:Writers":true}}"#,
+            )))
+            .with_row("Post", existing);
+        let snap = snapshot(&storage).await;
+        let options = disclosing_opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+
+        let e = create(&ctx, "Post", body(r#"{"brandNew":1}"#, OpPath::Create))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.message,
+            "Permission denied for action create on class Post."
+        );
+
+        let e = update(
+            &ctx,
+            "Post",
+            "p1",
+            body(r#"{"brandNew":1}"#, OpPath::Update),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            e.message,
+            "Permission denied for action update on class Post."
+        );
+    }
+
     /// The default-open rule, end to end. A class with no CLP block permits everything.
     #[tokio::test]
     async fn a_class_with_no_clp_is_unrestricted() {
@@ -1699,9 +2443,15 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default())
-                .await
-                .expect("count resolves"),
+            count(
+                &ctx,
+                "Post",
+                ParsedWhere::default(),
+                &[],
+                &Default::default()
+            )
+            .await
+            .expect("count resolves"),
             0
         );
         assert_eq!(
@@ -1743,9 +2493,15 @@ mod tests {
             ErrorCode::ObjectNotFound
         );
         assert_eq!(
-            count(&ctx, "Post", ParsedWhere::default())
-                .await
-                .expect("count"),
+            count(
+                &ctx,
+                "Post",
+                ParsedWhere::default(),
+                &[],
+                &Default::default()
+            )
+            .await
+            .expect("count"),
             1
         );
         assert!(
@@ -1806,7 +2562,6 @@ mod tests {
         assert!(results[0].get("secret").is_some());
     }
 
-    /// Without this a client binary-searches the protected value through `where`.
     #[tokio::test]
     async fn querying_or_ordering_by_a_protected_field_is_forbidden() {
         let storage = protected_storage();
@@ -1883,6 +2638,161 @@ mod tests {
         )
         .await
         .is_ok());
+    }
+
+    /// `limit=0` skips the database, not the checks upstream runs before `runFind`.
+    #[tokio::test]
+    async fn a_zero_limit_still_runs_the_checks_before_the_find() {
+        let storage = protected_storage();
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let zero = FindOptions {
+            limit: Some(0),
+            ..Default::default()
+        };
+
+        let e = find(&ctx, "_Session", ParsedWhere::default(), zero.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidSessionToken);
+
+        let e = find(&ctx, "Post", where_(r#"{"secret":"s"}"#), zero.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+
+        let sorted = FindOptions {
+            order: vec![("secret".to_string(), SortDirection::Ascending)],
+            ..zero.clone()
+        };
+        let e = find(&ctx, "Post", ParsedWhere::default(), sorted)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+
+        // Nothing to refuse: still empty, and still no database call.
+        assert!(find(&ctx, "Post", ParsedWhere::default(), zero)
+            .await
+            .expect("empty")
+            .is_empty());
+    }
+
+    /// An explain takes the `limit=0` branch too: before the CLP gate, the include pass and the
+    /// adapter's validation of the explain value. Each of those refuses the same request with any
+    /// other limit.
+    /// A where that will fail is refused at its position, never read as an empty where that
+    /// matches every row. The CLP refusal comes first, and `limit=0` never reaches it.
+    #[tokio::test]
+    async fn a_deferred_where_failure_refuses_rather_than_matching_everything() {
+        let mut row = ParseMap::new();
+        row.insert("objectId".into(), ParseValue::String("p1".into()));
+        let storage = FakeStorage::new()
+            .with_schema(default_schema("Post"))
+            .with_row("Post", row);
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let bad = || crate::query_parse::parse_client_where(&serde_json::json!({"n": {"$in": 5}}));
+        let e = find(&ctx, "Post", bad(), FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidJson);
+        assert_eq!(e.message, "bad $in value");
+        let zero = FindOptions {
+            limit: Some(0),
+            ..Default::default()
+        };
+        assert!(find(&ctx, "Post", bad(), zero)
+            .await
+            .expect("empty")
+            .is_empty());
+        let scalar = crate::query_parse::parse_client_where(&serde_json::json!(5));
+        let e = find(&ctx, "Post", scalar, FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InternalServerError);
+
+        let closed = FakeStorage::new()
+            .with_schema(default_schema("Post").with_clp(clp(r#"{"find":{},"get":{}}"#)));
+        let snap = snapshot(&closed).await;
+        let ctx = Ctx::new(&closed, &snap, &anon, &options);
+        let e = find(&ctx, "Post", bad(), FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+    }
+
+    #[test]
+    fn an_index_on_an_internal_column_is_internal() {
+        let fields = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            internal_index_field(&fields(&["n", "_perishable_token"])),
+            Some("_perishable_token")
+        );
+        assert_eq!(
+            internal_index_field(&fields(&["authData"])),
+            Some("authData")
+        );
+        assert_eq!(
+            internal_index_field(&fields(&["objectId", "createdAt"])),
+            None
+        );
+        assert_eq!(internal_index_field(&fields(&["_rperm", "_wperm"])), None);
+    }
+
+    #[tokio::test]
+    async fn a_zero_limit_explain_answers_before_the_gate_include_and_verbosity() {
+        let storage = FakeStorage::new()
+            .with_schema(default_schema("Post").with_clp(clp(r#"{"find":{},"get":{}}"#)));
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let verbosity = || Ok(parse_rust_storage::ExplainVerbosity::AllPlansExecution);
+        let invalid = || Err(ParseError::invalid_query("Invalid value for explain"));
+        let zero = FindOptions {
+            limit: Some(0),
+            include: vec![vec!["x".to_string()]],
+            ..Default::default()
+        };
+        for v in [verbosity(), invalid()] {
+            let out = explain(&ctx, "Post", ParsedWhere::default(), zero.clone(), v)
+                .await
+                .expect("empty");
+            assert_eq!(out, serde_json::json!([]));
+        }
+
+        let one = FindOptions {
+            limit: Some(1),
+            ..zero
+        };
+        for v in [verbosity(), invalid()] {
+            let e = explain(&ctx, "Post", ParsedWhere::default(), one.clone(), v)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                e.code,
+                ErrorCode::OperationForbidden,
+                "the gate comes first"
+            );
+        }
+        let master = AclScope::Unrestricted;
+        let ctx = Ctx::new(&storage, &snap, &master, &options);
+        let e = explain(&ctx, "Post", ParsedWhere::default(), one.clone(), invalid())
+            .await
+            .unwrap_err();
+        assert_eq!(e.message, "Invalid value for explain", "then the value");
+        let e = explain(&ctx, "Post", ParsedWhere::default(), one, verbosity())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.code,
+            ErrorCode::InternalServerError,
+            "then the include pass"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2907,7 +3817,7 @@ mod write_edge_tests {
     /// leave nothing, while an update naming a new field created the class as a side effect of
     /// reserving the field. Upstream has one answer for both, because `enforceClassExists` runs
     /// from `validateSchema` before any field is looked at (`SchemaController.js:1288`,
-    /// `RestWrite.js:127-128`).
+    /// `RestWrite.js:133-137`).
     #[tokio::test]
     async fn an_update_to_a_missing_class_creates_the_class_and_then_finds_nothing() {
         // Including a body that is **rejected**, which is the case the first version of this fix
@@ -2964,5 +3874,99 @@ mod write_edge_tests {
         assert!(stored.get("ACL").is_none(), "ACL is not a stored column");
         assert!(matches!(stored.get("_rperm"), Some(ParseValue::Array(a)) if a.len() == 2));
         assert!(matches!(stored.get("_wperm"), Some(ParseValue::Array(a)) if a.len() == 1));
+    }
+}
+
+#[cfg(test)]
+mod field_option_tests {
+    use super::*;
+
+    /// A class with `d`, defaulted to `"x"`, and `r`, required.
+    fn schema() -> ClassSchema {
+        let mut s = ClassSchema::new("C")
+            .with_field("d", FieldType::String)
+            .with_field("r", FieldType::String);
+        let option = |pairs: Vec<(&str, ParseValue)>| {
+            ParseValue::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        };
+        let mut options = ParseMap::new();
+        options.insert(
+            "d".into(),
+            option(vec![("defaultValue", ParseValue::String("x".into()))]),
+        );
+        options.insert(
+            "r".into(),
+            option(vec![("required", ParseValue::Bool(true))]),
+        );
+        s.field_options = Some(options);
+        s
+    }
+
+    fn body(pairs: Vec<(&str, FieldWrite)>) -> WriteBody {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn present(r: &str) -> (&str, FieldWrite) {
+        ("r", FieldWrite::Value(ParseValue::String(r.into())))
+    }
+
+    #[test]
+    fn a_create_defaults_an_absent_or_deleted_field_and_keeps_a_null_or_empty_one() {
+        let mut absent = body(vec![present("y")]);
+        let applied = apply_field_options(&schema(), &mut absent, true).expect("applies");
+        assert!(matches!(&applied[..], [(f, ParseValue::String(v))] if f == "d" && v == "x"));
+
+        let mut deleted = body(vec![present("y"), ("d", FieldWrite::Op(Op::Delete))]);
+        apply_field_options(&schema(), &mut deleted, true).expect("applies");
+        assert!(
+            matches!(deleted.get("d"), Some(FieldWrite::Value(ParseValue::String(v))) if v == "x")
+        );
+
+        for kept in [ParseValue::Null, ParseValue::String(String::new())] {
+            let mut b = body(vec![present("y"), ("d", FieldWrite::Value(kept))]);
+            let applied = apply_field_options(&schema(), &mut b, true).expect("applies");
+            assert!(
+                applied.is_empty(),
+                "a null or empty value is not replaced by the default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_required_field_that_is_null_empty_absent_or_deleted_is_142_on_create() {
+        for r in [
+            None,
+            Some(FieldWrite::Value(ParseValue::Null)),
+            Some(FieldWrite::Value(ParseValue::String(String::new()))),
+            Some(FieldWrite::Op(Op::Delete)),
+        ] {
+            let mut b = body(vec![]);
+            if let Some(r) = r {
+                b.insert("r".into(), r);
+            }
+            let e = apply_field_options(&schema(), &mut b, true).expect_err("required");
+            assert_eq!(e.code, ErrorCode::ValidationError);
+            assert_eq!(e.message, "r is required");
+        }
+    }
+
+    #[test]
+    fn an_update_checks_only_what_it_names_and_applies_no_default() {
+        let mut untouched = body(vec![("other", FieldWrite::Value(ParseValue::Number(1.0)))]);
+        assert!(apply_field_options(&schema(), &mut untouched, false).is_ok());
+
+        let mut cleared = body(vec![("d", FieldWrite::Op(Op::Delete))]);
+        let applied = apply_field_options(&schema(), &mut cleared, false).expect("not required");
+        assert!(applied.is_empty(), "no default on an update");
+
+        for r in [
+            FieldWrite::Value(ParseValue::Null),
+            FieldWrite::Value(ParseValue::String(String::new())),
+            FieldWrite::Op(Op::Delete),
+        ] {
+            let mut b = body(vec![("r", r)]);
+            let e = apply_field_options(&schema(), &mut b, false).expect_err("required");
+            assert_eq!(e.message, "r is required");
+        }
     }
 }

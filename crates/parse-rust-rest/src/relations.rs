@@ -39,7 +39,7 @@ pub enum RelationOpKind {
 /// Not `Vec<String>` with an empty vector standing in for "denied", because the two have to be
 /// distinguishable at the call site even though they narrow the query identically. A caller who
 /// cannot read the owning object gets an empty `objectId $in` rather than an error
-/// (`DatabaseController.js:1209-1213`), so the relation cannot be used as a membership oracle.
+/// (`DatabaseController.js:1210-1214`), so the relation cannot be used as a membership oracle.
 #[derive(Debug, Clone)]
 pub enum RelatedToOutcome {
     Ids(Vec<String>),
@@ -59,7 +59,7 @@ impl RelatedToOutcome {
 ///
 /// **Not `QueryOptions::default()`**, whose limit is 100. A role with more than a hundred members
 /// would silently lose the rest, and the loss would look like a permission problem. Upstream
-/// passes an empty options object, meaning unbounded (`DatabaseController.js:1030`).
+/// passes an empty options object, meaning unbounded (`DatabaseController.js:1031`).
 fn join_query_options(keys: &[&str]) -> QueryOptions {
     QueryOptions {
         limit: None,
@@ -67,12 +67,13 @@ fn join_query_options(keys: &[&str]) -> QueryOptions {
         order: Vec::new(),
         keys: Some(keys.iter().map(|k| k.to_string()).collect()),
         case_insensitive: false,
+        ..QueryOptions::default()
     }
 }
 
 /// Strip `AddRelation` and `RemoveRelation` out of a write body, including inside a `Batch`.
 ///
-/// `collectRelationUpdates` (`DatabaseController.js:732-765`). Note that a `Batch` containing a
+/// `collectRelationUpdates` (`DatabaseController.js:733-766`). Note that a `Batch` containing a
 /// relation op removes the **whole key** from the write, so a batch mixing a relation op with
 /// anything else loses the rest. That is upstream's `deleteMe.push(key)` and it is reproduced.
 pub fn collect_relation_updates(body: &mut crate::WriteBody) -> Vec<RelationUpdate> {
@@ -143,7 +144,7 @@ fn related_object_ids(objects: &[ParseValue]) -> Vec<String> {
 
 /// Apply membership changes, after the row write has succeeded.
 ///
-/// `handleRelationUpdates` (`DatabaseController.js:769-830`). An add is an upsert, so adding a
+/// `handleRelationUpdates` (`DatabaseController.js:770-831`). An add is an upsert, so adding a
 /// user to a role twice is one membership. A remove that matches nothing is not an error:
 /// upstream swallows `OBJECT_NOT_FOUND` (`:823-829`).
 pub async fn apply_relation_updates<S: StorageAdapter>(
@@ -181,7 +182,7 @@ pub async fn apply_relation_updates<S: StorageAdapter>(
     Ok(())
 }
 
-/// The related objectIds of one owning object. `relatedIds` (`DatabaseController.js:1015-1032`).
+/// The related objectIds of one owning object. `relatedIds` (`DatabaseController.js:1016-1033`).
 pub async fn related_ids<S: StorageAdapter>(
     storage: &S,
     owning_class: &str,
@@ -200,7 +201,7 @@ pub async fn related_ids<S: StorageAdapter>(
 }
 
 /// The owning objectIds that relate to any of these ids. `owningIds`
-/// (`DatabaseController.js:1036-1045`).
+/// (`DatabaseController.js:1037-1046`).
 pub async fn owning_ids<S: StorageAdapter>(
     storage: &S,
     owning_class: &str,
@@ -230,7 +231,7 @@ fn string_column(rows: Vec<ParseMap>, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// `authorizeRelatedToQuery` (`DatabaseController.js:1260-1308`), run **before** the join table
+/// `authorizeRelatedToQuery` (`DatabaseController.js:1261-1309`), run **before** the join table
 /// is read.
 ///
 /// Two checks, and neither is redundant. The relation key must not be a protected field on the
@@ -257,7 +258,7 @@ where
         .iter()
         .any(|f| f == relation_key || f == root)
     {
-        // `createSanitizedError` (`DatabaseController.js:1279-1283`).
+        // `createSanitizedError` (`DatabaseController.js:1280-1284`).
         return Err(ParseError::permission_denied(
             ErrorCode::OperationForbidden,
             format!("This user is not allowed to query {relation_key} on class {owning_class}"),
@@ -269,7 +270,7 @@ where
 
 /// Which reverse-join read a constraint on a `Relation`-typed field asks for.
 ///
-/// `reduceInRelation` (`DatabaseController.js:1050-1143`). Note the fourth case: **any other
+/// `reduceInRelation` (`DatabaseController.js:1051-1144`). Note the fourth case: **any other
 /// constraint on a relation field yields no results at all**, because upstream falls into its
 /// `else` branch with an empty related-id list. That is reproduced rather than turned into an
 /// error, since it narrows rather than broadens and a client can already observe it.
@@ -284,7 +285,7 @@ pub enum RelationConstraint {
 /// The `objectId` of an operand, **with no tag check**.
 ///
 /// **Upstream reads the key off the raw REST JSON and never runs an atom transform here**
-/// (`DatabaseController.js:1092-1101`: `relatedIds = [query[key].objectId]`, and `r => r.objectId`
+/// (`DatabaseController.js:1093-1102`: `relatedIds = [query[key].objectId]`, and `r => r.objectId`
 /// across `$in` and `$nin`). `reduceInRelation` runs on the REST query, before anything reaches the
 /// Mongo lowering, so the value it sees is the object the client sent, and `r.objectId` asks
 /// nothing about `__type`.
@@ -295,7 +296,7 @@ pub enum RelationConstraint {
 ///
 /// **`null` is refused rather than skipped.** It is the one operand upstream cannot read
 /// `.objectId` from, because it is the one value JavaScript will not box, so it raises an uncaught
-/// `TypeError` and the request 500s (`DatabaseController.js:1096-1104`; reported upstream as
+/// `TypeError` and the request 500s (`DatabaseController.js:1097-1105`; reported upstream as
 /// parse-community/parse-server#10637). Every other unusable operand is harmless there: `7` and
 /// `{"foo":1}` both yield `undefined`, which contributes no id.
 ///
@@ -324,7 +325,7 @@ fn object_id_of(value: &ParseValue) -> Result<Option<String>, ParseError> {
 ///
 /// **Only shorthand equality asks.** The gate is
 /// `query[key].$in || query[key].$ne || query[key].$nin || query[key].__type == 'Pointer'`
-/// (`DatabaseController.js:1084-1090`): the first three are satisfied by the *operator* being
+/// (`DatabaseController.js:1085-1091`): the first three are satisfied by the *operator* being
 /// present, and only the fourth, which is the no-operator case, inspects a tag.
 fn is_tagged_pointer(value: &ParseValue) -> bool {
     match value {
@@ -343,7 +344,7 @@ fn is_tagged_pointer(value: &ParseValue) -> bool {
 ///                || query[key].__type == 'Pointer')
 /// ```
 ///
-/// (`DatabaseController.js:1084-1090`.) **Every term is a truthiness test**, and the third one has
+/// (`DatabaseController.js:1085-1091`.) **Every term is a truthiness test**, and the third one has
 /// teeth because `$ne`'s operand is arbitrary: `$ne: null`, `$ne: false`, `$ne: 0` and `$ne: ""`
 /// are all falsy, so the gate fails and the whole constraint resolves to no owners. Treating `$ne`
 /// as satisfied merely by being present made those four return **every** owner, where upstream
@@ -364,7 +365,7 @@ fn satisfies_gate(comparison: &Comparison) -> bool {
 ///
 /// **The group is the unit, not the comparison, and that is what makes the gate expressible.**
 /// Upstream tests `query[key]`, the entire operator document, and then iterates its keys
-/// (`DatabaseController.js:1084-1112`). So `{"$ne": false, "$in": [<pointer>]}` passes on the `$in`
+/// (`DatabaseController.js:1085-1113`). So `{"$ne": false, "$in": [<pointer>]}` passes on the `$in`
 /// and still processes the `$ne`, which contributes nothing because its operand names no id.
 /// Evaluating the gate one comparison at a time cannot express that: it either drops the `$in`
 /// along with the `$ne` or keeps the `$ne` along with the `$in`, and the second is what returned
@@ -424,7 +425,7 @@ pub fn relation_constraints_for(
 }
 
 /// Intersect an `objectId $in` into a query. `addInObjectIdsIds`
-/// (`DatabaseController.js:1310-1345`).
+/// (`DatabaseController.js:1311-1346`).
 ///
 /// The intersection is the point. Two separate `objectId` constraints cannot be conjoined by the
 /// Mongo lowering (a second `$in` would overwrite the first, and an `$eq` beside an `$in` is a
@@ -472,7 +473,7 @@ pub fn add_in_object_ids(query: &mut Query, ids: &[String]) {
 }
 
 /// Union an `objectId $nin` into a query. `addNotInObjectIdsIds`
-/// (`DatabaseController.js:1347-1372`).
+/// (`DatabaseController.js:1348-1373`).
 pub fn add_not_in_object_ids(query: &mut Query, ids: &[String]) {
     let mut union: Vec<String> = Vec::new();
     query.clauses.retain(|clause| match clause {

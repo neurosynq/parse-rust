@@ -4,9 +4,10 @@
 //!
 //! - **One schema snapshot per request.** Upstream threads a `validSchemaController` down through
 //!   every controller entry point so one request cannot evaluate half its work under one schema
-//!   and half under another (`DatabaseController.js:553`). A `/batch` of twenty writes therefore
-//!   loads schemas once, and every sub-request sees the same table. Doing it per operation is not
-//!   a performance bug, it is a correctness bug.
+//!   and half under another (`DatabaseController.js:554`). A `/batch` of twenty writes therefore
+//!   takes one snapshot, and every sub-request sees the same table. Doing it per operation is not
+//!   a performance bug, it is a correctness bug. The snapshot usually comes from the schema cache
+//!   rather than the database; see [`crate::schema_cache`].
 //! - **One role expansion per request.** Roles are uncached in 0.2.0, so expanding them per
 //!   operation would issue two queries per level of the role graph per sub-request. It is also
 //!   the same correctness argument: two operations in one batch must not disagree about who the
@@ -15,23 +16,29 @@
 //!   whose session had gone kept working as a public caller, with no signal that authentication
 //!   had failed.
 
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 use parse_rust_auth::{expand_roles, resolve_session, RolePrincipal};
 use parse_rust_core::{ClassLevelPermissions, ParseError, ParseMap, ParseValue};
 use parse_rust_mongo::MongoAdapter;
 use parse_rust_rest::{AclScope, Ctx, PermissionOptions, SchemaSnapshot};
-use parse_rust_storage::{ClassSchema, StorageAdapter};
+use parse_rust_storage::ClassSchema;
 
 use crate::auth::{Authority, Credentials};
 use crate::config::ServerConfig;
+use crate::schema_cache::{Freshness, SchemaCache};
 
 /// The request-scoped state every handler runs against.
 ///
 /// Owned rather than borrowed because [`Ctx`] borrows all three and a handler needs somewhere to
 /// keep them. Build it once at the top of a route, hand out [`RequestContext::ctx`] as often as
 /// needed.
+#[derive(Clone)]
 pub struct RequestContext {
-    pub snapshot: SchemaSnapshot,
+    /// Shared with the schema cache and every other request served from the same entry. Never
+    /// mutated: a request that needs a different schema gets a different snapshot.
+    pub snapshot: Arc<SchemaSnapshot>,
     pub scope: AclScope,
     pub options: PermissionOptions,
     /// The token this request presented, if any. `/users/me` and `/sessions/me` echo it back and
@@ -41,7 +48,7 @@ pub struct RequestContext {
     pub user_id: Option<String>,
     /// `X-Parse-Installation-Id`. Read by session creation and nothing else.
     pub installation_id: Option<String>,
-    /// `protectedFieldsSaveResponseExempt` (`Options/Definitions.js:507-512`).
+    /// `protectedFieldsSaveResponseExempt` (`Options/Definitions.js:513-518`).
     pub save_response_exempt: bool,
     /// Authenticated with the maintenance key rather than the master key.
     pub is_maintenance: bool,
@@ -51,6 +58,19 @@ impl RequestContext {
     pub fn ctx<'a>(&'a self, storage: &'a MongoAdapter) -> Ctx<'a, MongoAdapter> {
         Ctx::new(storage, &self.snapshot, &self.scope, &self.options)
             .maintenance(self.is_maintenance)
+    }
+
+    /// The same request on a rebuilt schema snapshot: everything about who is asking stays as it
+    /// was resolved. A read rerun after reaching a class its snapshot predated needs only the
+    /// schema; resolving the session again would see a logout an earlier sub-request of the same
+    /// batch made, which upstream's single resolution never does.
+    pub async fn with_rebuilt_schemas(
+        &self,
+        state: &crate::state::AppState,
+    ) -> Result<RequestContext, ParseError> {
+        let mut fresh = self.clone();
+        fresh.snapshot = state.schema_snapshot(Freshness::Reload).await?;
+        Ok(fresh)
     }
 
     /// Is this a master or maintenance request?
@@ -65,8 +85,10 @@ impl RequestContext {
 /// client sees before anything else happens, and roles are expanded from the user it produces.
 pub async fn resolve(
     storage: &MongoAdapter,
+    schemas: &SchemaCache,
     config: &ServerConfig,
     authority: &Authority,
+    freshness: Freshness<'_>,
 ) -> Result<RequestContext, ParseError> {
     let (scope, user_id) = match (&authority.credentials, authority.session_token.as_deref()) {
         // Master and maintenance short-circuit before session resolution, matching
@@ -87,11 +109,9 @@ pub async fn resolve(
         }
     };
 
-    // One load, then the option is folded in before the snapshot is built. Loading twice would
+    // One snapshot, with the option folded in before it is built. Taking a second one would
     // reintroduce exactly the mid-request schema change the snapshot exists to prevent.
-    let mut classes = storage.all_schemas().await?;
-    merge_server_protected_fields(&mut classes, config);
-    let snapshot = SchemaSnapshot::from_classes(classes);
+    let snapshot = snapshot(storage, schemas, config, freshness).await?;
 
     Ok(RequestContext {
         snapshot,
@@ -105,6 +125,20 @@ pub async fn resolve(
         // decision reads them differently; see `Ctx::is_maintenance`.
         is_maintenance: matches!(authority.credentials, Credentials::Maintenance),
     })
+}
+
+/// A snapshot from the cache, with the server's `protectedFields` folded in.
+pub(crate) async fn snapshot(
+    storage: &MongoAdapter,
+    schemas: &SchemaCache,
+    config: &ServerConfig,
+    freshness: Freshness<'_>,
+) -> Result<Arc<SchemaSnapshot>, ParseError> {
+    schemas
+        .snapshot(storage, freshness, |classes| {
+            merge_server_protected_fields(classes, config)
+        })
+        .await
 }
 
 /// Fold the server-level `protectedFields` option into the snapshot's CLP blocks.

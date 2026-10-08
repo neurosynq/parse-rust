@@ -80,11 +80,11 @@ async fn create_object(host: &str, class: &str, token: &str) -> String {
 ///
 /// It is the only way the caller learns what permissions its object got: on a private class it
 /// cannot read the row back to find out, and nothing else in the response mentions the ACL.
-/// Upstream marks the field as changed by the server and returns it (`RestWrite.js:394`), measured
+/// Upstream marks the field as changed by the server and returns it (`RestWrite.js:454`), measured
 /// at the pin. Asserted separately from the read-back tests because those pass whether or not the
 /// response says anything.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_create_response_carries_the_generated_acl() {
     let server = boot().await;
     let host = &server.host;
@@ -152,7 +152,7 @@ async fn find_all(host: &str, class: &str, who: &As) -> Vec<Value> {
 /// The headline case. User A creates an object in a class declared private; A can still read and
 /// write it, and B can do neither.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_declared_default_acl_isolates_the_creator() {
     let server = boot().await;
     let host = &server.host;
@@ -214,7 +214,7 @@ async fn a_declared_default_acl_isolates_the_creator() {
 /// The control. Without it the test above passes against a server that lost the ability to read
 /// anything at all.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_class_with_no_declared_acl_still_creates_public_rows() {
     let server = boot().await;
     let host = &server.host;
@@ -242,7 +242,7 @@ async fn a_class_with_no_declared_acl_still_creates_public_rows() {
 /// above while silently reverting a permission change a client made on purpose, and nothing in
 /// the response shows it: the update succeeds either way.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_default_applies_on_create_and_never_on_update() {
     let server = boot().await;
     let host = &server.host;
@@ -291,7 +291,7 @@ async fn the_default_applies_on_create_and_never_on_update() {
 /// The public ACL is the one declaration upstream skips, because stamping
 /// `{"*": {"read": true, "write": true}}` would only restate what an absent ACL already means.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_declared_public_acl_leaves_rows_public() {
     let server = boot().await;
     let host = &server.host;
@@ -326,7 +326,7 @@ async fn a_declared_public_acl_leaves_rows_public() {
 /// simply goes. The resulting row has no principals: master can read it and nobody else can. That
 /// is the restrictive direction and it is upstream's.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_anonymous_create_produces_a_row_only_master_can_read() {
     let server = boot().await;
     let host = &server.host;

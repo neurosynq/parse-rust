@@ -142,7 +142,7 @@ pub fn validate_write_fields(
     // later case is caught during field reservation instead, with a different message, which is
     // why this is not the whole rule.
     //
-    // Measured against parse-server 9.10.1-alpha.6: two in one create answers 111 `there can only
+    // Measured against parse-server at the pin: two in one create answers 111 `there can only
     // be one geopoint field in a class`, and adding a second later answers 111 `MongoDB only
     // supports one GeoPoint field in a class.`
     let mut geo_count = 0;

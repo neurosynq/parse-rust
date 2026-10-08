@@ -350,7 +350,7 @@ async fn apply_indexes(
 /// `DELETE /schemas/:className`.
 ///
 /// A non-empty class is code `255` `Class <X> is not empty, contains <N> objects, cannot drop
-/// schema.` (`DatabaseController.js:1621-1626`). Count first, then drop.
+/// schema.` (`DatabaseController.js:1622-1627`). Count first, then drop.
 pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseError> {
     if !parse_rust_schema::class_name_is_valid(class_name) {
         return Err(ParseError::new(
@@ -360,7 +360,7 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
     }
     // A class with no `_SCHEMA` row is not an error, and it is **not** a reason to stop either.
     // `getOneSchema` rejects with `undefined`, the caller substitutes `{fields: {}}`, and the count
-    // and the drop then run against that (`DatabaseController.js:1603-1627`). The
+    // and the drop then run against that (`DatabaseController.js:1604-1628`). The
     // `collectionExists` result is discarded by the `.then(() => ...)` that follows it, so nothing
     // upstream short-circuits on it.
     //
@@ -372,7 +372,14 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
         Some(schema) => schema,
         None => ClassSchema::new(class_name),
     };
-    let count = state.storage().count(&schema, &Query::new()).await?;
+    let count = state
+        .storage()
+        .count(
+            &schema,
+            &Query::new(),
+            &parse_rust_storage::CountOptions::default(),
+        )
+        .await?;
     if count > 0 {
         return Err(ParseError::new(
             ErrorCode::InvalidSchemaOperation,
@@ -388,7 +395,7 @@ pub async fn delete(state: &AppState, class_name: &str) -> Result<Json, ParseErr
 /// `DELETE /purge/:className`.
 ///
 /// Deletes every row and keeps the class, its schema entry and its join tables
-/// (`DatabaseController.js:461-465`, `PurgeRouter.js:19-23`).
+/// (`DatabaseController.js:462-466`, `PurgeRouter.js:19-23`).
 ///
 /// Upstream additionally clears the user cache for `_Session` and the role cache for `_Role`
 /// (`PurgeRouter.js:19-23`). parse-rust caches neither, so there is nothing to clear; stating that
@@ -489,7 +496,7 @@ fn render_clp(clp: Option<&ClassLevelPermissions>) -> Json {
 }
 
 fn to_json(map: &ParseMap) -> Json {
-    serde_json::from_str(&ParseValue::Object(map.clone()).to_json()).unwrap_or(Json::Null)
+    ParseValue::Object(map.clone()).to_serde_json()
 }
 
 // -------------------------------------------------------------------------------------------
@@ -555,7 +562,7 @@ fn as_object(body: &Json) -> Result<ParseMap, ParseError> {
 /// class silently edits another.
 ///
 /// Falsy values are absent, which is upstream exactly. Measured against parse-server
-/// 9.10.1-alpha.6: `"className": null` and `"className": ""` both answer 200 and act on the path's
+/// at the pin: `"className": null` and `"className": ""` both answer 200 and act on the path's
 /// class, while `["Gadget"]`, `7`, `true` and `{"a":1}` all answer 103.
 enum ClassNameField {
     Absent,
@@ -581,7 +588,7 @@ fn class_name_field(body: &ParseMap) -> ClassNameField {
 /// through the ECMAScript formatter this project already carries, an object is the famous
 /// `[object Object]`, and an array is its elements joined by commas, which is why `["Gadget"]`
 /// reports `Gadget` upstream rather than anything bracketed. Verified against parse-server
-/// 9.10.1-alpha.6 for `["Gadget"]`, `7`, `true` and `{"a":1}`.
+/// at the pin for `["Gadget"]`, `7`, `true` and `{"a":1}`.
 fn render_as_js_string(value: &ParseValue) -> String {
     match value {
         ParseValue::String(s) => s.clone(),
@@ -611,10 +618,10 @@ fn render_as_js_string(value: &ParseValue) -> String {
 /// in response to a request that was trying to define fields.
 ///
 /// Upstream's outcome is decided by JSON type, as with the other two. Measured against parse-server
-/// 9.10.1-alpha.6: a **string** or non-empty array enumerates to its indices and fails as 105
+/// at the pin: a **string** or non-empty array enumerates to its indices and fails as 105
 /// `invalid field name: 0`; a **number**, **boolean** or empty array enumerates to nothing and
 /// answers 200 having created the class with no fields; **null** reaches `Object.keys(null)` and
-/// answers `{"code":1,"error":"Internal server error."}`.
+/// answers `{"code":1,"message":"Internal server error."}`.
 ///
 /// Blast radius: a client sending `"fields": []` where it meant `{}` gets a refusal here and a
 /// success upstream. No spec file submits a malformed block.

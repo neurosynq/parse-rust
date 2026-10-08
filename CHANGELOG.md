@@ -11,6 +11,259 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
+## 0.3.0
+
+The conformance milestone. parse-rust is now measured against parse-server's own test suite rather
+than only against tests this project wrote for itself, and the reference is parse-server **9.10.3**,
+a release, where 0.2.x was measured against a 9.10.1 alpha.
+
+**Five authorization fixes apply to 0.2.0 and 0.2.1, and they are the reason to take this release
+promptly.** A `_User` update now checks that the caller may write the target account before it
+reads anything about it, as parse-server 9.10.3 does (GHSA-p49q-9w65-f9p7). `ACL` values on a
+create are now lowered exactly as parse-server lowers them, so the stored permissions match
+parse-server's for every shape a client can send. Credentials in a request body are read exactly
+where parse-server reads them. A session token whose user no longer exists is refused with 209
+`Invalid session token`, as parse-server refuses it. And a client delete is accepted only on a class
+whose name a client could use.
+
+### Added
+
+- **The conformance harness**, `tools/conformance/run.mjs`. It runs upstream's spec files at the
+  pin against parse-rust, block by block, and proves its subject three ways: every request carries
+  the block that sent it and parse-rust counts them, the suite is run again with no server and the
+  blocks that still pass must be exactly the ones declared client-only, and the identical patched
+  suite must pass against parse-server built at the pin.
+- **Geo queries**: `$nearSphere` with `$maxDistance` and its radian, mile and kilometre spellings,
+  `$within` with `$box`, `$geoWithin` with `$polygon` or `$centerSphere`, and `$geoIntersects`, with
+  upstream's validation messages. A count rewrites `$nearSphere` the way upstream does, inside
+  `$or` too. A geo-near query on a GeoPoint field with no geo index builds a `2d` index and retries
+  once, as upstream does.
+- **`$text`** with `$search`, `$language`, `$caseSensitive` and `$diacriticSensitive`, building a
+  `<field>_text` index and recording it in `_SCHEMA` the first time a field is searched. `$score`
+  orders by relevance, most relevant first whichever sign it carries, and selecting `$score`
+  returns it as `score`.
+- **`explain`, `hint` and `comment`** on find, with `hint` and `comment` also carried by the count
+  a find returns beside its results. `explain` requires the master key unless
+  `databaseOptions.allowPublicExplain` is set, which defaults to false, so a query plan is never
+  disclosed at the default.
+- **`defaultLimit` and `maxLimit`.** `maxLimit` caps the resolved row count.
+- **`accountLockout`**: the failed-login counter, the lock and its expiry, on the same
+  `_failed_login_count` and `_account_lockout_expires_at` columns parse-server uses, so a lock set by
+  either server in a mixed fleet is honored by the other. Login attempts on one account are handled
+  one at a time within a server, so concurrent attempts are counted as if they arrived in sequence.
+  `unlockOnPasswordReset` is accepted and has no effect, because there is no password reset yet.
+- **`_Installation` validation.** `/classes/_Installation` has been reachable since 0.2.0 with none
+  of upstream's write checks; 0.2.x listed installations among the absent subsystems, which was
+  wrong. 0.3.0 adds string types for the three id fields, an id on every create from the body or
+  the `X-Parse-Installation-Id` header, a `deviceType` on every create, lowercasing of a
+  64-character `deviceToken` and of `installationId`, and upstream's update checks: an existing
+  installation's `installationId` and `deviceType` cannot change, nor its `deviceToken` while
+  neither side has an `installationId`, each refused with 136, and an update to a missing
+  installation is `Object not found for update.`. A `deviceType` sent as an operation counts as
+  present, as it does upstream. The deduplication that follows upstream is not implemented.
+- **A schema cache.** Every request read `_SCHEMA` before its own query; it is now served from
+  memory, as parse-server serves it. A schema change made through this server applies to the next
+  request; a class another server created is loaded the first time a request names it, along with
+  every other class; `GET /schemas` reloads. A change another server makes to a class already loaded waits for
+  `databaseOptions.schemaCacheTtl` (milliseconds, `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL`) or a
+  restart, which is parse-server's behavior between its own nodes. Unset, the cache never expires,
+  as upstream's does. `enableSchemaHooks` is refused at boot rather than accepted, because the
+  change-stream invalidation it names is not implemented.
+- A `test-harness` cargo feature, off by default, that adds the harness's control routes. A
+  release build has neither.
+- **A benchmark harness**, `parse-rust-bench`, which is not published, and a
+  `bench-instrumentation` cargo feature, off by default, that attributes database time to each
+  request. It times seven workloads against parse-server at three injected database latencies,
+  after checking both servers give the same answer, and four microbenchmark families over frozen
+  corpora. The report publishes distributions only, with no faster or slower verdict, until a noise
+  floor exists to justify one.
+- **A one-command demo**, `docker compose up`, which builds parse-rust from the checkout, starts a
+  MongoDB beside it and serves `http://127.0.0.1:27800/parse` with application id `demo` and master
+  key `demo-master-key`. The keys are public and the database has no authentication, so it is a
+  demo, not a deployment. `tools/demo/check.sh` brings it up from a fresh clone and checks it.
+
+### Changed
+
+- **Dependencies updated within their current versions**, which takes `rustls` to 0.23.45 for
+  RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption levels, on the MongoDB
+  connection when it uses TLS) and `mongodb` to 3.9.1.
+
+- **A `_User` create mints a session by upstream's rule on both routes**: unless its installation
+  id is `cloud`, which a master or maintenance request without `X-Parse-Installation-Id` has. A
+  master `POST /classes/_User` with an installation id now answers a `sessionToken`, and a master
+  `POST /users` without one no longer does.
+
+- **A signup applies the class's default ACL and the schema's defaults before hashing and the
+  owner's ACL**, as upstream does: a `password` field can be required, a class default ACL is kept
+  with the owner's entry added to it, and a missing required field is reported before a taken
+  username.
+- **`HEAD` is answered by a path's `GET` handler**, with no body, as Express answers it.
+- **An empty `X-Parse-Installation-Id` is no installation id.**
+- **`PARSE_SERVER_REVOKE_SESSION_ON_PASSWORD_RESET=false` is refused at boot**: a password change
+  always revokes the user's other sessions.
+
+- **A request's work runs to completion when its client disconnects**, as Express keeps running a
+  request after its socket closes. A disconnect used to cancel it at its next step, part way through
+  a write or a batch.
+- **An empty `X-Parse-Session-Token` header is no session**, as upstream treats a falsy token,
+  rather than 209.
+- **`GET /users/me` with the master key and a session token** returns that token's user, as
+  upstream's `handleMe` resolves the token itself.
+- **A non-privileged `DELETE` of a `_User` row** answers 206 `Insufficient auth to delete user` for
+  an anonymous caller and 206 `Permission denied` for another user, as upstream does, where it
+  answered 119.
+- **A session token whose user no longer exists is refused** with 209 `Invalid session token`.
+- **`keys` naming a dotted path includes its parent**, as upstream forces the include, so
+  `keys=author.name` returns `author` with only `name`.
+- **A `where` is checked where upstream checks it.** A bad operand is refused after the CLP gate
+  and not on a `limit=0` read; `$in`, `$nin` and `$all` with a non-array, and an unknown operator,
+  are 107; `$exists` follows MongoDB's truthiness; a scalar or `null` `where` answers as upstream's
+  does.
+- **`order`** accepts `_created_at` and `_updated_at` as `createdAt` and `updatedAt`, and keeps the
+  first position of a repeated key.
+- **A `null` pointer** reads back as upstream's does: present as `null` after a create, absent after
+  an update.
+- **`userField:` rules** match a pointer inside an array.
+
+- **Routing follows the effective method on every path.** A known path with a method it does not
+  serve answers 404, as an Express router does, where it answered 405. A `POST` whose `_method`
+  names a served method reaches it on every route, `/serverInfo` included, and one that names no
+  valid method is a 404 rather than a `POST`. `/health` answers any method.
+- **A write with no body is the empty object**, as body-parser's empty body is, so a body-less
+  create, update, schema create, signup or batch sub-request runs rather than being refused. A body
+  that is not JSON answers 400 `{error}`, body-parser's envelope; the message is this parser's.
+- **A create answers with `Location`**, the new object's URL: the request's host and mount, then
+  `/users/<id>` for a `_User` or `/classes/<className>/<id>`.
+- **Schema field options are applied.** A create missing a field marked `required`, or sending it
+  as `null`, `""` or a `Delete`, is 142 `<field> is required`, and so is an update that clears one.
+  A field with a `defaultValue` that a create leaves out or deletes takes the default, which the
+  response reports, as it reports a default ACL.
+- **`/batch` validates before it refuses a transaction**, so a malformed transactional batch is
+  reported as malformed, and sub-request paths are normalized as a POSIX join normalizes them, `.`
+  and `..` included.
+- **An unroutable `/batch` sub-request fails the whole batch** with 400 and 107
+  `cannot route <method> <path>`, as upstream's router does; the sub-requests before it have run and
+  the ones after it do not. The method is matched as sent, so a lower-case or missing method does
+  not route, and neither does `/health`, which upstream mounts outside its router. Each was
+  reported per item before. A sub-request method that is not a string fails the whole batch with a 500 before
+  any of it runs, as upstream's does; 0.2.x ran it as a `GET`.
+- **`/batch` sub-requests run concurrently, and so do the queries of an `include`**, as upstream
+  runs them. A batch's results stay in request order. Two sub-requests touching the same object
+  have no defined order between them, which is upstream's behavior and never was a guarantee. An
+  include queries every path of one depth at once, and a deeper path after the depth above it.
+- **`include` expands through an array of pointers**, as upstream's does: a pointer stored inside
+  an array, which comes back from storage as a plain `{"__type":"Pointer"}` object, is expanded
+  like a pointer field. It was returned as the raw pointer.
+- **A request body over 20 MB is refused with `413 {"error":"request entity too large"}`**, which
+  is Express's answer at upstream's default `maxUploadSize`. It reached its route as an empty body.
+- **The MongoDB connection pool defaults to 100 connections**, the Node driver's default and so
+  parse-server's, where the Rust driver's is 10. A `maxPoolSize` in the connection URI still wins.
+- **`GET /login` is served**, and so is the SDK's `POST` with `_method: "GET"`. A login reads its
+  credentials from the query string when the body has no username or email and the query string
+  does, as upstream does, and reads nothing else from the body, so a stray key beside the
+  credentials no longer fails it.
+- **`GET /users`, and `GET`, `PUT` and `DELETE /users/:objectId`**, which upstream serves with the
+  same handlers as `/classes/_User`. A caller fetching their own `_User` row, on either route, gets
+  the session token they presented as its last key.
+- **Checks on a write meet the client in upstream's order.** On a `_User` create the `role:`
+  objectId guard precedes the objectId policy, and on signup the credential check precedes the
+  restricted-field check. A `_User` update by anyone but the owner is authorized before its body is
+  read, so a malformed body sent at somebody else's row answers 206, not the body's error. On an
+  `_Installation` create the objectId policy precedes the installation checks.
+- **An `ACL` in a response lists its principals in JavaScript key order**, an integer-like objectId
+  ahead of `*`, as the object upstream builds it into does.
+- **`limit` and `skip` are read as JavaScript reads them**: `Number()` over the decoded value, then
+  the driver's truncation, as upstream reads them. `limit=0` answers an empty result
+  without asking the database, and so without asking for `find` permission, which is what lets a
+  class whose CLP grants only `count` be counted. The checks upstream runs before its find still
+  apply: a `_Session` query with no session is 209, and a query or sort on a protected field is 119.
+- **Read parameters sent in the body keep their JSON types.** The SDK sends a find as `POST` with
+  `_method: "GET"` and its parameters in the body, and those were flattened into the query string
+  and parsed as JSON a second time, so `{"comment":"123"}` became a number and was dropped, and
+  `{"explain":"true"}` passed as `true` where upstream answers 102. A key in both the URL and the
+  body now takes the URL's value, as upstream merges them.
+- **`ACL` lowering follows parse-server's exactly.** An array's indices are principals, a flag is
+  tested for truthiness rather than for `true`, integer-like principals are stored first in
+  ascending order, a `null` entry is refused with a 500 and writes nothing, as is a `Batch`
+  operation as an `ACL`.
+- **`_User` signup refuses the `ACL` shapes parse-server refuses**, with its responses: a
+  non-`Delete` operation with 400, code -1, `ACL must be a Parse ACL.`; an entry that cannot be built
+  into a `Parse.ACL` with a 500. A truthy scalar `ACL` is 400, code -1, on signup and on update.
+- **A non-owner `_User` update that is not found answers 206 `Permission denied`**, as upstream's
+  does, not 101.
+- **An empty or non-string `username` or `password` on a `_User` update** is refused with 200 or
+  201, as 9.10.3 refuses it, master key included. A non-string `password` was 111.
+- **The create and update CLP gates run before the `addField` gate and the required-column check**,
+  as 9.10.3 orders them, so a write failing two checks names the operation.
+- **A `File` whose `name` is not a non-empty string is refused at any depth** with 111 `This is not
+  a valid File`, as 9.10.3 refuses it.
+- **An update response lists the operation results first and `updatedAt` last**, upstream's order.
+- **An `include` replaces each pointer where it stands** rather than moving it to the end of its
+  object, so an included object's keys keep upstream's order.
+- **A storage error on a find answers `{"code":1,"error":"An internal server error occurred"}`**,
+  upstream's body for that path. An explain, and a query the adapter refuses while building it,
+  such as a `$geoWithin` point with latitude 100, keep the bare
+  `{"code":1,"message":"Internal server error."}`, as upstream's do.
+- **An owner's `_User` update checks `username` and `password` before the class-level `update`
+  permission**, as 9.10.3 orders them, so an empty username under a CLP that closes `update` is 200,
+  not 119.
+- **`keys`, `excludeKeys`, `include` and `order` are JavaScript's `String()` of the decoded value**,
+  as upstream reads them, from the URL or the body. An array is its elements joined with commas,
+  so `keys=["n","text"]` selects both fields where it selected neither, and `order=["-n"]` sorts
+  where it was 105. `keys=null` is no projection.
+- **A read runs its checks in upstream's order.** Parameter names and the `where` JSON are checked
+  before class security, and the explain gate before the query is read. An unknown top-level
+  operator is 105 `Invalid key name: $foo`, raised after the CLP gate, where it was 102 before it. A
+  class that does not exist is refused, when client class creation is off, before the sort and CLP
+  checks, and is otherwise still queried, so an invalid operand is refused on it too. The count
+  beside a find validates the find's sort, and a negative `skip` is refused after the query is
+  built. An explain with `limit=0` answers `[]` before the CLP gate, the `include` pass and the
+  check of the explain value, which is made after the CLP gate.
+- **Geo and `$text` operands are read as JavaScript reads them.** A `null` operand whose member
+  upstream reads is a bare 500, `$maxDistanceInMiles` and `$maxDistanceInKilometers` coerce a
+  string, and a `$centerSphere` distance that coerces to a non-negative number reaches the database
+  as sent.
+
+- **Credentials in a request body are read exactly where parse-server reads them**, and `_method`
+  overrides the method of a `POST` only, in any case.
+
+### Deliberate differences
+
+- Protected fields are enforced across more of the read path.
+- A client delete or read is accepted only on a class whose name a client could use.
+- A malformed query is refused as one: `$or`, `$and` and `$nor` must be non-empty arrays of objects
+  (102, with a message naming the problem), a lone `$options` is 102, and `$exists` given an object
+  or an array that is not a Parse value is 107 on every field. parse-server answers several of
+  these with a 500, a `Permission denied` or a widened result.
+- The rows an `include` grafts into one response are capped at 128 MiB of JSON; past it the read
+  answers the generic 500, which parse-server answers only when its response no longer fits in a
+  JavaScript string.
+- A create sending `null` for a field with a `defaultValue` stores the `null` (201), or answers 142
+  `<field> is required` when the field is also required. parse-server answers a 500 for both,
+  because its required-field step reads `.__op` off the `null` (`RestWrite.js:424-425`).
+- The on-demand geo index is built only for a field declared as a GeoPoint. A geo query on any
+  other field fails.
+- A request naming a class the schema cache lacks and `_SCHEMA` does not have keeps the cache.
+  parse-server reloads every class on any miss; parse-rust reloads them when the class exists,
+  which means another server changed the schema, and otherwise answers from the cache it has.
+- `databaseOptions.enableSchemaHooks: true` is refused at boot. parse-server accepts it and
+  invalidates its schema cache from a change stream, which parse-rust does not implement;
+  `schemaCacheTtl` bounds staleness instead.
+- A `_User` signup whose `ACL` parse-server refuses is refused before the insert, in both of
+  upstream's branches. Without an `email` on the body, parse-server inserts the row and then
+  refuses, leaving the username taken; parse-rust leaves nothing.
+- A truthy scalar `ACL` on `_User` is always 400, where parse-server answers 400 or 500 depending
+  on whether the body carries an `email`, and 500 on an update.
+- `objectId: {"__op":"Delete"}` under `allowCustomObjectId` stays refused with 107. parse-server
+  accepts it and stores the row under an id the client is never told.
+
+### Known limitations
+
+- `$select`, `$dontSelect`, `$inQuery`, `$notInQuery`, `$containedBy`,
+  `includeAll` and `redirectClassNameForKey` are still refused by name, and the conformance run
+  reports the blocks that need them as failures.
+- Cloud Code, triggers, LiveQuery, files, push, GraphQL and Postgres are unchanged from 0.2.0.
+
 ## 0.2.1
 
 A security patch. Three authorization decisions were broader in 0.2.0 than they are in
@@ -42,7 +295,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
 ### Fixed
 
 - **`masterKeyIps` is enforced, at upstream's default of `['127.0.0.1', '::1']`**
-  (`Options/Definitions.js:396-399`, `middlewares.js:452`). The option was unimplemented, and its
+  (`Options/Definitions.js:402-406`, `middlewares.js:452`). The option was unimplemented, and its
   default is a control rather than a convenience, so an absent implementation was an open one. A
   master key presented from an address outside the list is refused with upstream's bare 403
   `unauthorized` and is **not** demoted to an ordinary client request, matching upstream, which
@@ -68,7 +321,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
     throws on the first master-key request; here it stops the server and names the entry.
   - **No `PARSE_SERVER_MAINTENANCE_KEY_IPS`, and that is a parse-rust CLI limitation rather than a
     gap upstream.** The pin defines both `PARSE_SERVER_MAINTENANCE_KEY` and
-    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:381`, `:386`). This binary exposes
+    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:387`, `:392`). This binary exposes
     neither, because master and maintenance are still one scope internally, so shipping the key
     through the CLI would advertise an authority the server only partly distinguishes. Both are
     reachable through `ServerConfig`.
@@ -78,7 +331,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
     whether the request is refused at all.
 - **A `_User` whose `ACL` is not a principal map is no longer created world-readable.** Upstream
   runs two tests on it, `if (!ACL) { ACL = {}; }` and then `ACL[objectId] = {read, write}`
-  (`RestWrite.js:1676-1686`), and both were read as "is it an object" here:
+  (`RestWrite.js:1815-1825`), and both were read as "is it an object" here:
   - `null`, `false`, `0` and `""` are **falsy**, so they mean "no ACL" and get the owner-only ACL
     an absent one gets.
   - An op envelope, an array and a tagged value are all **JavaScript objects**, so they receive the
@@ -98,7 +351,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   left as sent and is master-only; upstream throws a `TypeError` and answers a bare 500 there, so
   there is no answer worth reproducing.
 - **A `_User` update can no longer strip the owner's own access.** `force_owner_into_acl` re-adds
-  the owner entry for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1590-1599`)
+  the owner entry for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1729-1738`)
   and it handled a principal map and `{"__op":"Delete"}` and nothing else. Every other truthy shape
   reached the lowering, which cleared both permission columns, and a `_User` with empty permissions
   is a row its owner can no longer read, write or log in with. **Any principal permitted to write a
@@ -110,7 +363,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   arrays keep the owner now but still lose their numeric-index principals, as recorded below.
 - **A truthy non-string `objectId` with an inferable schema type on a `_User` create is refused
   rather than replaced.** Upstream's substitution test is `if (!this.data.objectId)`
-  (`RestWrite.js:429-431`), so a truthy id survives to the type check and, for numbers, booleans,
+  (`RestWrite.js:489-491`), so a truthy id survives to the type check and, for numbers, booleans,
   arrays, tagged values, ordinary objects and typed operations, answers `INCORRECT_TYPE`. Reading
   "not a string" as "absent" generated one instead: measured at the pin with
   `allowCustomObjectId` enabled and a body of `{"objectId": 123}`, upstream answered 400 code 111
@@ -124,7 +377,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   was gone before the permission columns were computed and none were written. Upstream keeps the op
   object and writes two **empty** arrays, which is master-only. Measured at the pin on an ordinary
   class: an anonymous read of the created object answered 200 here and 404 upstream.
-- **A CLP-declared default ACL is applied on create** (`RestWrite.js:378-395`). The setting was
+- **A CLP-declared default ACL is applied on create** (`RestWrite.js:438-455`). The setting was
   accepted by `POST /schemas`, stored, and echoed back by `GET /schemas`, and nothing ever read it,
   so every object in the class was created with no `_rperm` or `_wperm` columns and an absent
   `_rperm` is public. The class said private and the data was world-readable, which is worse than
@@ -136,7 +389,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   one.
 - **The create response carries the ACL the server generated.** It is the only way a client learns
   what permissions its object was given, and on a private class it cannot read the row back to find
-  out. Upstream marks the field server-changed and returns it (`RestWrite.js:394`), including the
+  out. Upstream marks the field server-changed and returns it (`RestWrite.js:454`), including the
   empty `{}` an anonymous create produces once `currentUser` has nobody to resolve to.
 
 ### Changed
@@ -308,7 +561,7 @@ route list in them is exhaustive. Treat any Parse Server endpoint not named ther
   upstream's, plus the legacy `_expiresAt` spelling.
 - **`emailVerified` was accepted on signup.** Upstream refuses it on any `_User` write through
   `checkRestrictedFields`, which sits in the chain both create and update run
-  (`RestWrite.js:116`, `:716-728`), so the create half was an omission rather than a decision: a
+  (`RestWrite.js:119`, `:779-791`), so the create half was an omission rather than a decision: a
   client could mark its own address verified at signup. Both paths now refuse it. `authData` is
   refused alongside it, which is a deliberate difference rather than restored parity, and is
   recorded as one below: upstream accepts `authData` on signup and validates it through the auth
@@ -395,7 +648,7 @@ route list in them is exhaustive. Treat any Parse Server endpoint not named ther
   client naming the same field the server was about to constrain, its own session's `user` or the
   pointer field a `pointerFields` entry names, got `INVALID_QUERY` `conflicting constraints` where
   upstream returns the row. Both now nest under `$and`, which is what upstream does and for the
-  same reason (`DatabaseController.js:1806-1811`, `RestQuery.js:121-131`).
+  same reason (`DatabaseController.js:1808-1811`, `RestQuery.js:121-131`).
 - **`enforceRoleSecurity` saw the wrong method.** The read method was derived from the query shape
   rather than taken from the route, so a `find` whose `where` pinned one objectId, and every
   `include` regardless of size, were checked as a `get`. Clients may `get` an installation and may
@@ -562,7 +815,8 @@ after release are tracked as defects instead.
 
 - **The routes, exhaustively, by method.** `GET`/`POST /health`, `GET /serverInfo`,
   `POST /batch`, `GET`/`POST /classes/:className`, `GET`/`PUT`/`DELETE /classes/:className/:objectId`,
-  `POST /users`, `GET /users/me`, `POST /login`, `POST /logout`, `GET`/`POST /roles`,
+  `GET`/`POST /users`, `GET /users/me`, `GET`/`PUT`/`DELETE /users/:objectId`,
+  `GET`/`POST /login`, `POST /logout`, `GET`/`POST /roles`,
   `GET`/`PUT`/`DELETE /roles/:objectId`, `GET /sessions`, `GET /sessions/me`,
   `GET`/`DELETE /sessions/:objectId`, `GET`/`POST /schemas`,
   `GET`/`POST`/`PUT`/`DELETE /schemas/:className`, `DELETE /purge/:className`. An unknown path
@@ -570,16 +824,15 @@ after release are tracked as defects instead.
   path before the method, with one exception: `POST` is registered almost everywhere as the
   JavaScript SDK's method-override transport, so a bare `POST` carrying no usable override reaches
   the dispatcher, finds no arm, and is reported as an unroutable method-and-path pair, which is a
-  404. Upstream also serves `GET /users`, `GET /login`, `POST /sessions`,
-  `PUT /sessions/:objectId` and `GET`/`PUT`/`DELETE /users/:objectId`, and none of those exist
+  404. Upstream also serves `POST /sessions` and `PUT /sessions/:objectId`, and neither exists
   here, and upstream answers `/health` on any method where parse-rust serves `GET` and `POST`.
   Whole subsystems absent along with their routes: `/aggregate`, `/functions`, `/jobs`, `/files`,
   `/hooks`, `/push`, `/installations`, `/events`, `/config`, `/requestPasswordReset`,
   `/verificationEmailRequest`, `/loginAs`, `/upgradeToRevocableSession`, `/verifyPassword`,
   `/challenge`, `/scriptlog`, `/security`, `/cloud_code/jobs`, `/push_audiences`,
   `/validate_purchase`, `/graphql-config`, the pages routes under `/apps` and `/graphql`.
-- **A client can save an existing `_User` but cannot create or delete one through `/classes`.**
-  `user.save()` works: the SDK sends it as `PUT /classes/_User/:objectId`. An unauthenticated
+- **A client can save an existing `_User` but cannot create or delete one through `/classes` or
+  `/users/:objectId`.** `user.save()` works: the SDK sends it as `PUT /classes/_User/:objectId`. An unauthenticated
   caller is refused before the ACL is consulted, `emailVerified` and `authData` are refused, a
   submitted `ACL` keeps the owner's entry, the password is hashed, the email format is checked, and
   username and email uniqueness is checked **case-insensitively**, which the `username_1` and
@@ -587,8 +840,7 @@ after release are tracked as defects instead.
   and returns a replacement token, matching upstream. Create and delete on that route stay refused
   for an ordinary client, because both need stages of `transformUser` that do not exist yet;
   signup is `POST /users`, and a master or maintenance key reaches the row through
-  `/classes/_User`.
-  `/users/:objectId` still does not exist.
+  `/classes/_User` or `/users/:objectId`.
 - **The maintenance key is not exposed by the binary, deliberately.** `ServerConfig` honours one, so
   an embedder can set it, but no environment variable enables it and the README no longer advertises
   it. Upstream restricts the key with `maintenanceKeyIps`, **defaulting to `['127.0.0.1', '::1']`**,

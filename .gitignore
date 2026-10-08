@@ -16,7 +16,7 @@
 
 # Private tooling lives in `bin/`; only `tools/` is shared. Ignored on this side as well, so a
 # stray copy cannot be committed from a checkout that has one.
-bin/
+/bin/
 
 /target/
 **/target/
@@ -26,3 +26,7 @@ logs/
 
 # Scratch directories used by the test harness when comparing against upstream.
 /tmp/
+
+# parse-server log output from spec runs (its `logsFolder` in spec/helper.js).
+test_logs/
+__pycache__/

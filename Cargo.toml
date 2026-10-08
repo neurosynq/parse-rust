@@ -9,10 +9,11 @@ members = [
   "crates/parse-rust-mongo",
   "crates/parse-rust-server",
   "crates/parse-rust-cli",
+  "crates/parse-rust-bench",
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 # Raised from 1.75 to match what the dependency graph actually requires: mongodb 3.8 and its
 # transitive dependencies do not build on anything older. A declared floor nobody can build at is
@@ -70,15 +71,14 @@ bcrypt = "0.15"
 bson = "2"
 mongodb = "3"
 futures = "0.3"
-parse-rust-storage = { path = "crates/parse-rust-storage", version = "0.2.1" }
-parse-rust-schema = { path = "crates/parse-rust-schema", version = "0.2.1" }
-parse-rust-rest = { path = "crates/parse-rust-rest", version = "0.2.1" }
-parse-rust-mongo = { path = "crates/parse-rust-mongo", version = "0.2.1" }
-parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.2.1" }
+parse-rust-storage = { path = "crates/parse-rust-storage", version = "0.3.0" }
+parse-rust-schema = { path = "crates/parse-rust-schema", version = "0.3.0" }
+parse-rust-rest = { path = "crates/parse-rust-rest", version = "0.3.0" }
+parse-rust-mongo = { path = "crates/parse-rust-mongo", version = "0.3.0" }
+parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.3.0" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tower = "0.5"
 http = "1"
-form_urlencoded = "1"
-parse-rust-core = { path = "crates/parse-rust-core", version = "0.2.1" }
-parse-rust-server = { path = "crates/parse-rust-server", version = "0.2.1" }
+parse-rust-core = { path = "crates/parse-rust-core", version = "0.3.0" }
+parse-rust-server = { path = "crates/parse-rust-server", version = "0.3.0" }

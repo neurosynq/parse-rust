@@ -39,8 +39,16 @@ permissions:
 # does not exist yet: you have to own the crate before you can name who may publish it.
 
 jobs:
+  # **The whole CI workflow, run against the release commit, gates the upload.** Not a past CI
+  # run looked up by SHA: a release can be published before that run finishes, or from a tag whose
+  # commit CI never saw. Running it here means both MongoDB majors, the acceptance gates and the
+  # citation check pass on exactly this commit before anything reaches the registry.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   publish:
     name: publish to crates.io
+    needs: ci
     runs-on: ubuntu-latest
     # Named in each crate's trusted publisher on crates.io, so the OIDC claim only validates for
     # runs in this environment. It also gives you a place to require a reviewer before publishing,

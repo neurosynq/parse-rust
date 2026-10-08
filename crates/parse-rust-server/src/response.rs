@@ -56,7 +56,7 @@ impl HttpError {
         }
     }
 
-    /// The header layer's rejection. Upstream's `invalidRequest` (`middlewares.js:829-832`).
+    /// The header layer's rejection. Upstream's `invalidRequest` (`middlewares.js:845-848`).
     ///
     /// Note it is **not** sanitization-dependent and the message is lowercase `unauthorized`,
     /// unlike the master-key gate above. Two similar-looking 403s with different bodies.

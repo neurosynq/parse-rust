@@ -11,6 +11,8 @@
 )]
 
 pub mod adapter;
+#[cfg(feature = "bench-instrumentation")]
+pub mod bench;
 pub mod transform;
 
 pub use adapter::MongoAdapter;

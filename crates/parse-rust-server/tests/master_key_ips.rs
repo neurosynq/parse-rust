@@ -37,7 +37,7 @@ fn excluding_loopback(mut config: ServerConfig) -> ServerConfig {
 ///
 /// **Not the same code path as the other 403 carrying this envelope**, which is worth stating
 /// because the two are easy to conflate and only one of them is `invalidRequest`. An appId or
-/// client-key rejection calls `invalidRequest` directly (`middlewares.js:829-832`). This one is a
+/// client-key rejection calls `invalidRequest` directly (`middlewares.js:845-848`). This one is a
 /// plain `Error` carrying `status` and `message` thrown out of `resolveKeyAuth`
 /// (`middlewares.js:453-462`); express 5 forwards the rejected promise, and `handleParseErrors`
 /// renders it from its `err.status && err.message` branch (`middlewares.js:629-631`). Same status
@@ -50,7 +50,7 @@ fn assert_unauthorized(response: &Response) {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_master_key_from_a_non_allowlisted_address_is_refused() {
     let server = boot_fresh_with(excluding_loopback).await;
 
@@ -71,7 +71,7 @@ async fn a_master_key_from_a_non_allowlisted_address_is_refused() {
 /// The control for the filter itself. The identical request against a server whose allowlist names
 /// the caller succeeds, so the refusal above is the allowlist rather than a broken master key.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_same_request_succeeds_when_the_address_is_allowed() {
     let server = boot_fresh_with(|mut config: ServerConfig| {
         config.master_key_ips = IpAllowlist::parse([ELSEWHERE, "127.0.0.1"]).expect("entries");
@@ -86,7 +86,7 @@ async fn the_same_request_succeeds_when_the_address_is_allowed() {
 /// asserted it: a default of "deny everything" would leave those tests failing for a reason nobody
 /// would attribute to this option.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_shipped_default_admits_loopback() {
     let server = boot().await;
     let response = get(&server.host, "/schemas", &As::master()).await;
@@ -96,7 +96,7 @@ async fn the_shipped_default_admits_loopback() {
 /// **The forgery case.** A caller who can spell an address must not be able to write itself into
 /// the allowlist, in either direction.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_forwarded_header_cannot_move_a_caller_in_or_out() {
     let refusing = boot_fresh_with(excluding_loopback).await;
     for header in ["X-Forwarded-For", "Forwarded", "X-Real-IP"] {
@@ -126,7 +126,7 @@ async fn a_forwarded_header_cannot_move_a_caller_in_or_out() {
 /// ordinary request. Upstream throws; a fall-through would answer 200 where upstream answers 403,
 /// and would let a caller skip a check it would otherwise have to satisfy.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_refused_master_key_is_not_demoted_to_a_client_request() {
     let server = boot_fresh_with(excluding_loopback).await;
     // `/schemas` is master-only, so a demotion would show as 403 with a Parse code rather than as
@@ -146,7 +146,7 @@ async fn a_refused_master_key_is_not_demoted_to_a_client_request() {
 /// The empty array means the key cannot be used at all, including from the machine the server runs
 /// on. It is not "unset, therefore allow".
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn an_empty_allowlist_refuses_the_master_key_from_the_server_itself() {
     let server = boot_fresh_with(|mut config: ServerConfig| {
         config.master_key_ips = IpAllowlist::deny_all();
@@ -158,7 +158,7 @@ async fn an_empty_allowlist_refuses_the_master_key_from_the_server_itself() {
 
 /// The maintenance key is filtered by its own option, with the same default.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_maintenance_key_carries_the_same_filter() {
     let refusing = boot_fresh_with(excluding_loopback).await;
     assert_unauthorized(

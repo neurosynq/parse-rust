@@ -15,6 +15,14 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The MongoDB every step uses. Set PARSE_RUST_TEST_MONGO to run the whole suite against another
+# server version: `docker run -d -p 127.0.0.1:27917:27017 mongo:9`, then
+# `PARSE_RUST_TEST_MONGO=mongodb://127.0.0.1:27917 tools/test.sh`. The Rust integration tests, the
+# conformance harness and the schema-format oracle read the same variable.
+export PARSE_RUST_TEST_MONGO="${PARSE_RUST_TEST_MONGO:-mongodb://127.0.0.1:27017}"
+TEST_MONGO="$PARSE_RUST_TEST_MONGO"
+export CONFORMANCE_MONGO="${CONFORMANCE_MONGO:-$TEST_MONGO}"
+
 # Editors inject `NODE_OPTIONS=--require .../bootloader.js` for auto-attach debugging. Every node
 # process then waits for a debug server, so a harness that inherits it hangs instead of running,
 # and the failure looks like a slow test rather than an environment leak. The harness controls its
@@ -70,9 +78,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # The citation check reads content at the pin through `git show`, so it was never affected. The
 # runtime gates load `lib/`, which is whatever the checkout built.
 #
-# Not resolved by picking a different default: a mismatch is a real problem that wants a human, so
-# it stops the run and names both revisions and the two ways out. `PARSE_SERVER_ROOT` is honoured
-# so a pinned worktree can be used once it has been built.
+# A checkout that is not at the pin, and no pinned worktree to fall back on, is a real problem
+# that wants a human: `oracle_problem` below stops every step that needs the oracle and names both
+# revisions.
+
 # The declared release target. Every differential below is only as good as this.
 PIN_COMMIT=$(awk '/^parse-server /{print $3}' PIN)
 
@@ -202,7 +211,7 @@ elif ! oracle_revision_ok; then
 else
   # `--ignored` covers every such test in the workspace: the number formatter and bcrypt
   # differentials, the `_SCHEMA` format oracle, the MongoTransform oracle, and the Mongo adapter
-  # integration tests. Several need a MongoDB on 27017. They fail loudly rather than skipping,
+  # integration tests. Several need the MongoDB at $TEST_MONGO. They fail loudly rather than skipping,
   # because a differential that quietly does not run is worse than not having one.
   run "differentials and integration"  cargo test --workspace -- --ignored
 fi
@@ -233,7 +242,7 @@ with_server() {
   fi
 
   local db="parse_rust_h_$$_${RANDOM}"
-  local uri="mongodb://127.0.0.1:27017/${db}"
+  local uri="${TEST_MONGO}/${db}"
   local log; log=$(mktemp -t parse-rust-harness)
   # `allowClientClassCreation` on, matching the `allowClientClassCreation: true` every gate script
   # already passes to the parse-server it boots. Both servers have to agree, or a differential run
@@ -286,15 +295,31 @@ run_gate_c_both_detailed() { node tools/spec/authorization.mjs "$1" test test "-
 run_gate_c_rust_detailed() { node tools/spec/authorization.mjs "$1" test test --detailed; }
 run_gate_d() { node tools/spec/shared-auth-state.mjs "$1" "$2"; }
 
+# Gate F of 0.3.0: upstream's own spec files against parse-rust, the dead-server control and the
+# pinned parse-server. Builds the harness binary into its own target directory, because the
+# `test-harness` feature must never reach the `target/debug/parse-rust` the other gates use.
+run_gate_f() {
+  CARGO_TARGET_DIR=target/harness cargo build -p parse-rust-cli --features test-harness --quiet || return 1
+  PARSE_SERVER_ROOT="$PS_ROOT" node tools/conformance/run.mjs
+}
+
+# Gate H: the control plane's acceptance files, against both servers through the same supervisor.
+# Reuses Gate F's harness binary, so it runs after it.
+run_gate_h() {
+  CARGO_TARGET_DIR=target/harness cargo build -p parse-rust-cli --features test-harness --quiet || return 1
+  PARSE_SERVER_ROOT="$PS_ROOT" node tools/conformance/run.mjs --control-plane
+}
+
 # Gate E is the one gate `with_server` cannot host. It varies server configuration across four
 # servers and it needs a second source address, so it boots its own and takes only a database.
+# Gate I runs in the same script for the same reason.
 run_gate_e() {
   cargo build --workspace --quiet || return 1
   if [[ ! -x ./target/debug/parse-rust ]]; then
     echo "./target/debug/parse-rust is missing; the binary name and this script disagree"
     return 1
   fi
-  node tools/spec/stock-config.mjs "mongodb://127.0.0.1:27017/parse_rust_e_$$_${RANDOM}"
+  node tools/spec/stock-config.mjs "${TEST_MONGO}/parse_rust_e_$$_${RANDOM}"
 }
 
 # Every runner resolves the `parse` npm SDK from the upstream checkout, and gates B, C and D boot a
@@ -311,13 +336,16 @@ if [[ $QUICK -eq 1 ]]; then
   skip "gate C: authorization" "--quick"
   skip "gate C: detailed messages" "--quick"
   skip "gate D: shared auth state" "--quick"
-  skip "gate E: stock configuration" "--quick"
+  skip "gates E and I: stock configuration" "--quick"
+  skip "gate F: upstream spec suite" "--quick"
+  skip "gate H: reconfigure control plane" "--quick"
 elif ! oracle_revision_ok; then
   # A hard failure, not a skip. A skip says "not measured here"; this says "measured against the
   # wrong thing", and the two must not read the same.
   for step in "conformance: features.spec" "gate A: SDK flow" "gate B: data fidelity" \
               "gate C: authorization" "gate C: detailed messages" "gate D: shared auth state" \
-              "gate E: stock configuration"; do
+              "gates E and I: stock configuration" "gate F: upstream spec suite" \
+              "gate H: reconfigure control plane"; do
     fail_step "$step" "$(oracle_mismatch_reason)"
   done
   echo "       to fix: git -C $PS_ROOT checkout $PIN_COMMIT"
@@ -329,7 +357,9 @@ elif ! have node || ! have curl; then
   skip "gate C: authorization" "node or curl not on PATH"
   skip "gate C: detailed messages" "node or curl not on PATH"
   skip "gate D: shared auth state" "node or curl not on PATH"
-  skip "gate E: stock configuration" "node or curl not on PATH"
+  skip "gates E and I: stock configuration" "node or curl not on PATH"
+  skip "gate F: upstream spec suite" "node or curl not on PATH"
+  skip "gate H: reconfigure control plane" "node or curl not on PATH"
 elif ! have_sdk; then
   skip "conformance: features.spec" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate A: SDK flow" "no parse SDK under $PS_ROOT/node_modules"
@@ -337,11 +367,14 @@ elif ! have_sdk; then
   skip "gate C: authorization" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate C: detailed messages" "no parse SDK under $PS_ROOT/node_modules"
   skip "gate D: shared auth state" "no parse SDK under $PS_ROOT/node_modules"
-  skip "gate E: stock configuration" "no parse SDK under $PS_ROOT/node_modules"
+  skip "gates E and I: stock configuration" "no parse SDK under $PS_ROOT/node_modules"
+  skip "gate F: upstream spec suite" "no parse SDK under $PS_ROOT/node_modules"
+  skip "gate H: reconfigure control plane" "no parse SDK under $PS_ROOT/node_modules"
 else
   run "conformance: features.spec"  with_server run_features
-  # The five acceptance gates. Every assertion in them also holds against real parse-server, so a
-  # failure means parse-rust diverged rather than that the expectation was invented.
+  # The acceptance gates. Their assertions hold against real parse-server too, except the few in
+  # Gate I that state each server's answer where parse-rust deliberately differs, so a failure
+  # means parse-rust diverged rather than that the expectation was invented.
   run "gate A: SDK flow"            with_server run_gate_a
   # The second parse-rust is booted with `enableSanitizedErrorResponse` off, which is the only
   # way to exercise the detailed messages. The gate matches the upstream half to it.
@@ -351,7 +384,9 @@ else
     run "gate C: authorization"     with_server run_gate_c_both
     run "gate C: detailed messages" with_server run_gate_c_both_detailed "$SANITIZE_OFF"
     run "gate D: shared auth state" with_server run_gate_d
-    run "gate E: stock configuration" run_gate_e
+    run "gates E and I: stock configuration" run_gate_e
+    run "gate F: upstream spec suite"  run_gate_f
+    run "gate H: reconfigure control plane" run_gate_h
   else
     # Named where they would have run rather than dropped, so a short green log cannot be mistaken
     # for a full one. Gates B and D boot parse-server themselves and have no half that runs
@@ -361,7 +396,9 @@ else
     run  "gate C: detailed messages" with_server run_gate_c_rust_detailed "$SANITIZE_OFF"
     skip "gate C: upstream half"    "no parse-server at $PS_ROOT; parse-rust half ran above"
     skip "gate D: shared auth state" "no parse-server at $PS_ROOT; the gate boots one"
-    skip "gate E: stock configuration" "no parse-server at $PS_ROOT; the gate boots one"
+    skip "gates E and I: stock configuration" "no parse-server at $PS_ROOT; the gate boots one"
+    skip "gate F: upstream spec suite" "no parse-server at $PS_ROOT; its oracle run needs it"
+    skip "gate H: reconfigure control plane" "no parse-server at $PS_ROOT; the supervisor is checked against it"
   fi
 fi
 

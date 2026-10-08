@@ -333,7 +333,7 @@ async function main() {
   // ---------------------------------------------------------------------------------------------
   //
   // `enforceClassExists` runs from `validateSchema` before a single field is inspected
-  // (`RestWrite.js:127-128`, `SchemaController.js:1288`), so a write to a class nobody has created
+  // (`RestWrite.js:133-137`, `SchemaController.js:1288`), so a write to a class nobody has created
   // creates the class and *then* fails. That is a `_SCHEMA` row on a shared database, so the two
   // servers disagreeing about it is a fleet problem rather than a cosmetic one: one node creates
   // classes the other does not, and `GET /schemas` differs by which node served the write.

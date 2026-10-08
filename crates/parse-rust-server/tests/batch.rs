@@ -8,7 +8,7 @@ use common::{get, post, signup, As};
 use serde_json::json;
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn mixed_success_and_failure_in_one_request() {
     let server = common::boot().await;
     let host = &server.host;
@@ -78,7 +78,7 @@ async fn mixed_success_and_failure_in_one_request() {
 
 /// A batch runs under the auth the outer request carried, once.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn sub_requests_inherit_the_outer_auth() {
     let server = common::boot().await;
     let host = &server.host;
@@ -114,7 +114,7 @@ async fn sub_requests_inherit_the_outer_auth() {
 }
 
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_malformed_shapes_are_refused_before_anything_runs() {
     let server = common::boot().await;
     let host = &server.host;
@@ -173,7 +173,7 @@ async fn the_malformed_shapes_are_refused_before_anything_runs() {
 /// Refused rather than accepted and silently run without one. That is the failure mode the
 /// milestone names by name.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_transactional_batch_is_refused() {
     let server = common::boot().await;
     let host = &server.host;
@@ -199,10 +199,11 @@ async fn a_transactional_batch_is_refused() {
     assert!(listed.results().is_empty(), "nothing ran: {}", listed.raw);
 }
 
-/// An unroutable sub-request is a per-operation error, not a 404 for the whole batch.
+/// An unroutable sub-request fails the whole batch with 400, as `tryRouteRequest` throwing inside
+/// upstream's `map` does. The sub-requests before it ran; the ones after it did not.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
-async fn an_unroutable_sub_request_fails_only_itself() {
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn an_unroutable_sub_request_fails_the_whole_batch() {
     let server = common::boot().await;
     let host = &server.host;
 
@@ -212,25 +213,70 @@ async fn an_unroutable_sub_request_fails_only_itself() {
         &As::master(),
         &json!({
             "requests": [
-                { "method": "POST", "path": "/parse/functions/nope", "body": {} },
                 { "method": "POST", "path": "/parse/classes/Fine", "body": { "n": 1 } },
+                { "method": "POST", "path": "/parse/nothing/here", "body": {} },
+                { "method": "POST", "path": "/parse/classes/Fine", "body": { "n": 2 } },
             ],
         }),
     )
     .await;
-    assert_eq!(r.status, 200, "{}", r.raw);
-    let results = r.body.as_array().expect("array").clone();
-    assert_eq!(results[0]["error"]["code"], json!(107), "{}", r.raw);
+    assert_eq!(r.status, 400, "{}", r.raw);
+    assert_eq!(r.code(), Some(107), "{}", r.raw);
+    assert_eq!(r.error(), "cannot route POST /nothing/here");
+
+    let rows = get(host, "/classes/Fine", &As::master()).await;
+    let ns: Vec<_> = rows.results().iter().map(|row| row["n"].clone()).collect();
     assert_eq!(
-        results[0]["error"]["error"],
-        json!("cannot route POST /functions/nope")
+        ns,
+        vec![json!(1)],
+        "only the one before it ran: {}",
+        rows.raw
     );
-    assert!(results[1]["success"]["objectId"].is_string(), "{}", r.raw);
+}
+
+/// The router compares the method verbatim, so a lowercase or missing one does not route, and a
+/// method a path does not serve does not either. `/health` is not on the router at all.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_sub_request_routes_only_on_an_exact_method() {
+    let server = common::boot().await;
+    let host = &server.host;
+    for (request, message) in [
+        (
+            json!({ "method": "post", "path": "/parse/classes/Lower", "body": {} }),
+            "cannot route post /classes/Lower",
+        ),
+        (
+            json!({ "path": "/parse/classes/Lower", "body": {} }),
+            "cannot route undefined /classes/Lower",
+        ),
+        (
+            json!({ "method": "PUT", "path": "/parse/classes/Lower" }),
+            "cannot route PUT /classes/Lower",
+        ),
+        (
+            json!({ "method": "GET", "path": "/parse/health" }),
+            "cannot route GET /health",
+        ),
+    ] {
+        let r = post(
+            host,
+            "/batch",
+            &As::master(),
+            &json!({ "requests": [request] }),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{}", r.raw);
+        assert_eq!(r.code(), Some(107), "{}", r.raw);
+        assert_eq!(r.error(), message, "{}", r.raw);
+    }
+    let rows = get(host, "/classes/Lower", &As::master()).await;
+    assert!(rows.results().is_empty(), "{}", rows.raw);
 }
 
 /// `batchRequestLimit` defaults to `-1`, which disables it.
 #[tokio::test]
-#[ignore = "needs MongoDB on 127.0.0.1:27017"]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn the_batch_request_limit_is_disabled_by_default_and_master_bypasses_it() {
     let server = common::boot().await;
     let requests: Vec<_> = (0..5)
@@ -277,4 +323,46 @@ async fn the_batch_request_limit_is_disabled_by_default_and_master_bypasses_it()
         "master bypasses the limit: {}",
         allowed.raw
     );
+}
+
+/// A truthy method that is not a string fails the whole batch before anything runs, as upstream's
+/// `toUpperCase` throws on it (`batch.js:106`). Converting it to text made `["DELETE"]` delete.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_non_string_method_runs_nothing() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let made = post(host, "/classes/Kept", &As::anonymous(), &json!({"a": 1})).await;
+    let id = made.body["objectId"]
+        .as_str()
+        .expect("objectId")
+        .to_string();
+
+    for method in [
+        json!(["DELETE"]),
+        json!({"m": "DELETE"}),
+        json!(1),
+        json!(true),
+    ] {
+        let r = post(
+            host,
+            "/batch",
+            &As::anonymous(),
+            &json!({"requests": [
+                {"method": "POST", "path": "/parse/classes/Kept", "body": {"a": 2}},
+                {"method": method, "path": format!("/parse/classes/Kept/{id}")},
+            ]}),
+        )
+        .await;
+        assert_eq!(r.status, 500, "{method}: {}", r.raw);
+        assert_eq!(r.code(), Some(1), "{method}: {}", r.raw);
+    }
+    assert_eq!(
+        get(host, &format!("/classes/Kept/{id}"), &As::anonymous())
+            .await
+            .status,
+        200
+    );
+    let rows = get(host, "/classes/Kept", &As::anonymous()).await.results();
+    assert_eq!(rows.len(), 1, "no sub-request of a refused batch may run");
 }

@@ -16,6 +16,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Called by `release.yml`, which runs this whole workflow against the release commit and
+  # publishes only if every job here passes.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,13 +26,20 @@ env:
 
 jobs:
   rust:
-    name: rust
+    name: rust (MongoDB ${{ matrix.mongodb }})
     runs-on: ubuntu-latest
+    # Every supported server major, because behavior parse-rust depends on (index option
+    # conflicts, error codes and messages, `explain` documents) is the server's and can move
+    # between majors. `fail-fast` off, so one major failing still reports the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        mongodb: ["7", "9"]
     # The adapter tests, the schema-format oracle and the acceptance gates all need a real
     # MongoDB. Mocking it would test that the mock behaves like the mock.
     services:
       mongodb:
-        image: mongo:7
+        image: mongo:${{ matrix.mongodb }}
         ports:
           - 27017:27017
     steps:

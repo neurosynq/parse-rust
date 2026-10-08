@@ -1,0 +1,20 @@
+{
+  "comment": "The Gate J completeness matrix. tools/bench/micro.sh and tools/bench/report.py read it; the bench crate's tests hold its workloads, rungs, sizes and shapes to what the driver and corpora define.",
+  "targets": ["node", "rust"],
+  "rungs": [0, 1, 10],
+  "workloads": [
+    "floor.health",
+    "read.get",
+    "create.nested",
+    "update.ops",
+    "batch.50",
+    "query.protected",
+    "include.wide",
+    "query.dated",
+    "include.array"
+  ],
+  "calibrated": ["read.get", "create.nested", "update.ops", "query.protected", "include.array"],
+  "families": ["json.decode", "json.encode", "parse-to-bson", "bson-to-parse"],
+  "sizes": ["200b", "2kb", "8kb"],
+  "shapes": ["flat", "nested", "pointers", "dated"]
+}

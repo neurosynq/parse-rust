@@ -30,7 +30,7 @@ const { MongoClient } = require(`${PS_ROOT}/node_modules/mongodb`);
 // Ephemeral port: several test batteries may run at once.
 const PORT = 0;
 const DB = `schemafmt_${process.pid}`;
-const URI = `mongodb://127.0.0.1:27017/${DB}`;
+const URI = `${process.env.PARSE_RUST_TEST_MONGO || 'mongodb://127.0.0.1:27017'}/${DB}`;
 
 async function main() {
   const server = await ParseServer.startApp({

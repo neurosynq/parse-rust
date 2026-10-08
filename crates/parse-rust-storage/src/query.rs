@@ -12,7 +12,7 @@
 //!
 //! 0.2.0 turned the flat constraint list into a tree. That was not a generalization for its own
 //! sake: pointer permissions compose **disjunctively** across fields
-//! (`DatabaseController.js:1815`), so a class permitting `{find: {pointerFields: ['owner',
+//! (`DatabaseController.js:1816`), so a class permitting `{find: {pointerFields: ['owner',
 //! 'editor']}}` cannot be expressed without `$or`. A flat list would have forced either a wrong
 //! conjunction, which under-returns, or no constraint at all, which is the breach.
 
@@ -38,7 +38,7 @@ pub enum Comparison {
     /// rewrite one layer below where it was applied.
     ///
     /// It also must not pin an objectId. `ParsedWhere::pinned_object_id` reads the shorthand form
-    /// only, matching upstream's direct `query.objectId` read (`DatabaseController.js:1838`), and
+    /// only, matching upstream's direct `query.objectId` read (`DatabaseController.js:1839`), and
     /// a separate variant is what keeps `{"objectId": {"$eq": "x"}}` out of that path.
     EqualOperator(ParseValue),
     NotEqual(ParseValue),
@@ -62,7 +62,33 @@ pub enum Comparison {
         pattern: String,
         options: Option<String>,
     },
+    /// Every geo operator one field's constraint document carries, as `(key, operand)` pairs in
+    /// the order they arrived, operands raw.
+    ///
+    /// **One variant for all of them, because upstream lowers them as one loop**
+    /// (`MongoTransform.js:670-675`, `:812-955`): the keys are visited in reverse alphabetical
+    /// order so `$nearSphere` precedes `$maxDistance`, a count rewrites `$nearSphere` into
+    /// `$geoWithin` using its sibling's raw `$maxDistance`, and three spellings of a distance all
+    /// write the same output key with the last one visited winning. Splitting them into separate
+    /// comparisons would scatter that ordering across a merge that knows nothing about it.
+    Geo(Vec<(String, ParseValue)>),
+    /// `$text`, the operand raw: `{"$search": {"$term": .., "$language": .., ..}}`. Lowered to the
+    /// top level of the filter, where Mongo requires it, rather than under the field
+    /// (`MongoTransform.js:332-334`); the field still decides which text index is built.
+    Text(ParseValue),
 }
+
+/// The constraint keys that belong to [`Comparison::Geo`].
+pub const GEO_OPERATORS: [&str; 8] = [
+    "$nearSphere",
+    "$maxDistance",
+    "$maxDistanceInRadians",
+    "$maxDistanceInMiles",
+    "$maxDistanceInKilometers",
+    "$within",
+    "$geoWithin",
+    "$geoIntersects",
+];
 
 impl Comparison {
     /// Map a Parse `$` operator onto a comparison.
@@ -87,11 +113,9 @@ impl Comparison {
             "$in" | "$nin" | "$all" => {
                 let items = match value {
                     ParseValue::Array(items) => items,
-                    _ => {
-                        return Err(ParseError::invalid_query(format!(
-                            "bad {op} value: expected an array"
-                        )))
-                    }
+                    // `INVALID_JSON`, `bad $in value`, as the transform words it
+                    // (`MongoTransform.js:725`, `:741`).
+                    _ => return Err(ParseError::invalid_json(format!("bad {op} value"))),
                 };
                 match op {
                     "$in" => Comparison::In(items),
@@ -99,17 +123,50 @@ impl Comparison {
                     _ => Comparison::All(items),
                 }
             }
+            // Upstream hands the value to MongoDB as given (`MongoTransform.js:682`), and MongoDB
+            // reads `$exists` by its truthiness: only `false`, `0` and `null` mean "absent".
             "$exists" => match value {
                 ParseValue::Bool(b) => Comparison::Exists(b),
-                _ => {
-                    return Err(ParseError::invalid_query(
-                        "bad $exists value: expected a boolean".to_string(),
-                    ))
+                ParseValue::Number(n) => Comparison::Exists(n != 0.0),
+                ParseValue::Null => Comparison::Exists(false),
+                // A Parse value in envelope form is an atom upstream converts and MongoDB reads as
+                // true (`MongoTransform.js:620-640`), so it is accepted as `true`.
+                ParseValue::Object(ref map)
+                    if matches!(
+                        map.get("__type"),
+                        Some(ParseValue::String(t))
+                            if matches!(t.as_str(), "Pointer" | "Date" | "GeoPoint" | "File" | "Bytes")
+                    ) =>
+                {
+                    Comparison::Exists(true)
                 }
+                // Any other object or array: upstream refuses it as a bad atom on most fields and accepts it as `true` on an
+                // `Array` field or a dotted key (`MongoTransform.js:661-669`). It is malformed on
+                // every field, so it is refused on every field.
+                ParseValue::Object(_) | ParseValue::Array(_) => {
+                    return Err(ParseError::invalid_json(format!(
+                        "bad atom: {}",
+                        value.to_json()
+                    )))
+                }
+                _ => Comparison::Exists(true),
             },
-            other => {
+            // Operators upstream implements and this server does not yet: refused by name, because
+            // a silently dropped constraint broadens the result, which is an authorization failure.
+            "$inQuery" | "$notInQuery" | "$select" | "$dontSelect" | "$containedBy"
+            // Parsed before this is reached; named here so a path that bypasses that parse still
+            // refuses rather than reporting an operator upstream knows as unknown. `$near` is not
+            // among them: upstream has no case for it, so it is the unknown-operator 107 below.
+            | "$nearSphere" | "$geoWithin" | "$within" | "$geoIntersects" | "$text" => {
                 return Err(ParseError::invalid_query(format!(
-                    "unsupported query operator: {other}"
+                    "unsupported query operator: {op}"
+                )))
+            }
+            // Anything else is upstream's `INVALID_JSON`, `bad constraint: $op`
+            // (`MongoTransform.js:956`).
+            other => {
+                return Err(ParseError::invalid_json(format!(
+                    "bad constraint: {other}"
                 )))
             }
         })
@@ -195,7 +252,7 @@ impl Query {
     /// spliced in beside the existing constraint. Upstream does the same thing and for the same
     /// reason: `addPointerPermissions` tests `hasOwnProperty(query, key)` and falls back to
     /// `reduceAndOperation({$and: [queryClause, query]})` when it holds
-    /// (`DatabaseController.js:1807-1811`).
+    /// (`DatabaseController.js:1808-1812`).
     ///
     /// Splicing instead is not a cosmetic difference. A client that queries `owner` explicitly on
     /// a class whose `find` CLP names `owner` as a pointer field produces two equalities on one
@@ -226,7 +283,7 @@ impl Query {
     }
 
     /// A disjunction of alternatives, simplified the way `reduceOrOperation` does
-    /// (`DatabaseController.js:1657-1724`): an `$or` with a single element collapses into that
+    /// (`DatabaseController.js:1658-1725`): an `$or` with a single element collapses into that
     /// element rather than staying wrapped.
     pub fn any_of(alternatives: Vec<Query>) -> Query {
         let mut alternatives: Vec<Query> =
@@ -300,7 +357,7 @@ impl UpdateValue {
     /// Does applying this need the post-image read back?
     ///
     /// Only ops do. A `Set` tells the client nothing it did not already know, which is why
-    /// `_sanitizeDatabaseResult` returns only op keys (`DatabaseController.js:2129-2157`).
+    /// `_sanitizeDatabaseResult` returns only op keys (`DatabaseController.js:2141-2169`).
     pub fn echoes_result(&self) -> bool {
         !matches!(self, UpdateValue::Set(_) | UpdateValue::Unset)
     }
@@ -314,6 +371,10 @@ pub type Update = IndexMap<String, UpdateValue>;
 pub enum SortDirection {
     Ascending,
     Descending,
+    /// A full-text search's relevance, from `$score` or `-$score`, on the key `score`. Upstream
+    /// maps both spellings to `{score: {$meta: 'textScore'}}` (`RestQuery.js:221-232`), so the
+    /// sign is dropped and the order is the database's: most relevant first.
+    TextScore,
 }
 
 /// Parse's default page size when a query does not ask for one.
@@ -327,7 +388,10 @@ pub const DEFAULT_LIMIT: u32 = 100;
 #[derive(Debug, Clone)]
 pub struct QueryOptions {
     pub limit: Option<u32>,
-    pub skip: Option<u32>,
+    /// Signed, because a negative skip is the database's refusal, not the parser's. An adapter
+    /// refuses it where the database would: after the query is built, so the query's own errors
+    /// come first, as upstream's synchronous `transformWhere` makes them.
+    pub skip: Option<i64>,
     pub order: Vec<(String, SortDirection)>,
     /// Projection. `None` means every field; `Some` is the explicit list.
     ///
@@ -346,6 +410,20 @@ pub struct QueryOptions {
     /// identities upstream treats as duplicates. It does not fold diacritics: `Café` and `Cafe`
     /// remain different identities under it.
     pub case_insensitive: bool,
+    /// `hint`, handed to the driver untouched (`MongoStorageAdapter.js:767`). An index that does
+    /// not exist is the driver's error, not a validation here.
+    pub hint: Option<Hint>,
+    /// `comment`, attached to the operation for the database's profiler and logs.
+    pub comment: Option<String>,
+}
+
+/// The options a count carries, which are the two upstream hands to `countDocuments`
+/// (`MongoStorageAdapter.js:888-910`, `MongoCollection.js:179-198`). A count has no sort, skip,
+/// limit or projection of its own.
+#[derive(Debug, Clone, Default)]
+pub struct CountOptions {
+    pub hint: Option<Hint>,
+    pub comment: Option<String>,
 }
 
 impl Default for QueryOptions {
@@ -356,6 +434,40 @@ impl Default for QueryOptions {
             order: Vec::new(),
             keys: None,
             case_insensitive: false,
+            hint: None,
+            comment: None,
+        }
+    }
+}
+
+/// An index hint: a name, or a key pattern.
+///
+/// Upstream accepts a string or any object (`ClassesRouter.js:221-223`) and passes it on, so the
+/// key pattern is kept as the client sent it, field names included. It is not translated to
+/// storage names, because upstream does not translate it either.
+#[derive(Debug, Clone)]
+pub enum Hint {
+    Name(String),
+    Keys(parse_rust_core::ParseMap),
+}
+
+/// The verbosity of an `explain`. `explain=true` is [`ExplainVerbosity::AllPlansExecution`], which
+/// is what the Node driver sends for a boolean (`MongoCollection.js:176`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainVerbosity {
+    QueryPlanner,
+    QueryPlannerExtended,
+    ExecutionStats,
+    AllPlansExecution,
+}
+
+impl ExplainVerbosity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QueryPlanner => "queryPlanner",
+            Self::QueryPlannerExtended => "queryPlannerExtended",
+            Self::ExecutionStats => "executionStats",
+            Self::AllPlansExecution => "allPlansExecution",
         }
     }
 }
@@ -363,13 +475,17 @@ impl Default for QueryOptions {
 impl QueryOptions {
     /// Parse Parse's `order` parameter: comma-separated keys, `-` prefix for descending.
     pub fn parse_order(order: &str) -> Vec<(String, SortDirection)> {
+        // Trimmed and never filtered (`RestQuery.js:221-232`): `order=n,` names an empty field,
+        // which the read path refuses as `Invalid field name: .` where dropping it answered 200.
         order
             .split(',')
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|k| match k.strip_prefix('-') {
-                Some(rest) => (rest.to_string(), SortDirection::Descending),
-                None => (k.to_string(), SortDirection::Ascending),
+            .map(|k| match k {
+                "$score" | "-$score" => ("score".to_string(), SortDirection::TextScore),
+                _ => match k.strip_prefix('-') {
+                    Some(rest) => (rest.to_string(), SortDirection::Descending),
+                    None => (k.to_string(), SortDirection::Ascending),
+                },
             })
             .collect()
     }
@@ -378,6 +494,18 @@ impl QueryOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_in_either_sign_is_relevance_on_score() {
+        assert_eq!(
+            QueryOptions::parse_order("-$score,name, $score"),
+            vec![
+                ("score".to_string(), SortDirection::TextScore),
+                ("name".to_string(), SortDirection::Ascending),
+                ("score".to_string(), SortDirection::TextScore),
+            ]
+        );
+    }
 
     #[test]
     fn supported_operators_map() {
@@ -414,10 +542,25 @@ mod tests {
     }
 
     #[test]
-    fn in_requires_an_array_and_exists_requires_a_boolean() {
-        assert!(Comparison::from_operator("$in", ParseValue::Number(1.0)).is_err());
-        assert!(Comparison::from_operator("$all", ParseValue::Number(1.0)).is_err());
-        assert!(Comparison::from_operator("$exists", ParseValue::Number(1.0)).is_err());
+    fn in_requires_an_array_and_exists_reads_truthiness() {
+        for op in ["$in", "$nin", "$all"] {
+            let e = Comparison::from_operator(op, ParseValue::Number(1.0)).unwrap_err();
+            assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidJson, "{op}");
+            assert_eq!(e.message, format!("bad {op} value"));
+        }
+        let e = Comparison::from_operator("$foo", ParseValue::Null).unwrap_err();
+        assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidJson);
+        assert_eq!(e.message, "bad constraint: $foo");
+        for (value, exists) in [
+            (ParseValue::Number(1.0), true),
+            (ParseValue::Number(0.0), false),
+            (ParseValue::Null, false),
+            (ParseValue::String("false".into()), true),
+        ] {
+            assert!(
+                matches!(Comparison::from_operator("$exists", value).expect("accepted"), Comparison::Exists(b) if b == exists)
+            );
+        }
     }
 
     #[test]
@@ -436,7 +579,15 @@ mod tests {
                 ("score".to_string(), SortDirection::Ascending),
             ]
         );
-        assert!(QueryOptions::parse_order("").is_empty());
+        // An empty entry survives for the read path to refuse; the caller never passes a falsy
+        // `order` at all.
+        assert_eq!(
+            QueryOptions::parse_order("n,"),
+            vec![
+                ("n".to_string(), SortDirection::Ascending),
+                (String::new(), SortDirection::Ascending),
+            ]
+        );
     }
 
     /// `reduceOrOperation` collapses a single-element disjunction. Reproduced so that a class with

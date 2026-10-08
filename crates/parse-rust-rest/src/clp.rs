@@ -14,7 +14,7 @@
 //!   [`test_permissions`] is the only place that reads the rule, and both stages call it.
 //! - **Deny-all cannot be spelled `None`.** [`PointerPermOutcome`] has three variants and is
 //!   `#[must_use]`, because upstream signals deny-all by returning `undefined` from a function
-//!   that otherwise returns a query (`DatabaseController.js:1770-1772`), and an `Option<Query>`
+//!   that otherwise returns a query (`DatabaseController.js:1771-1773`), and an `Option<Query>`
 //!   reproduces that hazard exactly: `None` reads as "nothing to add".
 //!
 //! Every denial in this module is one of upstream's `createSanitizedError` call sites, so each
@@ -23,7 +23,7 @@
 //! `enableSanitizedErrorResponse` is off, and they are what the log carries either way.
 //!
 //! Master and maintenance never reach any of this. Every upstream call site is guarded by
-//! `isMaster ? Promise.resolve() : ...` (`DatabaseController.js:575-578`, `:849-852`, `:935-938`,
+//! `isMaster ? Promise.resolve() : ...` (`DatabaseController.js:576-579`, `:849-852`, `:935-938`,
 //! `:1471-1474`), and here the guard is the caller matching on [`crate::AclScope::Unrestricted`].
 
 use parse_rust_core::{
@@ -37,7 +37,7 @@ use crate::query_parse::ParsedWhere;
 
 /// Which write a permission check belongs to.
 ///
-/// Upstream's `runOptions.action` (`DatabaseController.js:994`), which exists only to answer one
+/// Upstream's `runOptions.action` (`DatabaseController.js:995`), which exists only to answer one
 /// question: may this write add a field through a pointer permission? Only an update may.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteAction {
@@ -49,7 +49,7 @@ pub enum WriteAction {
 #[derive(Debug, Clone)]
 pub struct PermissionOptions {
     /// `protectedFieldsOwnerExempt`. Upstream tests `!== false`, so an unset option is exempt and
-    /// the default is `true` (`DatabaseController.js:1838`).
+    /// the default is `true` (`DatabaseController.js:1839`).
     pub protected_fields_owner_exempt: bool,
     /// `enableSanitizedErrorResponse`, carried here because every denial in this module is one of
     /// upstream's `createSanitizedError` call sites and needs it.
@@ -192,7 +192,7 @@ pub enum PointerPermOutcome {
     DenyAll,
 }
 
-/// Stage two: the query filter. `addPointerPermissions` (`DatabaseController.js:1731-1819`).
+/// Stage two: the query filter. `addPointerPermissions` (`DatabaseController.js:1732-1820`).
 ///
 /// Never called for master or maintenance.
 pub fn apply_pointer_permissions(
@@ -250,7 +250,7 @@ pub fn apply_pointer_permissions(
             },
             // A CLP naming a field of any other type, or naming no field at all, is a
             // misconfiguration. Upstream throws a plain `Error` here
-            // (`DatabaseController.js:1803-1805`), which is deliberate: failing open would hand
+            // (`DatabaseController.js:1804-1806`), which is deliberate: failing open would hand
             // the whole class to the caller, which is the breach this branch exists to prevent.
             //
             // A plain `Error` and not a `Parse.Error`, so the class and field name reach the log
@@ -268,7 +268,7 @@ pub fn apply_pointer_permissions(
         alternatives.push(Query::from_constraints(vec![constraint]));
     }
 
-    // 7. Disjunctive across fields (`DatabaseController.js:1815`). `Query::any_of` reproduces
+    // 7. Disjunctive across fields (`DatabaseController.js:1816`). `Query::any_of` reproduces
     //    `reduceOrOperation`'s single-element collapse.
     //
     //    Upstream copies the whole incoming query into each disjunct and ORs those; conjoining
@@ -277,13 +277,13 @@ pub fn apply_pointer_permissions(
     //
     //    `conjoin` and not `extend`, because with a single permission field `any_of` collapses to
     //    a bare constraint on that field and the client may already be constraining it. Upstream
-    //    guards the same case at `DatabaseController.js:1807-1811`.
+    //    guards the same case at `DatabaseController.js:1808-1812`.
     let mut out = query.clone();
     out.conjoin(Query::any_of(alternatives));
     Ok(PointerPermOutcome::Constrained(out))
 }
 
-/// `canAddField` (`DatabaseController.js:970-998`): does this write introduce a field the schema
+/// `canAddField` (`DatabaseController.js:971-999`): does this write introduce a field the schema
 /// does not have?
 ///
 /// `class_exists` is upstream's `if (!classSchema) return`, so a write that creates the class
@@ -312,7 +312,7 @@ pub fn adds_field<'a>(
 ///
 /// Entirely request state. Nothing derived from a request is ever written back into the schema
 /// snapshot, which is the deliberate divergence from upstream's `temporaryKeys`
-/// (`DatabaseController.js:1907`): that writes into the CLP object held by the shared schema
+/// (`DatabaseController.js:1908`): that writes into the CLP object held by the shared schema
 /// controller, so two concurrent requests corrupt each other's key list in both directions.
 #[derive(Debug, Clone, Default)]
 pub struct ProtectedFieldPlan {
@@ -329,7 +329,7 @@ impl ProtectedFieldPlan {
     }
 }
 
-/// `addProtectedFields` (`DatabaseController.js:1821-1925`).
+/// `addProtectedFields` (`DatabaseController.js:1822-1926`).
 ///
 /// `pinned_object_id` is the query's top-level `objectId` equality, if it has one. It exists only
 /// for the `_User` owner exemption.
@@ -374,7 +374,7 @@ pub fn plan_protected_fields(
         }
     }
     // The caller's own objectId, if the block names it. Kept out of the loop above because
-    // upstream adds it afterwards (`DatabaseController.js:1898-1903`), and the order of the sets
+    // upstream adds it afterwards (`DatabaseController.js:1899-1904`), and the order of the sets
     // does not change an intersection.
     if let Some(user_id) = scope.user_id() {
         if let Some(fields) = clp
@@ -391,7 +391,7 @@ pub fn plan_protected_fields(
     })
 }
 
-/// 4. Intersect every collected set (`DatabaseController.js:1910-1922`).
+/// 4. Intersect every collected set (`DatabaseController.js:1911-1923`).
 ///
 /// **More applicable groups means fewer protected fields.** A union over-protects and shows up as
 /// a failing test; a first-match-wins under-protects and shows up as nothing at all.
@@ -456,6 +456,23 @@ pub fn deny_protected_fields(
         }
     }
     Ok(())
+}
+
+/// The first field in `fields` that [`deny_protected_fields`] would refuse, by full name or by
+/// root. `$**` is a wildcard index, which reads every field.
+pub fn protected_index_field<'a>(
+    plan: Option<&ProtectedFieldPlan>,
+    fields: &'a [String],
+) -> Option<&'a str> {
+    let plan = plan?;
+    fields
+        .iter()
+        .find(|field| {
+            let root = field.split('.').next().unwrap_or(field);
+            field.as_str() == "$**" && !plan.strip.is_empty()
+                || plan.strip.iter().any(|f| f == *field || f == root)
+        })
+        .map(String::as_str)
 }
 
 /// `filterSensitiveData` (`DatabaseController.js:192-303`), applied to one row in upstream's
@@ -550,9 +567,16 @@ fn row_field_points_at(value: Option<&ParseValue>, user_id: Option<&str>) -> boo
     let Some(user_id) = user_id else { return false };
     match value {
         Some(ParseValue::Pointer { object_id, .. }) => object_id == user_id,
-        Some(ParseValue::Array(items)) => items
-            .iter()
-            .any(|v| matches!(v, ParseValue::Pointer { object_id, .. } if object_id == user_id)),
+        // Each element by its `.objectId`, as upstream reads it (`DatabaseController.js:228-231`).
+        // A pointer stored in an array has no column type and decodes as a plain object, so both
+        // forms count.
+        Some(ParseValue::Array(items)) => items.iter().any(|v| match v {
+            ParseValue::Pointer { object_id, .. } => object_id == user_id,
+            ParseValue::Object(map) => {
+                matches!(map.get("objectId"), Some(ParseValue::String(id)) if id == user_id)
+            }
+            _ => false,
+        }),
         // An `Object`-typed field holding a raw `{objectId: ...}` map, which is what upstream
         // reads: it inspects `.objectId` without checking `__type`.
         Some(ParseValue::Object(map)) => {
@@ -1137,7 +1161,7 @@ mod tests {
     ///
     /// Upstream temporarily appends the `userField:` name to the projection and records it in
     /// `serverOnlyKeys` so the rule can still be evaluated when the client asked for `keys`
-    /// (`DatabaseController.js:1859-1874`). parse-rust does not, for the reason stated on
+    /// (`DatabaseController.js:1860-1875`). parse-rust does not, for the reason stated on
     /// [`ProtectedFieldPlan`]: that mechanism writes into a memoized schema object upstream and
     /// nothing resets it.
     ///

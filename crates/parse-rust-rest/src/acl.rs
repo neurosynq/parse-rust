@@ -6,20 +6,13 @@
 //! document where the field is *missing*, which is how a row saved without an ACL stays readable.
 //! Omitting the null silently hides every such row, and there is no error to notice.
 //!
-//! **Two known differences from upstream live in [`lower_acl`], both recorded as deliberate
-//! differences and both deferred rather than fixed here.**
-//!
-//! It reads principals from a map and nothing else, so an `ACL` that is an *array* takes the
-//! truthy-non-object path below: two **empty** columns, which is a master-only row rather than a
-//! column-less public one. Upstream enumerates the array, so `[{"read":true}]` grants principal
-//! `"0"` there, an index being a property name. **That does change who may read the row**, in the
-//! restrictive direction: a principal upstream grants is granted nothing here.
-//!
-//! And the columns come out in wire order, where upstream enumerates a JavaScript object and puts
-//! integer-like keys first. That one grants the same rights to the same principals and is visible
-//! only to a client preserving map order, or to a mixed fleet comparing stored rows.
+//! [`lower_acl`] is a port of `transformObjectACL` (`DatabaseController.js:93-110`) and keeps its
+//! JavaScript semantics rather than reading the value as a principal map. Three of them are
+//! observable in a stored row and each was a recorded divergence until 0.3.0: an array's indices
+//! are principals, a flag is tested for truthiness rather than for `true`, and integer-like keys
+//! enumerate first.
 
-use parse_rust_core::{Acl, ErrorCode, ParseError, ParseMap, ParseValue, Permissions, Principal};
+use parse_rust_core::{Acl, ErrorCode, ParseError, ParseMap, ParseValue};
 use parse_rust_storage::{Comparison, Constraint};
 
 /// Who a request is acting as, for ACL purposes.
@@ -83,13 +76,13 @@ impl AclScope {
     }
 
     /// Upstream's `aclGroup`: `['*']`, then every role as `role:<name>`, then the user's objectId
-    /// (`RestWrite.js:184`, `RestQuery.js:427`, both `['*'].concat(roles, [user.id])`).
+    /// (`RestWrite.js:190`, `RestQuery.js:427`, both `['*'].concat(roles, [user.id])`).
     ///
     /// Master is the empty list, because upstream never reaches a caller that consumes an
     /// `aclGroup` without first branching on `isMaster`.
     ///
     /// Order matters twice over. `addPointerPermissions` extracts the single user id by filtering
-    /// out `role:` and `*` (`DatabaseController.js:1745-1747`), and the compiled `$in` array is
+    /// out `role:` and `*` (`DatabaseController.js:1746-1748`), and the compiled `$in` array is
     /// snapshot-compared.
     pub fn acl_group(&self) -> Vec<String> {
         match self {
@@ -163,7 +156,7 @@ impl AclScope {
 
 /// Resolve a class's declared default ACL into the value a create should carry.
 ///
-/// `RestWrite.js:385-391`. The declared block is copied, and if it names `currentUser` then the
+/// `RestWrite.js:445-451`. The declared block is copied, and if it names `currentUser` then the
 /// caller's objectId gains a copy of that entry and the `currentUser` key is removed.
 ///
 /// Three details are load-bearing and each fails silently if it is got wrong.
@@ -183,11 +176,10 @@ impl AclScope {
 /// stored rows. Substituting the caller's id in place of `currentUser` rather than appending would
 /// reorder them, so the substitution appends as upstream's assignment does.
 ///
-/// That is where the resemblance stops. **Upstream enumerates a JavaScript object, so an
+/// Insertion order is not the whole story. **The lowering enumerates a JavaScript object, so an
 /// integer-like key sorts ahead of every string key regardless of insertion order**, and an
-/// objectId of `1234567890` is integer-like. parse-rust preserves wire order throughout, so the
-/// stored arrays differ for any ACL naming such a principal. Measured, and not fixed here: it has
-/// no authorization consequence and the fix belongs in `lower_acl` with the array case.
+/// objectId of `1234567890` is integer-like. That ordering lives in [`lower_acl`], which is the
+/// one place a principal map becomes a column.
 pub fn default_acl_for_create(declared: &ParseValue, caller: Option<&str>) -> ParseValue {
     let ParseValue::Object(map) = declared else {
         // A truthy non-object is assigned verbatim upstream and lowered by the same rule any
@@ -217,9 +209,10 @@ pub fn default_acl_for_create(declared: &ParseValue, caller: Option<&str>) -> Pa
 ///
 /// **The test upstream applies is falsiness, not "is it an object"** (`DatabaseController.js:94-96`,
 /// literally `if (!ACL) return result`). Everything truthy falls through to a `for...in` that reads
-/// `.read` and `.write` off each entry, so a string, a number or an array yields no principals but
-/// **still writes both columns as empty arrays**, which is a master-only row. Skipping the columns
-/// instead writes a row with no `_rperm`/`_wperm` at all, and an absent column is public.
+/// `.read` and `.write` off each entry, so a string, a number or a tagged value yields no
+/// principals but **still writes both columns as empty arrays**, which is a master-only row.
+/// Skipping the columns instead writes a row with no `_rperm`/`_wperm` at all, and an absent column
+/// is public.
 ///
 /// Getting this wrong is not a cosmetic divergence. Nothing type-checks `ACL` on either side, by
 /// design (`SchemaController.js:1312-1315`), so `{"ACL":"x"}` reaches here from any client. The
@@ -227,21 +220,18 @@ pub fn default_acl_for_create(declared: &ParseValue, caller: Option<&str>) -> Pa
 /// a non-object `ACL` would satisfy it and then produce a world-writable role that any caller can
 /// add itself to.
 ///
-/// The update path applies the same test, in `lower_acl_into_update`. It did not until a review:
-/// it tested for `null` alone, so `false`, `0` and `""` fell through and cleared both columns on a
-/// row that already had permissions. Both paths now branch on truthiness, and the tests on each
-/// side loop over the falsy values rather than checking one, because checking one is what let the
-/// other three through.
-pub fn lower_acl(mut row: ParseMap) -> ParseMap {
+/// **An entry of `null` is an error, not an empty entry.** `ACL[entry].read` on `null` throws a
+/// `TypeError` out of the controller, before the adapter is called, so upstream answers a bare 500
+/// and writes nothing, on every class and on create and update alike. Measured at the pin for
+/// `{"*":null}` and `[null]`.
+pub fn lower_acl(mut row: ParseMap) -> Result<ParseMap, ParseError> {
     let Some(acl_value) = row.shift_remove("ACL") else {
-        return row;
+        return Ok(row);
     };
     if !parse_rust_core::is_js_truthy(&acl_value) {
-        return row;
+        return Ok(row);
     }
-    // `None` here is a truthy non-object, which upstream's loop walks and takes nothing from.
-    let acl = acl_from_value(&acl_value).unwrap_or_default();
-    let (rperm, wperm) = acl.to_perms();
+    let (rperm, wperm) = acl_columns(&acl_value)?;
     row.insert(
         "_rperm".to_string(),
         ParseValue::Array(rperm.into_iter().map(ParseValue::String).collect()),
@@ -250,7 +240,109 @@ pub fn lower_acl(mut row: ParseMap) -> ParseMap {
         "_wperm".to_string(),
         ParseValue::Array(wperm.into_iter().map(ParseValue::String).collect()),
     );
-    row
+    Ok(row)
+}
+
+/// The `for...in` loop of `transformObjectACL`, over a truthy `ACL`.
+///
+/// `if (ACL[entry].read)` is a truthiness test, so `{"*":{"read":1}}` grants public read upstream
+/// and must here. Reading only `true`, which is what this did, granted nobody.
+fn acl_columns(value: &ParseValue) -> Result<(Vec<String>, Vec<String>), ParseError> {
+    let mut rperm = Vec::new();
+    let mut wperm = Vec::new();
+    for (key, entry) in js_own_entries(value) {
+        if matches!(entry, ParseValue::Null) {
+            return Err(ParseError::internal(format!(
+                "ACL entry {key:?} is null; upstream throws reading `.read` off it"
+            )));
+        }
+        if js_member_truthy(entry, "read") {
+            rperm.push(key.clone());
+        }
+        if js_member_truthy(entry, "write") {
+            wperm.push(key);
+        }
+    }
+    Ok((rperm, wperm))
+}
+
+/// `value[name]` is truthy, in JavaScript's terms.
+///
+/// Only a plain object can carry a member a client named. An array, a string, a number and every
+/// tagged value answer `undefined` for `read` and `write`, because none of their own keys is
+/// spelled that way.
+fn js_member_truthy(value: &ParseValue, name: &str) -> bool {
+    match value {
+        ParseValue::Object(map) => map.get(name).is_some_and(parse_rust_core::is_js_truthy),
+        _ => false,
+    }
+}
+
+/// The own enumerable string keys `for...in` visits, with their values, in its order.
+///
+/// **Order is the point.** JavaScript enumerates an ordinary object's array-index keys first, in
+/// ascending numeric order, and every other key after them in insertion order. A body naming
+/// `zzz`, `10`, `2`, `aaa` stores `["2","10","zzz","aaa"]` upstream. The order reaches the stored
+/// `_rperm` and `_wperm` arrays, which a mixed fleet compares, and no JavaScript probe can see it,
+/// because an object literal and `JSON.parse` both reorder the same way.
+///
+/// An array enumerates its indices. Everything else enumerates nothing that matters here: a
+/// string's indices name single characters, which carry no `read`, and a tagged value's members are
+/// all scalars or arrays.
+pub fn js_own_entries(value: &ParseValue) -> Vec<(String, &ParseValue)> {
+    match value {
+        ParseValue::Object(map) => {
+            let mut indices: Vec<(u32, &String, &ParseValue)> = Vec::new();
+            let mut rest: Vec<(String, &ParseValue)> = Vec::new();
+            for (key, entry) in map {
+                match array_index(key) {
+                    Some(i) => indices.push((i, key, entry)),
+                    None => rest.push((key.clone(), entry)),
+                }
+            }
+            indices.sort_by_key(|(i, _, _)| *i);
+            indices
+                .into_iter()
+                .map(|(_, key, entry)| (key.clone(), entry))
+                .chain(rest)
+                .collect()
+        }
+        ParseValue::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (i.to_string(), entry))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// An ECMAScript array index: the canonical decimal spelling of an integer from 0 to 2^32 - 2.
+///
+/// `"01"`, `"-1"` and `"4294967295"` are ordinary string keys and keep their insertion position.
+/// Measured at the pin: a body naming `4294967294`, `4294967295`, `01`, `1`, `-1` stores
+/// `["1","4294967294","4294967295","01","-1"]`.
+fn array_index(key: &str) -> Option<u32> {
+    if key.is_empty() || key.len() > 10 || !key.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if key.len() > 1 && key.starts_with('0') {
+        return None;
+    }
+    let n: u64 = key.parse().ok()?;
+    (n < u64::from(u32::MAX)).then_some(n as u32)
+}
+
+/// An array `ACL`, as the object JavaScript sees once a principal is assigned onto it.
+///
+/// Upstream's owner stamp is `ACL[objectId] = {...}` on whatever `this.data.ACL` holds, and on an
+/// array that adds a property beside the indices. The lowering then enumerates both. Building the
+/// map keyed by index is what lets the owner join it the same way.
+pub fn array_acl_as_object(items: &[ParseValue]) -> ParseMap {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (i.to_string(), entry.clone()))
+        .collect()
 }
 
 /// Rebuild the `ACL` field from the two storage columns, then drop them.
@@ -280,6 +372,15 @@ pub fn raise_acl(mut row: ParseMap) -> ParseMap {
         }
         map.insert(principal.as_key(), ParseValue::Object(entry));
     }
+    // **In JavaScript's key order, not insertion order.** `untransformObjectACL` assigns each
+    // principal onto a fresh object (`DatabaseController.js:385-406`), and a JavaScript object
+    // enumerates its array-index keys first, ascending, whatever order they were assigned in. An
+    // objectId such as `1234567890` is one. The response is serialized from that object, so its
+    // ACL lists that principal ahead of `*` even when `_rperm` stores it after.
+    let map = js_own_entries(&ParseValue::Object(map))
+        .into_iter()
+        .map(|(key, entry)| (key, entry.clone()))
+        .collect();
     row.insert("ACL".to_string(), ParseValue::Object(map));
     row
 }
@@ -299,31 +400,13 @@ fn take_string_array(row: &mut ParseMap, key: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Read a client-supplied `ACL` value.
-fn acl_from_value(value: &ParseValue) -> Option<Acl> {
-    let ParseValue::Object(map) = value else {
-        return None;
-    };
-    let mut acl = Acl::new();
-    for (key, entry) in map {
-        let ParseValue::Object(flags) = entry else {
-            continue;
-        };
-        let flag = |name: &str| matches!(flags.get(name), Some(ParseValue::Bool(true)));
-        acl.set(
-            Principal::parse(key),
-            Permissions {
-                read: flag("read"),
-                write: flag("write"),
-            },
-        );
-    }
-    Some(acl)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lower(row: ParseMap) -> ParseMap {
+        lower_acl(row).expect("a non-null ACL lowers")
+    }
 
     fn row(pairs: Vec<(&str, ParseValue)>) -> ParseMap {
         let mut m = ParseMap::new();
@@ -354,31 +437,79 @@ mod tests {
         }
     }
 
-    /// **The array case that is a known divergence, pinned so the eventual fix is visible.**
-    ///
-    /// The test above uses `[]` and `["*"]`, neither of which carries a permission, so it passes
-    /// whether or not arrays are enumerated. `[{"read":true}]` is the case that separates the two:
-    /// upstream's `for...in` grants principal `"0"`, because an array index is a property name, and
-    /// `lower_acl` reads principals from a map only, so it writes two empty columns and grants
-    /// nobody. Measured at the pin, on signup, on a `_User` update and as a CLP-declared default.
-    ///
-    /// This asserts today's behavior rather than upstream's. When `lower_acl` learns to enumerate
-    /// an array, this test fails and is the reminder to move the divergence row with it.
+    fn columns(lowered: &ParseMap) -> (Vec<String>, Vec<String>) {
+        let read = take_string_array(&mut lowered.clone(), "_rperm").expect("_rperm written");
+        let write = take_string_array(&mut lowered.clone(), "_wperm").expect("_wperm written");
+        (read, write)
+    }
+
+    fn lowered_json(json: &str) -> Result<ParseMap, ParseError> {
+        let value = parse_rust_core::decode::classify(serde_json::from_str(json).expect("json"))
+            .expect("classify");
+        lower_acl(row(vec![("ACL", value)]))
+    }
+
+    /// **An array's indices are principals.** `[{"read":true}]` grants principal `"0"` upstream,
+    /// because `for...in` over an array visits its indices. `[]` and `[1,2]` cannot tell the two
+    /// readings apart, which is how 0.2.1's tests passed over this. Measured at the pin, as a
+    /// client-supplied `ACL`, a `_User` update and a CLP-declared default.
     #[test]
-    fn a_permission_bearing_array_currently_grants_nobody() {
-        let mut entry = ParseMap::new();
-        entry.insert("read".into(), ParseValue::Bool(true));
-        let lowered = lower_acl(row(vec![(
-            "ACL",
-            ParseValue::Array(vec![ParseValue::Object(entry)]),
-        )]));
-        for column in ["_rperm", "_wperm"] {
-            assert!(
-                matches!(lowered.get(column), Some(ParseValue::Array(a)) if a.is_empty()),
-                "upstream grants principal \"0\" here; parse-rust grants nobody, and the row \
-                 records it. Got {:?} for {column}",
-                lowered.get(column)
-            );
+    fn a_permission_bearing_array_grants_its_indices() {
+        let lowered = lowered_json(r#"[{"read":true},{"write":true}]"#).expect("lowers");
+        assert_eq!(columns(&lowered), (vec!["0".into()], vec!["1".into()]));
+    }
+
+    /// `if (ACL[entry].read)` is truthiness. `1`, `"yes"` and `[]` grant; `0`, `""` and `false`
+    /// do not.
+    #[test]
+    fn a_flag_is_tested_for_truthiness_not_for_true() {
+        let lowered = lowered_json(
+            r#"{"a":{"read":1},"b":{"read":"yes"},"c":{"write":[]},"d":{"read":0,"write":""},"e":{"read":false}}"#,
+        )
+        .expect("lowers");
+        assert_eq!(
+            columns(&lowered),
+            (vec!["a".into(), "b".into()], vec!["c".into()])
+        );
+    }
+
+    /// Array-index keys first, ascending; everything else after them, in insertion order. The
+    /// boundary is 2^32 - 2, and `01` and `-1` are ordinary keys.
+    #[test]
+    fn principals_enumerate_in_javascript_property_order() {
+        let lowered = lowered_json(
+            r#"{"zzz":{"read":true},"10":{"read":true},"2":{"read":true},"aaa":{"read":true}}"#,
+        )
+        .expect("lowers");
+        assert_eq!(columns(&lowered).0, vec!["2", "10", "zzz", "aaa"]);
+
+        let lowered = lowered_json(
+            r#"{"4294967294":{"read":true},"4294967295":{"read":true},"01":{"read":true},"1":{"read":true},"-1":{"read":true}}"#,
+        )
+        .expect("lowers");
+        assert_eq!(
+            columns(&lowered).0,
+            vec!["1", "4294967294", "4294967295", "01", "-1"]
+        );
+    }
+
+    /// `null.read` throws upstream, before anything is written. Every other non-object entry
+    /// simply has no `read`.
+    #[test]
+    fn a_null_entry_is_an_internal_error_and_nothing_else_is() {
+        for json in [r#"{"*":null}"#, "[null]", r#"[{"read":true},null]"#] {
+            let e = lowered_json(json).expect_err(json);
+            assert_eq!(e.code, ErrorCode::InternalServerError, "{json}");
+        }
+        for json in [
+            r#"{"*":"yes"}"#,
+            r#"{"*":5}"#,
+            r#"{"*":true}"#,
+            r#"{"*":[]}"#,
+            r#"["ab"]"#,
+        ] {
+            let lowered = lowered_json(json).expect(json);
+            assert_eq!(columns(&lowered), (Vec::new(), Vec::new()), "{json}");
         }
     }
 
@@ -394,10 +525,11 @@ mod tests {
             ParseValue::Number(1.0),
             ParseValue::Array(vec![]),
             ParseValue::Array(vec![ParseValue::String("*".into())]),
+            ParseValue::Date(parse_rust_core::ParseDate::now()),
             ParseValue::Bool(true),
             ParseValue::Object(ParseMap::new()),
         ] {
-            let lowered = lower_acl(row(vec![("ACL", value.clone())]));
+            let lowered = lower(row(vec![("ACL", value.clone())]));
             for column in ["_rperm", "_wperm"] {
                 assert!(
                     matches!(lowered.get(column), Some(ParseValue::Array(a)) if a.is_empty()),
@@ -419,11 +551,11 @@ mod tests {
             ParseValue::Number(0.0),
             ParseValue::String(String::new()),
         ] {
-            let lowered = lower_acl(row(vec![("ACL", value.clone())]));
+            let lowered = lower(row(vec![("ACL", value.clone())]));
             assert!(!lowered.contains_key("_rperm"), "falsy ACL: {value:?}");
             assert!(!lowered.contains_key("_wperm"), "falsy ACL: {value:?}");
         }
-        let untouched = lower_acl(row(vec![("title", ParseValue::String("x".into()))]));
+        let untouched = lower(row(vec![("title", ParseValue::String("x".into()))]));
         assert!(!untouched.contains_key("_rperm"));
         assert!(!untouched.contains_key("_wperm"));
     }
@@ -513,7 +645,7 @@ mod tests {
         owner.insert("write".into(), ParseValue::Bool(true));
         acl_map.insert("u1".into(), ParseValue::Object(owner));
 
-        let lowered = lower_acl(row(vec![
+        let lowered = lower(row(vec![
             ("title", ParseValue::String("x".into())),
             ("ACL", ParseValue::Object(acl_map)),
         ]));
@@ -532,6 +664,33 @@ mod tests {
         assert!(acl.contains_key("*") && acl.contains_key("u1"));
     }
 
+    /// A raised ACL lists array-index principals first, ascending, as the JavaScript object
+    /// upstream builds it into does, whatever order the columns hold them in.
+    #[test]
+    fn a_raised_acl_is_in_javascript_key_order() {
+        let strings = |items: &[&str]| {
+            ParseValue::Array(
+                items
+                    .iter()
+                    .map(|s| ParseValue::String((*s).into()))
+                    .collect(),
+            )
+        };
+        let raised = raise_acl(row(vec![
+            ("_rperm", strings(&["*", "role:a", "10", "2", "01"])),
+            ("_wperm", strings(&["4294967295", "7"])),
+        ]));
+        let ParseValue::Object(acl) = raised.get("ACL").expect("ACL") else {
+            panic!("ACL should be an object");
+        };
+        let keys: Vec<&str> = acl.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["2", "7", "10", "*", "role:a", "01", "4294967295"],
+            "indices ascending, then the rest in insertion order"
+        );
+    }
+
     /// UPSTREAM-QUIRK, reproduced end to end.
     #[test]
     fn a_false_flag_disappears_on_the_round_trip() {
@@ -541,7 +700,7 @@ mod tests {
         let mut acl_map = ParseMap::new();
         acl_map.insert("*".into(), ParseValue::Object(entry));
 
-        let raised = raise_acl(lower_acl(row(vec![("ACL", ParseValue::Object(acl_map))])));
+        let raised = raise_acl(lower(row(vec![("ACL", ParseValue::Object(acl_map))])));
         let ParseValue::Object(acl) = raised.get("ACL").expect("ACL") else {
             panic!()
         };
@@ -572,7 +731,7 @@ mod tests {
     fn principals(acl: ParseValue) -> (Vec<String>, Vec<String>) {
         let mut carrier = ParseMap::new();
         carrier.insert("ACL".to_string(), acl);
-        let lowered = lower_acl(carrier);
+        let lowered = lower(carrier);
         let read = take_string_array(&mut lowered.clone(), "_rperm").unwrap_or_default();
         let write = take_string_array(&mut lowered.clone(), "_wperm").unwrap_or_default();
         (read, write)
@@ -674,7 +833,7 @@ mod tests {
         assert!(matches!(&acl, ParseValue::String(s) if s == "nonsense"));
         let mut carrier = ParseMap::new();
         carrier.insert("ACL".to_string(), acl);
-        let lowered = lower_acl(carrier);
+        let lowered = lower(carrier);
         for column in ["_rperm", "_wperm"] {
             assert!(matches!(lowered.get(column), Some(ParseValue::Array(a)) if a.is_empty()));
         }
@@ -682,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_row_with_no_acl_gets_no_columns_and_no_acl_key_back() {
-        let lowered = lower_acl(row(vec![("title", ParseValue::String("x".into()))]));
+        let lowered = lower(row(vec![("title", ParseValue::String("x".into()))]));
         assert!(lowered.get("_rperm").is_none());
         let raised = raise_acl(lowered);
         assert!(

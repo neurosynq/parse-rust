@@ -21,6 +21,10 @@ publish.workspace = true
 name = "parse-rust"
 path = "src/main.rs"
 
+[features]
+test-harness = ["parse-rust-server/test-harness"]
+bench-instrumentation = ["parse-rust-server/bench-instrumentation"]
+
 [dependencies]
 parse-rust-server.workspace = true
 parse-rust-mongo.workspace = true

@@ -1,0 +1,18 @@
+{
+  "ParseObject.spec.js": {
+    "Parse.Object testing isNew in cloud code": "needs Cloud Code; scope exclusion: Conformance blocks that need Cloud Code",
+    "Parse.Object testing should not change the json field to array in afterSave": "needs Cloud Code; scope exclusion: Conformance blocks that need Cloud Code"
+  },
+  "ParseRelation.spec.js": {
+    "Parse.Relation testing ensures beforeFind on relation doesnt side effect": "needs Cloud Code; scope exclusion: Conformance blocks that need Cloud Code",
+    "Parse.Relation testing can query roles in Cloud Code (regession test #1489)": "needs Cloud Code; scope exclusion: Conformance blocks that need Cloud Code"
+  },
+  "ParseQuery.spec.js": {
+    "Parse.Query testing does not run afterFind on explain results": "needs Cloud Code; scope exclusion: Conformance blocks that need Cloud Code",
+    "Parse.Query testing should query with distinct within eachBatch and direct access enabled": "drives parse-server in process through ParseServerRESTController; scope exclusion: Conformance blocks that drive parse-server in process."
+  },
+  "ParseQuery.FullTextSearch.spec.js": {
+    "[mongodb] Parse.Query Full Text Search testing fullTextSearch: does not create text index if compound index exist": "reaches the storage adapter in process through the databaseAdapter global; scope exclusion: Conformance blocks that drive parse-server in process.",
+    "[mongodb] Parse.Query Full Text Search testing fullTextSearch: does not create text index if schema compound index exist": "reaches the storage adapter in process through the databaseAdapter global; scope exclusion: Conformance blocks that drive parse-server in process."
+  }
+}

@@ -8,7 +8,7 @@
 //! session token with `auth: master(config)` (`Auth.js:168`). It has to: until the lookup
 //! finishes there is no caller, so there is no ACL to evaluate and no CLP to consult. Creation is
 //! the same, `new RestWrite(config, Auth.master(config), '_Session', null, sessionData)`
-//! (`RestWrite.js:1133`). What keeps that narrow is that no query in this module comes from a
+//! (`RestWrite.js:1225`). What keeps that narrow is that no query in this module comes from a
 //! client. Each one is built here from a session token, a user objectId or a session objectId.
 //!
 //! The read side of `_Session` that a *client* reaches, `GET /sessions`, is a different path and
@@ -34,7 +34,7 @@ use parse_rust_storage::{
     ClassSchema, Comparison, Constraint, Query, QueryOptions, Row, StorageAdapter,
 };
 
-/// Upstream's revocable-session prefix (`RestWrite.js:1111`).
+/// Upstream's revocable-session prefix (`RestWrite.js:1203`).
 ///
 /// Load-bearing rather than decorative: `middlewares.js` routes a token *without* it to the
 /// legacy resolver, which looks the token up on `_User` instead of `_Session`. A token minted
@@ -61,7 +61,7 @@ fn fill_secure<R: RngCore + CryptoRng>(rng: &mut R, buf: &mut [u8]) {
 /// A new session token: `r:` followed by 32 lowercase hex characters, 34 in total.
 ///
 /// `'r:' + cryptoUtils.newToken()`, where `newToken` is `randomHexString(32)`
-/// (`RestWrite.js:1111`, `cryptoUtils.js:41`).
+/// (`RestWrite.js:1203`, `cryptoUtils.js:41`).
 pub fn new_session_token() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
     fill_secure(&mut rand::thread_rng(), &mut bytes);
@@ -82,9 +82,9 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// What created a session.
 ///
 /// Upstream stores this as a plain object with an `action` and, usually, an `authProvider`
-/// (`RestWrite.js:849`). Two of the four shapes **omit `authProvider` entirely**:
+/// (`RestWrite.js:941`). Two of the four shapes **omit `authProvider` entirely**:
 /// `{action: 'upgrade'}` (`SessionsRouter.js:73`) and `{action: 'create'}`
-/// (`RestWrite.js:1274`). Modelling the provider as `Option<String>` rather than defaulting it to
+/// (`RestWrite.js:1366`). Modelling the provider as `Option<String>` rather than defaulting it to
 /// an empty string is what keeps those two writing the document parse-server writes: an empty
 /// string is a present key, and a present key is a difference a mixed fleet can read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub struct CreatedWith {
 
 impl CreatedWith {
     /// `buildCreatedWith('signup', provider)`. A missing provider becomes `password`, which is
-    /// upstream's `authProvider || 'password'` (`RestWrite.js:849-851`).
+    /// upstream's `authProvider || 'password'` (`RestWrite.js:941-943`).
     pub fn signup(auth_provider: Option<&str>) -> Self {
         Self {
             action: SessionAction::Signup,
@@ -144,7 +144,7 @@ impl CreatedWith {
         }
     }
 
-    /// `{action: 'create'}`, with no `authProvider` key (`RestWrite.js:1274`).
+    /// `{action: 'create'}`, with no `authProvider` key (`RestWrite.js:1366`).
     pub fn create() -> Self {
         Self {
             action: SessionAction::Create,
@@ -172,8 +172,8 @@ impl CreatedWith {
 ///
 /// Taken as configuration rather than hardcoded, because both are server options and an operator
 /// can set either. The defaults are upstream's: `sessionLength` 31536000 seconds, one year
-/// (`Options/Definitions.js:629-634`), and `expireInactiveSessions` true
-/// (`Options/Definitions.js:269-274`).
+/// (`Options/Definitions.js:635-640`), and `expireInactiveSessions` true
+/// (`Options/Definitions.js:275-280`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
     pub session_length_secs: i64,
@@ -190,7 +190,7 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
-    /// `config.generateSessionExpiresAt()` (`Config.js:910-916`).
+    /// `config.generateSessionExpiresAt()` (`Config.js:915-921`).
     ///
     /// `None` when `expireInactiveSessions` is false, which is upstream's `undefined` and which
     /// produces a session that never expires. See [`resolve_session`].
@@ -212,7 +212,7 @@ pub struct NewSession<'a> {
     /// `None` writes no `createdWith` column at all, which is what a password-change replacement
     /// session gets. `setCreatedWith` computes an action of `login` only when an auth provider is
     /// in storage and `signup` only on a create, and returns early with neither set otherwise
-    /// (`RestWrite.js:860-870`), so the column is simply absent. Modelled as an `Option` rather
+    /// (`RestWrite.js:952-962`), so the column is simply absent. Modelled as an `Option` rather
     /// than a third `SessionAction`, because the difference is whether the key exists.
     pub created_with: Option<CreatedWith>,
     /// `X-Parse-Installation-Id`, when the client sent one. Its presence is what enables
@@ -293,15 +293,15 @@ pub async fn ensure_session_schema<S: StorageAdapter>(storage: &S) -> Result<(),
 
 /// Mint a session and write its row.
 ///
-/// The row is upstream's, key for key and in upstream's order (`RestWrite.js:1107-1135`, then the
+/// The row is upstream's, key for key and in upstream's order (`RestWrite.js:1199-1227`, then the
 /// default fields at `:423-431`): `sessionToken`, `user`, `createdWith`, `expiresAt`,
 /// `installationId` when present, then `updatedAt`, `createdAt`, `objectId`.
 ///
 /// **No ACL.** `_Session` rows carry none. Upstream refuses a client-supplied one outright,
-/// `Cannot set ACL on a Session.` (`RestWrite.js:1231-1232`), and the two paths that add an ACL
+/// `Cannot set ACL on a Session.` (`RestWrite.js:1323-1324`), and the two paths that add an ACL
 /// automatically do not apply: the CLP-derived default ACL needs a non-default
-/// `classLevelPermissions.ACL` (`RestWrite.js:378-395`), and the owner-private ACL is `_User`
-/// only (`RestWrite.js:1674-1686`). An absent ACL means the row is public to anything reading the
+/// `classLevelPermissions.ACL` (`RestWrite.js:438-455`), and the owner-private ACL is `_User`
+/// only (`RestWrite.js:1813-1825`). An absent ACL means the row is public to anything reading the
 /// collection directly, and what makes that safe is that the client-facing read of `_Session` is
 /// narrowed to the caller's own user before it reaches storage (`RestQuery.js:117-133`). Adding
 /// an ACL here would be inventing a column parse-server does not write.
@@ -353,7 +353,7 @@ pub async fn create_session<S: StorageAdapter>(
         ParseValue::String(object_id.clone()),
     );
 
-    // Before the insert, not after. `destroyDuplicatedSessions` runs at `RestWrite.js:144`, which
+    // Before the insert, not after. `destroyDuplicatedSessions` runs at `RestWrite.js:150`, which
     // is ahead of `runDatabaseOperation` at `:147`, so the new row is not yet a candidate for its
     // own dedup. The `sessionToken != token` guard upstream carries is kept anyway: it costs one
     // clause and it is what makes the order not matter.
@@ -370,7 +370,7 @@ pub async fn create_session<S: StorageAdapter>(
     })
 }
 
-/// `destroyDuplicatedSessions` (`RestWrite.js:1153`).
+/// `destroyDuplicatedSessions` (`RestWrite.js:1245`).
 ///
 /// **Note the conjunction.** The delete matches the same user *and* the same installationId, so
 /// two sessions from two devices coexist and two from one device do not. It is skipped entirely
@@ -411,7 +411,8 @@ async fn destroy_duplicated_sessions<S: StorageAdapter>(
 /// `getAuthForSessionToken`'s miss path (`Auth.js:157-197`). The order of the three failures is
 /// upstream's and is observable, because the first one reached is the error the client sees:
 ///
-/// 1. no row, or a row with no `user`: `INVALID_SESSION_TOKEN` (209) `Invalid session token`
+/// 1. no row, a row with no `user`, or a `user` naming no `_User` row: `INVALID_SESSION_TOKEN`
+///    (209) `Invalid session token`
 /// 2. `expiresAt` in the past: 209 `Session token is expired.`
 /// 3. the user objectId starts with `role:`: `INTERNAL_SERVER_ERROR` (1) `Invalid object ID.`
 ///
@@ -422,10 +423,10 @@ async fn destroy_duplicated_sessions<S: StorageAdapter>(
 /// `expireInactiveSessions: false`, or by an older server, working. Reproduced exactly. See
 /// `a_session_with_no_expiry_never_expires` for the test that makes "fixing" this fail loudly.
 ///
-/// The `role:` guard is upstream's check on the *included* user object rather than on the
-/// pointer. The two carry the same objectId, including when the referenced `_User` row does not
-/// exist, in which case `include` leaves the pointer un-hydrated and upstream reads the objectId
-/// straight off it.
+/// **The user must exist.** Upstream reads the session with `include: 'user'` (`Auth.js:158-172`),
+/// and `replacePointers` turns a pointer whose row it did not find into `undefined`
+/// (`RestQuery.js:1335-1338`), so a deleted user's token fails the `!results[0]['user']` test and
+/// is 209. The `role:` guard then reads the included user's objectId, which is the pointer's.
 pub async fn resolve_session<S: StorageAdapter>(
     storage: &S,
     session_token: &str,
@@ -441,6 +442,7 @@ pub async fn resolve_session<S: StorageAdapter>(
         order: Vec::new(),
         keys: None,
         case_insensitive: false,
+        ..QueryOptions::default()
     };
 
     let rows = storage.find(&schema, &query, &options).await?;
@@ -454,6 +456,9 @@ pub async fn resolve_session<S: StorageAdapter>(
         Some(ParseValue::Pointer { object_id, .. }) => object_id.clone(),
         _ => return Err(invalid_session_token()),
     };
+    if !user_exists(storage, &user_object_id).await? {
+        return Err(invalid_session_token());
+    }
 
     let expires_at = match row.get("expiresAt") {
         Some(ParseValue::Date(d)) => Some(*d),
@@ -492,6 +497,51 @@ pub async fn resolve_session<S: StorageAdapter>(
     })
 }
 
+/// The user a session token names, with no expiry check and no check that the user exists.
+///
+/// `handleMe`'s own lookup (`UsersRouter.js:195-213`): it reads the `_Session` row with the master
+/// key and takes `user.objectId`, then re-fetches the user, which is where a missing user fails.
+/// An expired session is not refused there, so a master caller asking `/users/me` with an expired
+/// token gets that token's user.
+pub async fn session_user<S: StorageAdapter>(
+    storage: &S,
+    session_token: &str,
+) -> Result<Option<String>, ParseError> {
+    let query = Query::from_constraints(vec![Constraint::equal(
+        "sessionToken",
+        ParseValue::String(session_token.to_string()),
+    )]);
+    let options = QueryOptions {
+        limit: Some(1),
+        ..QueryOptions::default()
+    };
+    let rows = storage.find(&session_schema(), &query, &options).await?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|row| match row.get("user") {
+            Some(ParseValue::Pointer { object_id, .. }) => Some(object_id.clone()),
+            _ => None,
+        }))
+}
+
+/// Is there a `_User` row with this objectId? The include's lookup, reduced to existence.
+async fn user_exists<S: StorageAdapter>(storage: &S, object_id: &str) -> Result<bool, ParseError> {
+    let query = Query::from_constraints(vec![Constraint::equal(
+        "objectId",
+        ParseValue::String(object_id.to_string()),
+    )]);
+    let options = QueryOptions {
+        limit: Some(1),
+        keys: Some(vec!["objectId".to_string()]),
+        ..QueryOptions::default()
+    };
+    Ok(!storage
+        .find(&default_schema("_User"), &query, &options)
+        .await?
+        .is_empty())
+}
+
 /// Delete one session by its token. Returns whether a row was removed.
 pub async fn revoke<S: StorageAdapter>(
     storage: &S,
@@ -508,8 +558,8 @@ pub async fn revoke<S: StorageAdapter>(
 /// Delete every session belonging to a user. Returns how many.
 ///
 /// This is what a password change needs. `revokeSessionOnPasswordReset` defaults to true
-/// (`Options/Definitions.js:584-589`) and the destroy it performs is exactly this query, keyed on
-/// the user pointer with nothing else (`RestWrite.js:1192-1204`).
+/// (`Options/Definitions.js:590-595`) and the destroy it performs is exactly this query, keyed on
+/// the user pointer with nothing else (`RestWrite.js:1284-1296`).
 ///
 /// Implemented ahead of any route that reaches it, on purpose. The alternative is that
 /// `DELETE /sessions/:objectId` grows its own one-row delete and the password-change path grows a
@@ -536,6 +586,16 @@ mod tests {
 
     fn cfg() -> SessionConfig {
         SessionConfig::default()
+    }
+
+    /// Storage holding the `_User` rows the tests' sessions point at. A session whose user does
+    /// not exist resolves to 209, which `a_deleted_users_session_is_invalid` covers.
+    fn with_users() -> FakeStorage {
+        let s = FakeStorage::new();
+        for id in ["u1", "u2", "alice", "bob", "user000001", "role:Admins"] {
+            s.insert_row("_User", vec![("objectId", ParseValue::String(id.into()))]);
+        }
+        s
     }
 
     #[test]
@@ -573,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_row_is_upstreams_columns_in_upstreams_order() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -663,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_row_has_no_acl() {
-        let s = FakeStorage::new();
+        let s = with_users();
         create_session(
             &s,
             &cfg(),
@@ -684,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn creating_a_session_writes_the_session_schema() {
-        let s = FakeStorage::new();
+        let s = with_users();
         create_session(
             &s,
             &cfg(),
@@ -703,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_is_now_plus_session_length_and_is_absent_when_disabled() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -745,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_minted_token_resolves_to_its_user() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -769,7 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_token_is_invalid_session_token() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let e = resolve_session(&s, "r:nope").await.unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidSessionToken);
         assert_eq!(e.message, "Invalid session token");
@@ -777,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_with_no_user_is_invalid_session_token() {
-        let s = FakeStorage::new();
+        let s = with_users();
         s.insert_row(
             "_Session",
             vec![
@@ -794,7 +854,7 @@ mod tests {
     /// observable: a row that is both expired and role-prefixed reports expiry.
     #[tokio::test]
     async fn the_three_failures_are_checked_in_upstreams_order() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let past = ParseDate::parse_iso("2000-01-01T00:00:00.000Z").expect("date");
 
         // Expired and role-prefixed at once: expiry wins.
@@ -857,7 +917,7 @@ mod tests {
     /// a missing expiry mean "expired", they have logged out every such session on the database.
     #[tokio::test]
     async fn upstream_quirk_a_session_with_no_expiry_never_expires() {
-        let s = FakeStorage::new();
+        let s = with_users();
         s.insert_row(
             "_Session",
             vec![
@@ -879,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_destruction_is_per_user_and_per_installation() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = |user: &'static str, install: Option<&'static str>| NewSession {
             user_object_id: user,
             created_with: Some(CreatedWith::login(None)),
@@ -915,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_an_installation_id_nothing_is_destroyed() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = || NewSession {
             user_object_id: "alice",
             created_with: Some(CreatedWith::login(None)),
@@ -931,7 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_removes_one_session_and_revoke_all_removes_the_users() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = |user: &'static str| NewSession {
             user_object_id: user,
             created_with: Some(CreatedWith::login(None)),
@@ -958,7 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolution_reads_at_most_one_row() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -976,9 +1036,32 @@ mod tests {
             .expect("resolve");
         assert_eq!(
             s.find_count(),
-            1,
-            "session resolution is on every authenticated request; it stays one query"
+            2,
+            "session resolution is on every authenticated request: the session and its user, \
+             which is upstream's `include: 'user'` read, and nothing more"
         );
         assert_eq!(s.last_find_limit(), Some(Some(1)));
+    }
+
+    /// A deleted user's sessions stop working at once, as upstream's include finds no user.
+    #[tokio::test]
+    async fn a_deleted_users_session_is_invalid() {
+        let s = FakeStorage::new();
+        let created = create_session(
+            &s,
+            &cfg(),
+            NewSession {
+                user_object_id: "gone",
+                created_with: Some(CreatedWith::login(None)),
+                installation_id: None,
+            },
+        )
+        .await
+        .expect("create");
+        let e = resolve_session(&s, &created.session_token)
+            .await
+            .expect_err("no such user");
+        assert_eq!(e.code, ErrorCode::InvalidSessionToken);
+        assert_eq!(e.message, "Invalid session token");
     }
 }

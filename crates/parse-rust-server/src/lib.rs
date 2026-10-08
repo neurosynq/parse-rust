@@ -30,21 +30,28 @@
 )]
 
 pub mod auth;
+#[cfg(feature = "bench-instrumentation")]
+pub mod bench;
 pub mod body_credentials;
 pub mod config;
 pub mod cors;
+#[cfg(feature = "test-harness")]
+pub mod harness;
 pub mod ip_allowlist;
+pub mod location;
+pub mod lockout;
 pub mod params;
 pub mod request;
 pub mod response;
 pub mod routes;
+pub mod schema_cache;
 pub mod state;
 
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::any;
 use axum::Router;
 
 pub use auth::{Authority, Credentials, HeaderRejection, Peer};
@@ -104,86 +111,50 @@ pub fn router(state: AppState) -> Router {
     let mount = state.config().mount_path.clone();
     // Cloned before `with_state` consumes it below, so the CORS layer can read the same config.
     let cors_state = state.clone();
+    #[cfg(feature = "test-harness")]
+    let harness_state = state.clone();
 
     // The 0.2.0 surface, and nothing else: anything not registered here is a 404. Every route
     // that a client can reach through a `_method` override also accepts `POST`, because the
     // JavaScript SDK transports everything that way.
     let api = Router::new()
-        .route("/serverInfo", get(routes::http::server_info))
+        .route("/serverInfo", any(routes::http::server_info))
         // `/health` is credential-free upstream and is the endpoint every bring-up script polls.
         // The SDK transports even a health check as POST with `_method: "GET"`, so accepting
         // only GET returned 405 to `Parse.getServerHealth()`.
-        .route(
-            "/health",
-            get(routes::http::health).post(routes::http::health),
-        )
+        .route("/health", any(routes::http::health))
         // Users. `POST /users` is signup and is deliberately not reachable through /classes.
-        .route("/users", post(routes::http::users_collection))
-        .route(
-            "/users/me",
-            get(routes::http::users_me).post(routes::http::users_me),
-        )
-        .route("/login", post(routes::http::login))
-        .route("/logout", post(routes::http::logout))
+        .route("/users", any(routes::http::users_collection))
+        .route("/users/me", any(routes::http::users_me))
+        .route("/users/:objectId", any(routes::http::users_object))
+        .route("/login", any(routes::http::login))
+        .route("/logout", any(routes::http::logout))
         // Classes.
-        .route(
-            "/classes/:className",
-            get(routes::http::classes_collection).post(routes::http::classes_collection),
-        )
+        .route("/classes/:className", any(routes::http::classes_collection))
         .route(
             "/classes/:className/:objectId",
-            get(routes::http::classes_object)
-                .put(routes::http::classes_object)
-                .delete(routes::http::classes_object)
-                .post(routes::http::classes_object),
+            any(routes::http::classes_object),
         )
         // Roles: `ClassesRouter` with `className()` pinned to `_Role` (`RolesRouter.js:3-25`).
-        .route(
-            "/roles",
-            get(routes::http::roles_collection).post(routes::http::roles_collection),
-        )
-        .route(
-            "/roles/:objectId",
-            get(routes::http::roles_object)
-                .put(routes::http::roles_object)
-                .delete(routes::http::roles_object)
-                .post(routes::http::roles_object),
-        )
+        .route("/roles", any(routes::http::roles_collection))
+        .route("/roles/:objectId", any(routes::http::roles_object))
         // Sessions. `/sessions/me` is registered before `/sessions/:objectId` because upstream
         // depends on registration order (`SessionsRouter.js:113-121`). axum matches a literal
         // segment ahead of a parameter regardless, which the route tests assert; the order is
         // kept anyway so the two files read the same way.
-        .route(
-            "/sessions/me",
-            get(routes::http::sessions_me).post(routes::http::sessions_me),
-        )
-        .route(
-            "/sessions",
-            get(routes::http::sessions_collection).post(routes::http::sessions_collection),
-        )
-        .route(
-            "/sessions/:objectId",
-            get(routes::http::sessions_object)
-                .delete(routes::http::sessions_object)
-                .post(routes::http::sessions_object),
-        )
+        .route("/sessions/me", any(routes::http::sessions_me))
+        .route("/sessions", any(routes::http::sessions_collection))
+        .route("/sessions/:objectId", any(routes::http::sessions_object))
         // Schemas and purge, master key only.
-        .route(
-            "/schemas",
-            get(routes::http::schemas_collection).post(routes::http::schemas_collection),
-        )
-        .route(
-            "/schemas/:className",
-            get(routes::http::schemas_class)
-                .post(routes::http::schemas_class)
-                .put(routes::http::schemas_class)
-                .delete(routes::http::schemas_class),
-        )
-        .route(
-            "/purge/:className",
-            delete(routes::http::purge).post(routes::http::purge),
-        )
-        .route("/batch", post(routes::http::batch))
+        .route("/schemas", any(routes::http::schemas_collection))
+        .route("/schemas/:className", any(routes::http::schemas_class))
+        .route("/purge/:className", any(routes::http::purge))
+        .route("/batch", any(routes::http::batch))
+        // axum's `Json` extractor has its own 2 MB default, under the 20 MB `maxUploadSize` the body
+        // layer enforces, so a body between the two was refused as not JSON.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            body_credentials::MAX_BODY,
+        ))
         .with_state(state);
 
     // The normalization layer wraps the *whole* router rather than the routes inside it, because
@@ -194,13 +165,28 @@ pub fn router(state: AppState) -> Router {
     // middleware on the router (`ParseServer.ts:312`). Outermost is what makes the headers appear
     // on error responses too, and what lets an `OPTIONS` preflight be answered before anything
     // downstream can reject it for lacking credentials it is not allowed to send yet.
-    Router::new()
-        .nest(&mount, api)
-        .layer(axum::middleware::from_fn(body_credentials::extract))
-        .layer(axum::middleware::from_fn_with_state(
-            cors_state,
-            cors::layer,
-        ))
+    let app = Router::new().nest(&mount, api);
+    // Inside the body layer, so it sees the method a `_method` override asked for.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        mount.clone(),
+        location::stamp,
+    ));
+    // The conformance control plane, in a harness build only. See `harness` for the two stages.
+    #[cfg(feature = "test-harness")]
+    let app = app
+        .merge(harness::routes(harness_state))
+        .layer(axum::middleware::from_fn(harness::count_tagged));
+    // Innermost of the outer layers, so the timing covers the request's own work only.
+    #[cfg(feature = "bench-instrumentation")]
+    let app = app.layer(axum::middleware::from_fn(bench::instrument));
+    app.layer(axum::middleware::from_fn_with_state(
+        cors_state.clone(),
+        body_credentials::extract,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        cors_state,
+        cors::layer,
+    ))
 }
 
 /// Bind and serve. Returns the bound address, which matters when the caller asked for port 0.

@@ -11,7 +11,7 @@
 //! plus the 0.2.0 additions: the `$or`/`$and`/`$nor` query tree, `$all`, `$regex`, the update
 //! operator set, and Relation fields (which have no column at all).
 
-use bson::{Bson, Document};
+use bson::{doc, Bson, Document};
 use parse_rust_core::{recognize_atom, AtomPosition, ParseDate, ParseError, ParseMap, ParseValue};
 use parse_rust_storage::{
     ClassSchema, Clause, Comparison, Constraint, FieldType, Query, Update, UpdateValue,
@@ -501,6 +501,15 @@ pub fn parse_object_to_mongo_create(
     let mut out = Document::new();
 
     for (key, value) in object {
+        // A null creates under the field's own name even on a Pointer field: the create transform
+        // adds `_p_` only `if (restValue && ...)` (`MongoTransform.js:423-428`), so the row reads
+        // back with `"<field>": null`. An update names the column from the schema and writes
+        // `_p_<field>: null`, which reads back with no key (`:1231-1233`); the two differ upstream
+        // and a client sees which one happened.
+        if matches!(value, ParseValue::Null) && schema.is_pointer_field(key) {
+            out.insert(key.clone(), Bson::Null);
+            continue;
+        }
         if let Some((mongo_key, bson)) = field_to_column(schema, key, value)? {
             out.insert(mongo_key, bson);
         }
@@ -617,8 +626,13 @@ pub fn mongo_object_to_parse(schema: &ClassSchema, doc: &Document) -> Result<Par
             None => key.clone(),
         };
 
-        // A `_p_` field carries "<Class>$<id>".
+        // A `_p_` field carries "<Class>$<id>". Upstream drops the column, leaving no key, when
+        // the schema does not declare it, when it declares another type, and when the stored value
+        // is null (`MongoTransform.js:1211-1233`).
         if let Some(stripped) = key.strip_prefix("_p_") {
+            if !matches!(schema.field(stripped), Some(FieldType::Pointer { .. })) {
+                continue;
+            }
             match value {
                 Bson::String(s) => {
                     let (class_name, object_id) = s.split_once('$').ok_or_else(|| {
@@ -634,9 +648,7 @@ pub fn mongo_object_to_parse(schema: &ClassSchema, doc: &Document) -> Result<Par
                         },
                     );
                 }
-                Bson::Null => {
-                    out.insert(stripped.to_string(), ParseValue::Null);
-                }
+                Bson::Null => {}
                 _ => {
                     return Err(ParseError::incorrect_type(format!(
                         "pointer field {stripped} is not a string"
@@ -841,12 +853,14 @@ pub fn bson_to_parse_value(value: &Bson) -> Result<ParseValue, ParseError> {
         Bson::Int64(n) => ParseValue::Number(*n as f64),
         Bson::Double(n) => ParseValue::Number(*n),
         Bson::String(s) => ParseValue::String(s.clone()),
-        Bson::DateTime(dt) => ParseValue::Date(ParseDate::parse_iso(
-            // The driver's own text quotes the out-of-range millisecond value, and a stored value
-            // does not belong in a client-visible message.
-            &dt.try_to_rfc3339_string()
-                .map_err(|_| ParseError::invalid_json("undecodable stored date"))?,
-        )?),
+        // Straight from the stored milliseconds. Rendering the driver's text and parsing it back
+        // gave the same date at twice the cost per value, which a large result set pays per date.
+        // The refusal is unchanged: a value outside the representable range is not quoted back,
+        // because a stored value does not belong in a client-visible message.
+        Bson::DateTime(dt) => ParseValue::Date(
+            ParseDate::from_timestamp_millis(dt.timestamp_millis())
+                .ok_or_else(|| ParseError::invalid_json("undecodable stored date"))?,
+        ),
         Bson::Binary(b) => ParseValue::Bytes(b.bytes.clone()),
         Bson::Array(items) => ParseValue::Array(
             items
@@ -957,36 +971,452 @@ pub fn index_key_to_bson(index: &str, field: &str, value: &ParseValue) -> Result
 /// `objectId` -> `_id` apply inside a branch exactly as they do at the top level
 /// (`MongoTransform.js:290-296`).
 pub fn transform_where(schema: &ClassSchema, query: &Query) -> Result<Document, ParseError> {
+    transform_where_as(schema, query, false)
+}
+
+/// [`transform_where`] for a count, which differs in one place: `$nearSphere` cannot be counted,
+/// so upstream rewrites it into an equivalent `$geoWithin` (`MongoTransform.js:812-821`).
+pub fn transform_where_for_count(
+    schema: &ClassSchema,
+    query: &Query,
+) -> Result<Document, ParseError> {
+    transform_where_as(schema, query, true)
+}
+
+fn transform_where_as(
+    schema: &ClassSchema,
+    query: &Query,
+    count: bool,
+) -> Result<Document, ParseError> {
     let mut out = Document::new();
     for clause in &query.clauses {
         match clause {
+            // `$text` belongs to the whole filter, not to its field.
+            Clause::Field(Constraint {
+                comparison: Comparison::Text(search),
+                ..
+            }) => {
+                merge_constraint(&mut out, "$text".to_string(), text_to_bson(search)?)?;
+            }
             Clause::Field(constraint) => {
                 let key = storage_key(schema, &constraint.field);
-                let entry = comparison_to_bson(schema, constraint)?;
+                let entry = match &constraint.comparison {
+                    Comparison::Geo(pairs) => geo_to_bson(pairs, count)?,
+                    _ => comparison_to_bson(schema, constraint)?,
+                };
                 // Several constraints on one field must merge rather than overwrite. Overwriting
                 // is the bug the `tbraun96/parse-rs` query builder shipped, and it silently drops
                 // a constraint, which broadens the result set.
                 merge_constraint(&mut out, key, entry)?;
             }
             Clause::Or(branches) => {
-                insert_logical(&mut out, "$or", lower_branches(schema, branches)?)
+                insert_logical(&mut out, "$or", lower_branches(schema, branches, count)?)
             }
             Clause::And(branches) => {
-                insert_logical(&mut out, "$and", lower_branches(schema, branches)?)
+                insert_logical(&mut out, "$and", lower_branches(schema, branches, count)?)
             }
             Clause::Nor(branches) => {
-                insert_logical(&mut out, "$nor", lower_branches(schema, branches)?)
+                insert_logical(&mut out, "$nor", lower_branches(schema, branches, count)?)
             }
         }
     }
     Ok(out)
 }
 
-fn lower_branches(schema: &ClassSchema, branches: &[Query]) -> Result<Vec<Bson>, ParseError> {
+/// The branches of a logical operator, lowered the way the enclosing read is: a count's
+/// `$nearSphere` becomes `$geoWithin` inside an `$or` too (`MongoTransform.js:291-297`), which is
+/// what lets `Parse.Query.or` over two `withinKilometers` queries be counted at all.
+fn lower_branches(
+    schema: &ClassSchema,
+    branches: &[Query],
+    count: bool,
+) -> Result<Vec<Bson>, ParseError> {
     branches
         .iter()
-        .map(|q| transform_where(schema, q).map(Bson::Document))
+        .map(|q| transform_where_as(schema, q, count).map(Bson::Document))
         .collect()
+}
+
+/// `$text` (`MongoTransform.js:777-811`), with upstream's messages.
+///
+/// `null` is the one operand JavaScript cannot read a member of, so `$text: null` and
+/// `$search: null` (whose `typeof` is `"object"`, so it passes the shape test) are `TypeError`s
+/// and a bare 500. An array `$search` passes the same test and fails on its missing `$term`.
+fn text_to_bson(operand: &ParseValue) -> Result<Bson, ParseError> {
+    let search = match operand {
+        ParseValue::Null => return Err(null_member("$search")),
+        ParseValue::Object(m) => m.get("$search"),
+        _ => None,
+    };
+    let empty = parse_rust_core::ParseMap::new();
+    let search = match search {
+        Some(ParseValue::Object(search)) => search,
+        Some(ParseValue::Array(_)) => &empty,
+        Some(ParseValue::Null) => return Err(null_member("$term")),
+        _ => {
+            return Err(ParseError::invalid_json(
+                "bad $text: $search, should be object",
+            ))
+        }
+    };
+    let mut answer = Document::new();
+    match search.get("$term") {
+        Some(ParseValue::String(term)) if !term.is_empty() => {
+            answer.insert("$search", term.clone());
+        }
+        _ => {
+            return Err(ParseError::invalid_json(
+                "bad $text: $term, should be string",
+            ))
+        }
+    }
+    let truthy = |v: &ParseValue| parse_rust_core::is_js_truthy(v);
+    match search.get("$language") {
+        Some(ParseValue::String(language)) if !language.is_empty() => {
+            answer.insert("$language", language.clone());
+        }
+        Some(v) if truthy(v) => {
+            return Err(ParseError::invalid_json(
+                "bad $text: $language, should be string",
+            ))
+        }
+        _ => {}
+    }
+    for flag in ["$caseSensitive", "$diacriticSensitive"] {
+        match search.get(flag) {
+            Some(ParseValue::Bool(true)) => {
+                answer.insert(flag, true);
+            }
+            Some(v) if truthy(v) && !matches!(v, ParseValue::Bool(_)) => {
+                return Err(ParseError::invalid_json(format!(
+                    "bad $text: {flag}, should be boolean"
+                )))
+            }
+            _ => {}
+        }
+    }
+    Ok(Bson::Document(answer))
+}
+
+/// The fields a query asks a `$text` search of, at its top level.
+pub fn text_search_fields(query: &Query) -> Vec<String> {
+    query
+        .clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::Field(Constraint {
+                field,
+                comparison: Comparison::Text(_),
+            }) => Some(field.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Geo operators
+// ---------------------------------------------------------------------------------------------
+
+/// The geo arms of `transformConstraint` (`MongoTransform.js:812-955`), as one loop.
+///
+/// **Reverse alphabetical key order is load-bearing** (`:670-675`): `$nearSphere` is visited before
+/// any `$maxDistance*`, and the plain `$maxDistance` after the three suffixed spellings, so when
+/// several are present the plain one is the distance that survives.
+///
+/// Two failure kinds, kept apart because the wire shows them apart. A structurally wrong operand
+/// is upstream's `INVALID_JSON` with its message. A point whose coordinates are out of range is
+/// `Parse.GeoPoint._validate` throwing a `TypeError`, which upstream does not catch, so it is a
+/// bare 500.
+fn geo_to_bson(pairs: &[(String, ParseValue)], count: bool) -> Result<Bson, ParseError> {
+    let mut keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+    keys.sort_unstable();
+    keys.reverse();
+    let get = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let mut answer = Document::new();
+    for key in keys {
+        let Some(value) = get(key) else { continue };
+        match key {
+            "$nearSphere" => {
+                if matches!(value, ParseValue::Null) {
+                    return Err(null_member("longitude"));
+                }
+                let (lon, lat) = (
+                    js_member_number(value, "longitude"),
+                    js_member_number(value, "latitude"),
+                );
+                if count {
+                    // The raw `$maxDistance`, and only that spelling: upstream reads
+                    // `constraint.$maxDistance` here, not the converted value.
+                    let distance = get("$maxDistance").map_or(Bson::Null, geo_number);
+                    answer.insert(
+                        "$geoWithin",
+                        doc! { "$centerSphere": [ [lon, lat], distance ] },
+                    );
+                } else {
+                    answer.insert("$nearSphere", Bson::Array(vec![lon, lat]));
+                }
+            }
+            "$maxDistance" => {
+                if !count {
+                    answer.insert("$maxDistance", geo_number(value));
+                }
+            }
+            "$maxDistanceInRadians" => {
+                answer.insert("$maxDistance", geo_number(value));
+            }
+            "$maxDistanceInMiles" => {
+                answer.insert("$maxDistance", scaled(value, 3959.0));
+            }
+            "$maxDistanceInKilometers" => {
+                answer.insert("$maxDistance", scaled(value, 6371.0));
+            }
+            "$within" => {
+                let malformed = || ParseError::invalid_json("malformatted $within arg");
+                let ParseValue::Object(within) = value else {
+                    return Err(if matches!(value, ParseValue::Null) {
+                        null_member("$box")
+                    } else {
+                        malformed()
+                    });
+                };
+                let Some(ParseValue::Array(corners)) = within.get("$box") else {
+                    return Err(malformed());
+                };
+                if corners.len() != 2 {
+                    return Err(malformed());
+                }
+                if corners.iter().any(|c| matches!(c, ParseValue::Null)) {
+                    return Err(null_member("longitude"));
+                }
+                let corner = |c: &ParseValue| {
+                    Bson::Array(vec![
+                        js_member_number(c, "longitude"),
+                        js_member_number(c, "latitude"),
+                    ])
+                };
+                answer.insert(
+                    "$within",
+                    doc! { "$box": [corner(&corners[0]), corner(&corners[1])] },
+                );
+            }
+            "$geoWithin" => {
+                if let Some(within) = geo_within(value)? {
+                    answer.insert("$geoWithin", within);
+                }
+            }
+            "$geoIntersects" => {
+                let point = match value {
+                    ParseValue::Null => return Err(null_member("$point")),
+                    ParseValue::Object(m) => m.get("$point"),
+                    _ => None,
+                };
+                let Some(point) = point.filter(|p| is_geo_point_json(p)) else {
+                    return Err(ParseError::invalid_json(
+                        "bad $geoIntersect value; $point should be GeoPoint",
+                    ));
+                };
+                let (lat, lon) = validated_point(point)?;
+                answer.insert(
+                    "$geoIntersects",
+                    doc! { "$geometry": { "type": "Point", "coordinates": [lon, lat] } },
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(Bson::Document(answer))
+}
+
+/// `$geoWithin` with either `$polygon` or `$centerSphere` (`MongoTransform.js:862-934`).
+fn geo_within(value: &ParseValue) -> Result<Option<Bson>, ParseError> {
+    let ParseValue::Object(within) = value else {
+        return if matches!(value, ParseValue::Null) {
+            Err(null_member("$polygon"))
+        } else {
+            Ok(None)
+        };
+    };
+    if let Some(polygon) = within.get("$polygon") {
+        let points: &Vec<ParseValue> = match polygon {
+            // `typeof null === 'object'`, so the next test reads `null.__type`.
+            ParseValue::Null => return Err(null_member("__type")),
+            ParseValue::Object(p) if matches!(p.get("__type"), Some(ParseValue::String(t)) if t == "Polygon") => {
+                match p.get("coordinates") {
+                    Some(ParseValue::Array(c)) if c.len() >= 3 => c,
+                    _ => {
+                        return Err(ParseError::invalid_json(
+                            "bad $geoWithin value; Polygon.coordinates should contain at least 3 lon/lat pairs",
+                        ))
+                    }
+                }
+            }
+            ParseValue::Polygon(_) => {
+                return Err(ParseError::invalid_json(
+                    "bad $geoWithin value; Polygon.coordinates should contain at least 3 lon/lat pairs",
+                ))
+            }
+            ParseValue::Array(items) => {
+                if items.len() < 3 {
+                    return Err(ParseError::invalid_json(
+                        "bad $geoWithin value; $polygon should contain at least 3 GeoPoints",
+                    ));
+                }
+                items
+            }
+            _ => {
+                return Err(ParseError::invalid_json(
+                    "bad $geoWithin value; $polygon should be Polygon object or Array of Parse.GeoPoint's",
+                ))
+            }
+        };
+        let mut out = Vec::with_capacity(points.len());
+        for point in points {
+            match point {
+                // A `[lon, lat]` pair is validated as `(lat, lon)` and passed through unchanged.
+                ParseValue::Array(pair) if pair.len() == 2 => {
+                    validate_coordinates(js_number(&pair[1]), js_number(&pair[0]))?;
+                    out.push(Bson::Array(pair.iter().map(geo_number).collect()));
+                }
+                p if is_geo_point_json(p) => {
+                    let (lat, lon) = validated_point(p)?;
+                    out.push(Bson::Array(vec![lon, lat]));
+                }
+                _ => return Err(ParseError::invalid_json("bad $geoWithin value")),
+            }
+        }
+        return Ok(Some(Bson::Document(doc! { "$polygon": out })));
+    }
+    if let Some(center) = within.get("$centerSphere") {
+        let ParseValue::Array(parts) = center else {
+            return Err(ParseError::invalid_json(
+                "bad $geoWithin value; $centerSphere should be an array of Parse.GeoPoint and distance",
+            ));
+        };
+        if parts.len() < 2 {
+            return Err(ParseError::invalid_json(
+                "bad $geoWithin value; $centerSphere should be an array of Parse.GeoPoint and distance",
+            ));
+        }
+        let (lat, lon) = match &parts[0] {
+            ParseValue::Array(pair) if pair.len() == 2 => {
+                let (lat, lon) = (js_number(&pair[1]), js_number(&pair[0]));
+                validate_coordinates(lat, lon)?;
+                (Bson::Double(lat), Bson::Double(lon))
+            }
+            p if is_geo_point_json(p) => validated_point(p)?,
+            _ => {
+                return Err(ParseError::invalid_json(
+                    "bad $geoWithin value; $centerSphere geo point invalid",
+                ))
+            }
+        };
+        // `isNaN(distance) || distance < 0` coerces, so `"1"` and `null` pass; the value itself is
+        // passed on uncoerced, and the database refuses what is not a number.
+        let distance = parse_rust_core::js_number::to_number(&parts[1]);
+        if distance.is_nan() || distance < 0.0 {
+            return Err(ParseError::invalid_json(
+                "bad $geoWithin value; $centerSphere distance invalid",
+            ));
+        }
+        return Ok(Some(Bson::Document(
+            doc! { "$centerSphere": [ [lon, lat], raw_scalar(&parts[1]) ] },
+        )));
+    }
+    Ok(None)
+}
+
+/// `GeoPointCoder.isValidJSON`: an object whose `__type` is `GeoPoint`, nothing more.
+fn is_geo_point_json(value: &ParseValue) -> bool {
+    match value {
+        ParseValue::GeoPoint { .. } => true,
+        ParseValue::Object(m) => {
+            matches!(m.get("__type"), Some(ParseValue::String(t)) if t == "GeoPoint")
+        }
+        _ => false,
+    }
+}
+
+/// A recognized point's coordinates, through `Parse.GeoPoint._validate`.
+fn validated_point(value: &ParseValue) -> Result<(Bson, Bson), ParseError> {
+    let lat = js_number(&member(value, "latitude"));
+    let lon = js_number(&member(value, "longitude"));
+    validate_coordinates(lat, lon)?;
+    Ok((Bson::Double(lat), Bson::Double(lon)))
+}
+
+/// `Parse.GeoPoint._validate`, which throws a `TypeError`: a bare 500 on the wire.
+fn validate_coordinates(lat: f64, lon: f64) -> Result<(), ParseError> {
+    if lat.is_nan() || lon.is_nan() {
+        return Err(ParseError::internal(
+            "GeoPoint latitude and longitude must be valid numbers",
+        ));
+    }
+    if !(-90.0..=90.0).contains(&lat) {
+        return Err(ParseError::internal(format!(
+            "GeoPoint latitude out of bounds: {lat}"
+        )));
+    }
+    if !(-180.0..=180.0).contains(&lon) {
+        return Err(ParseError::internal(format!(
+            "GeoPoint longitude out of bounds: {lon}"
+        )));
+    }
+    Ok(())
+}
+
+/// `value[name]`, for a raw object or a decoded GeoPoint.
+fn member(value: &ParseValue, name: &str) -> ParseValue {
+    match (value, name) {
+        (ParseValue::GeoPoint { latitude, .. }, "latitude") => ParseValue::Number(*latitude),
+        (ParseValue::GeoPoint { longitude, .. }, "longitude") => ParseValue::Number(*longitude),
+        (ParseValue::Object(m), _) => m.get(name).cloned().unwrap_or(ParseValue::Null),
+        _ => ParseValue::Null,
+    }
+}
+
+/// A coordinate as upstream reads it unchecked, `point.longitude`: the number, or `null` for
+/// anything else, which the database then refuses.
+fn js_member_number(value: &ParseValue, name: &str) -> Bson {
+    geo_number(&member(value, name))
+}
+
+fn geo_number(value: &ParseValue) -> Bson {
+    match value {
+        ParseValue::Number(n) => Bson::Double(*n),
+        _ => Bson::Null,
+    }
+}
+
+/// `value / by`, which coerces: `"100" / 6371` is a distance and `true / 3959` is a tiny one.
+fn scaled(value: &ParseValue, by: f64) -> Bson {
+    Bson::Double(parse_rust_core::js_number::to_number(value) / by)
+}
+
+/// An operand upstream hands the database as it arrived. Only the scalar shapes are kept; the
+/// database refuses anything that is not a number either way.
+fn raw_scalar(value: &ParseValue) -> Bson {
+    match value {
+        ParseValue::Number(n) => Bson::Double(*n),
+        ParseValue::String(s) => Bson::String(s.clone()),
+        ParseValue::Bool(b) => Bson::Boolean(*b),
+        _ => Bson::Null,
+    }
+}
+
+/// Reading a member of `null`, which JavaScript throws as a `TypeError` that upstream does not
+/// catch: a bare 500, raised while the query is built.
+fn null_member(name: &str) -> ParseError {
+    ParseError::internal(format!(
+        "TypeError: Cannot read properties of null (reading '{name}')"
+    ))
+}
+
+/// `Number(value)` for the operands geo validation reads, where a non-number is `NaN`.
+fn js_number(value: &ParseValue) -> f64 {
+    match value {
+        ParseValue::Number(n) => *n,
+        _ => f64::NAN,
+    }
 }
 
 /// Insert a logical operator without letting a second one of the same name overwrite the first.
@@ -1153,7 +1583,7 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
         // of the two arms below.** Upstream reaches shorthand equality only after
         // `transformConstraint` declines, and for `[]` or `{}` it does not decline: its key loop
         // simply does not run and it returns the empty answer document it started with
-        // (`MongoTransform.js:672-676`, `:960`). So `{"tags": []}` and `{"meta": {}}` both lower to
+        // (`MongoTransform.js:672-676`, `:961`). So `{"tags": []}` and `{"meta": {}}` both lower to
         // `{field: {}}`, which is an **equality against an empty document**: it matches a row whose
         // field holds `{}` and nothing else. Not an absent constraint. An earlier version of this
         // note called it "matches every row", which is what an empty *constraint document* would
@@ -1271,6 +1701,10 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
             }
             Bson::Document(d)
         }
+        // Lowered by `transform_where_as`, which knows whether the read is a count and where the
+        // top level is.
+        Comparison::Geo(pairs) => geo_to_bson(pairs, false)?,
+        Comparison::Text(search) => text_to_bson(search)?,
     })
 }
 
@@ -2588,6 +3022,114 @@ mod eq_operator_tests {
         assert!(
             doc.get_document("views").is_err(),
             "shorthand equality is a plain value, not an operator document: {doc:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Geo and $text
+    // -----------------------------------------------------------------------------------------
+
+    fn geo_query(field: &str, json: &str) -> Query {
+        let pairs: Vec<(String, ParseValue)> =
+            match serde_json::from_str::<serde_json::Value>(json).expect("json") {
+                serde_json::Value::Object(m) => m
+                    .into_iter()
+                    .map(|(k, v)| (k, parse_rust_core::classify_raw(v).expect("raw")))
+                    .collect(),
+                _ => panic!("object"),
+            };
+        Query::from_constraints(vec![Constraint {
+            field: field.into(),
+            comparison: Comparison::Geo(pairs),
+        }])
+    }
+
+    /// `$nearSphere` precedes `$maxDistance`, and a count rewrites it into `$geoWithin` using the
+    /// raw distance (`MongoTransform.js:812-827`).
+    #[test]
+    fn near_sphere_lowers_for_a_find_and_rewrites_for_a_count() {
+        let schema = ClassSchema::new("P").with_field("loc", FieldType::GeoPoint);
+        let q = geo_query(
+            "loc",
+            r#"{"$nearSphere":{"__type":"GeoPoint","latitude":1,"longitude":2},"$maxDistance":0.5}"#,
+        );
+        let find = transform_where(&schema, &q).expect("find");
+        assert_eq!(
+            find.get_document("loc").expect("loc"),
+            &doc! { "$nearSphere": [2.0, 1.0], "$maxDistance": 0.5 }
+        );
+        let count = transform_where_for_count(&schema, &q).expect("count");
+        assert_eq!(
+            count.get_document("loc").expect("loc"),
+            &doc! { "$geoWithin": { "$centerSphere": [[2.0, 1.0], 0.5] } }
+        );
+    }
+
+    #[test]
+    fn a_distance_in_miles_or_kilometers_is_converted_to_radians() {
+        let schema = ClassSchema::new("P").with_field("loc", FieldType::GeoPoint);
+        let q = geo_query(
+            "loc",
+            r#"{"$nearSphere":{"__type":"GeoPoint","latitude":0,"longitude":0},"$maxDistanceInKilometers":6371}"#,
+        );
+        let find = transform_where(&schema, &q).expect("find");
+        assert_eq!(
+            find.get_document("loc")
+                .expect("loc")
+                .get_f64("$maxDistance"),
+            Ok(1.0)
+        );
+    }
+
+    /// Structural refusals are 107 with upstream's message; an out-of-range point is the SDK's
+    /// `TypeError`, a bare 500.
+    #[test]
+    fn geo_within_polygon_refusals_match_upstream() {
+        let schema = ClassSchema::new("P").with_field("loc", FieldType::GeoPoint);
+        let short = geo_query("loc", r#"{"$geoWithin":{"$polygon":[[0,0],[1,1]]}}"#);
+        let e = transform_where(&schema, &short).expect_err("two points");
+        assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidJson);
+        assert_eq!(
+            e.message,
+            "bad $geoWithin value; $polygon should contain at least 3 GeoPoints"
+        );
+        let bad = geo_query(
+            "loc",
+            r#"{"$geoWithin":{"$polygon":[{"__type":"GeoPoint","latitude":100,"longitude":0},[0,0],[1,1]]}}"#,
+        );
+        let e = transform_where(&schema, &bad).expect_err("latitude 100");
+        assert_eq!(e.code, parse_rust_core::ErrorCode::InternalServerError);
+    }
+
+    /// `$text` leaves its field and goes to the top of the filter, where Mongo requires it.
+    #[test]
+    fn text_is_lifted_to_the_top_level() {
+        let schema = ClassSchema::new("P").with_field("subject", FieldType::String);
+        let operand = parse_rust_core::classify_raw(
+            serde_json::from_str(r#"{"$search":{"$term":"coffee","$caseSensitive":true}}"#)
+                .expect("json"),
+        )
+        .expect("raw");
+        let q = Query::from_constraints(vec![Constraint {
+            field: "subject".into(),
+            comparison: Comparison::Text(operand),
+        }]);
+        let out = transform_where(&schema, &q).expect("lower");
+        assert_eq!(
+            out,
+            doc! { "$text": { "$search": "coffee", "$caseSensitive": true } }
+        );
+        let bad = parse_rust_core::classify_raw(serde_json::json!({"$search": {"$term": 5}}))
+            .expect("raw");
+        let q = Query::from_constraints(vec![Constraint {
+            field: "subject".into(),
+            comparison: Comparison::Text(bad),
+        }]);
+        assert_eq!(
+            transform_where(&schema, &q)
+                .expect_err("non-string term")
+                .message,
+            "bad $text: $term, should be string"
         );
     }
 }

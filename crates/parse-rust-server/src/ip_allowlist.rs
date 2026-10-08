@@ -2,7 +2,7 @@
 //!
 //! Upstream builds a `net.BlockList` from the configured entries and asks it about the request's
 //! peer address (`middlewares.js:50-64`). The default for both options is the two literal
-//! addresses `127.0.0.1` and `::1` (`Options/Definitions.js:385-388`, `:396-399`), which is why an
+//! addresses `127.0.0.1` and `::1` (`Options/Definitions.js:391-394`, `:402-405`), which is why an
 //! unimplemented option is an open control rather than a missing feature: a stock parse-server
 //! honours the master key only from the machine it runs on.
 //!
@@ -67,7 +67,7 @@ impl Rule {
 ///
 /// **Upstream validates too, and this is mostly the same refusal rather than an extra one.**
 /// `Config.validateIps` runs at boot and rejects any entry whose address portion is not an IP,
-/// naming it (`Config.js:627-636`).
+/// naming it (`Config.js:632-641`).
 ///
 /// Where it is stricter is the **mask**, which upstream strips before checking and then reads
 /// loosely. Three entries upstream accepts are refused here, all measured through `checkIp` at the
@@ -102,6 +102,9 @@ pub struct IpAllowlist {
     /// `'::/0'`, `'::'` or `'::0'` was configured: every IPv6 peer is admitted, mapped ones
     /// included, and no IPv4 peer.
     allow_all_v6: bool,
+    /// The entries as configured, for reporting what the server runs with. Never consulted for a
+    /// decision.
+    source: Vec<String>,
 }
 
 /// The five entries `getBlockList` intercepts before the block list sees them
@@ -121,11 +124,17 @@ impl Default for IpAllowlist {
             ],
             allow_all_v4: false,
             allow_all_v6: false,
+            source: vec!["127.0.0.1".into(), "::1".into()],
         }
     }
 }
 
 impl IpAllowlist {
+    /// The entries this allowlist was built from, as written.
+    pub fn entries(&self) -> &[String] {
+        &self.source
+    }
+
     /// Read a list of entries, each a bare address, an `address/prefix`, or one of the five
     /// allow-all literals.
     pub fn parse<I, S>(entries: I) -> Result<Self, InvalidIpEntry>
@@ -136,6 +145,7 @@ impl IpAllowlist {
         let mut out = Self::deny_all();
         for entry in entries {
             let entry = entry.as_ref();
+            out.source.push(entry.to_string());
             if ALLOW_ALL_V6.contains(&entry) {
                 out.allow_all_v6 = true;
             } else if ALLOW_ALL_V4.contains(&entry) {
@@ -153,7 +163,7 @@ impl IpAllowlist {
     /// **Neither trimmed nor tolerant of an empty value**, because upstream is neither.
     /// `arrayParser` is `opt.split(',')` and nothing else (`Options/parsers.js:42-50`), and
     /// `Config.validateIps` then rejects any entry whose address portion is not an IP
-    /// (`Config.js:627-636`). So `"127.0.0.1, ::1"` yields `" ::1"` and refuses to boot upstream,
+    /// (`Config.js:632-641`). So `"127.0.0.1, ::1"` yields `" ::1"` and refuses to boot upstream,
     /// and so does an empty value, and both refuse to boot here with the offending entry named.
     ///
     /// Trimming looked like a harmless courtesy and it is a divergence in what a configuration
@@ -172,6 +182,7 @@ impl IpAllowlist {
             rules: Vec::new(),
             allow_all_v4: false,
             allow_all_v6: false,
+            source: Vec::new(),
         }
     }
 
@@ -513,7 +524,7 @@ mod tests {
     }
 
     /// The one place this is deliberately stricter than upstream: an out-of-range prefix.
-    /// `Config.validateIps` strips the mask before checking (`Config.js:629-631`), so
+    /// `Config.validateIps` strips the mask before checking (`Config.js:634-636`), so
     /// `127.0.0.1/999` boots, and `BlockList.addSubnet` then throws on the **first master-key
     /// request**, which upstream answers as a 500. Refusing at boot names the entry instead.
     #[test]

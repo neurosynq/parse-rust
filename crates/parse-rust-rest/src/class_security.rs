@@ -41,7 +41,7 @@ pub fn enforce_class_security(
         || class_name.starts_with("_Join:")
         // **Two deliberate additions, both fail-closed over a subsystem that does not exist yet.**
         //
-        // A `_Session` write reaches `RestWrite.handleSession` upstream (`RestWrite.js:1221-1292`),
+        // A `_Session` write reaches `RestWrite.handleSession` upstream (`RestWrite.js:1313-1386`),
         // which never stores the client's body: it mints a real session for the authenticated
         // caller and refuses a client-chosen `sessionToken`, `user`, `expiresAt` or `createdWith`.
         // parse-rust has no such stage, so allowing the write would let any client insert a

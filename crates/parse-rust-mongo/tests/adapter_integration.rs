@@ -14,21 +14,27 @@ use parse_rust_mongo::MongoAdapter;
 use parse_rust_schema::default_schema;
 use parse_rust_storage::{
     join_schema, join_table_name, AddFieldOutcome, ClassSchema, Clause, Comparison, Constraint,
-    FieldType, Query, QueryOptions, SortDirection, StorageAdapter, Update, UpdateValue,
+    CountOptions, FieldType, Query, QueryOptions, SortDirection, StorageAdapter, Update,
+    UpdateValue,
 };
 
-const URI: &str = "mongodb://127.0.0.1:27017";
+/// `PARSE_RUST_TEST_MONGO`, or the local default, so the suite can run against each supported
+/// server version.
+fn uri() -> String {
+    std::env::var("PARSE_RUST_TEST_MONGO")
+        .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string())
+}
 
 async fn adapter(test: &str) -> (MongoAdapter, String) {
     let db = format!("parse_rust_it_{}_{}", std::process::id(), test);
-    let a = MongoAdapter::connect(URI, &db)
+    let a = MongoAdapter::connect(&uri(), &db)
         .await
         .expect("MongoDB must be running on 27017 for this test");
     (a, db)
 }
 
 async fn drop_db(db: &str) {
-    if let Ok(client) = mongodb::Client::with_uri_str(URI).await {
+    if let Ok(client) = mongodb::Client::with_uri_str(uri()).await {
         let _ = client.database(db).drop().await;
     }
 }
@@ -253,7 +259,9 @@ async fn regex_and_all_reach_the_server_in_a_shape_it_accepts() {
         },
     }]);
     assert_eq!(
-        a.count(&schema, &regex).await.expect("count"),
+        a.count(&schema, &regex, &CountOptions::default())
+            .await
+            .expect("count"),
         1,
         "$options must reach the server, or the case-insensitive match fails"
     );
@@ -265,7 +273,12 @@ async fn regex_and_all_reach_the_server_in_a_shape_it_accepts() {
             ParseValue::String("y".into()),
         ]),
     }]);
-    assert_eq!(a.count(&schema, &all).await.expect("count"), 1);
+    assert_eq!(
+        a.count(&schema, &all, &CountOptions::default())
+            .await
+            .expect("count"),
+        1
+    );
 
     drop_db(&db).await;
 }
@@ -358,7 +371,12 @@ async fn update_and_delete_report_matched_counts() {
         .await
         .expect("delete");
     assert_eq!(deleted, 1);
-    assert_eq!(a.count(&schema, &Query::new()).await.expect("count"), 0);
+    assert_eq!(
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
+        0
+    );
 
     drop_db(&db).await;
 }
@@ -589,7 +607,7 @@ async fn reserve_field_is_atomic_under_a_race() {
     assert_eq!(race.field("score"), Some(&FieldType::Number));
 
     // Concurrently, with the class document already present. Exactly one caller may see `Added`.
-    let uri = URI.to_string();
+    let uri = uri();
     let db_name = db.clone();
     let mut handles = Vec::new();
     for ty in [
@@ -644,7 +662,9 @@ async fn upsert_one_is_idempotent_and_writes_no_schema() {
     a.upsert_one(&schema, &filter, &doc).await.expect("second");
 
     assert_eq!(
-        a.count(&schema, &Query::new()).await.expect("count"),
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
         1,
         "a membership added twice is one row"
     );
@@ -701,9 +721,16 @@ async fn delete_class_removes_rows_schema_and_join_collections() {
 
     a.delete_class(&schema).await.expect("delete_class");
 
-    assert_eq!(a.count(&schema, &Query::new()).await.expect("count"), 0);
     assert_eq!(
-        a.count(&join, &Query::new()).await.expect("count"),
+        a.count(&schema, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
+        0
+    );
+    assert_eq!(
+        a.count(&join, &Query::new(), &CountOptions::default())
+            .await
+            .expect("count"),
         0,
         "a Relation's join collection goes with the class"
     );
@@ -768,7 +795,7 @@ async fn delete_fields_removes_the_column_and_the_schema_entry() {
 /// The `_Role.name` index, and specifically its **name**.
 ///
 /// Upstream creates it with `ensureUniqueness('_Role', requiredRoleFields, ['name'])`
-/// (`DatabaseController.js:2033-2038`) and passes no index name, so MongoDB auto-generates
+/// (`DatabaseController.js:2045-2050`) and passes no index name, so MongoDB auto-generates
 /// `name_1`. That string is contract rather than cosmetic: both adapters recover
 /// `duplicated_field` by regex over the index name, and the Mongo regex
 /// (`MongoStorageAdapter.js:582`) matches only the auto-generated `<field>_1` form. Naming the
@@ -783,7 +810,7 @@ async fn the_role_name_index_is_auto_named_and_unique() {
         .await
         .expect("index");
 
-    let client = mongodb::Client::with_uri_str(URI)
+    let client = mongodb::Client::with_uri_str(uri())
         .await
         .expect("MongoDB must be running on 27017 for this test");
     let indexes: Vec<mongodb::IndexModel> = client

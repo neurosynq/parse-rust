@@ -13,23 +13,44 @@ use parse_rust_mongo::MongoAdapter;
 use crate::auth::Authority;
 use crate::config::ServerConfig;
 use crate::request::RequestContext;
+use crate::schema_cache::{Freshness, SchemaCache};
 
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<ServerConfig>,
     storage: Arc<MongoAdapter>,
+    schemas: Arc<SchemaCache>,
 }
 
 impl AppState {
     pub fn new(config: ServerConfig, storage: MongoAdapter) -> Self {
         Self {
+            schemas: Arc::new(SchemaCache::new(config.schema_cache_ttl)),
             config: Arc::new(config),
             storage: Arc::new(storage),
         }
     }
 
+    pub fn schema_cache(&self) -> &SchemaCache {
+        &self.schemas
+    }
+
+    /// A schema snapshot on its own, for a request that learns which classes it needs only after
+    /// its context is built. A batch does: its sub-request paths are validated first.
+    pub async fn schema_snapshot(
+        &self,
+        freshness: Freshness<'_>,
+    ) -> Result<std::sync::Arc<parse_rust_rest::SchemaSnapshot>, ParseError> {
+        crate::request::snapshot(&self.storage, &self.schemas, &self.config, freshness).await
+    }
+
     pub fn config(&self) -> &ServerConfig {
         &self.config
+    }
+
+    /// The shared config handle, for a router piece that outlives a borrow of this state.
+    pub fn config_arc(&self) -> Arc<ServerConfig> {
+        Arc::clone(&self.config)
     }
 
     pub fn storage(&self) -> &MongoAdapter {
@@ -45,7 +66,7 @@ impl AppState {
     /// would silently change the error a client sees.
     ///
     /// Upstream gates each of these behind a `databaseOptions.createIndex*` flag
-    /// (`DatabaseController.js:1981-2038`). Only `createIndexRoleName` is modeled; the two
+    /// (`DatabaseController.js:1993-2050`). Only `createIndexRoleName` is modeled; the two
     /// `_User` indexes are unconditional here, which is what their flags default to.
     pub async fn ensure_indexes(&self) -> Result<(), ParseError> {
         use parse_rust_storage::StorageAdapter;
@@ -56,7 +77,7 @@ impl AppState {
             .ensure_index("_User", &["email"], None, true, false)
             .await?;
         // **The case-insensitive pair, and note they are not unique**
-        // (`DatabaseController.js:1988-2005`). Upstream's `ensureIndex` never sets `unique`, so
+        // (`DatabaseController.js:2000-2017`). Upstream's `ensureIndex` never sets `unique`, so
         // these exist to make the collated uniqueness *query* fast, not to enforce anything. The
         // enforcement is the query in `validate_user_identity`.
         //
@@ -85,7 +106,7 @@ impl AppState {
             )
             .await?;
         // `_Role.name`, `ensureUniqueness('_Role', requiredRoleFields, ['name'])`
-        // (`DatabaseController.js:2033-2038`). Upstream passes no index name, so Mongo
+        // (`DatabaseController.js:2045-2050`). Upstream passes no index name, so Mongo
         // auto-generates `name_1`, which is the form the `duplicated_field` regex matches.
         //
         // Without it two `_Role` rows can share a name, and an ACL entry of `role:X` then grants
@@ -101,11 +122,20 @@ impl AppState {
     /// Resolve the request context: session, roles, ACL scope and the schema snapshot.
     ///
     /// Called **once** per HTTP request, including a `/batch` whose sub-requests then share it.
+    /// `freshness` says what the route needs from the schema cache; see [`Freshness`].
     pub async fn request_context(
         &self,
         authority: &Authority,
+        freshness: Freshness<'_>,
     ) -> Result<RequestContext, ParseError> {
-        crate::request::resolve(&self.storage, &self.config, authority).await
+        crate::request::resolve(
+            &self.storage,
+            &self.schemas,
+            &self.config,
+            authority,
+            freshness,
+        )
+        .await
     }
 }
 
