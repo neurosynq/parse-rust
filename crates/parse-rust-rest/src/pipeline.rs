@@ -456,12 +456,13 @@ fn deny_malformed_logical(
     where_: &ParsedWhere,
     detail: parse_rust_core::ErrorDetail,
 ) -> Result<(), ParseError> {
+    let _ = detail;
     match &where_.deferred {
-        Some(DeferredWhere::MalformedLogical(op)) => Err(ParseError::permission_denied(
-            ErrorCode::InvalidQuery,
-            format!("{op} must be an array"),
-            detail,
-        )),
+        // Upstream sanitizes this to `Permission denied`, which tells the client nothing about
+        // its malformed query. The message says what is wrong instead.
+        Some(DeferredWhere::MalformedLogical(message)) => {
+            Err(ParseError::invalid_query(message.clone()))
+        }
         _ => Ok(()),
     }
 }
@@ -639,11 +640,18 @@ fn plan_read<'a, S: StorageAdapter>(
         //     matters: a query a pointer permission denies outright answers empty, whatever keys
         //     it names (`DatabaseController.js:1510-1516` before `:1524`).
         let keys_checked = match where_.deferred.take() {
-            // The conversion's own error, at the conversion's position.
-            Some(DeferredWhere::Error(e)) => Err(e),
-            // Master skips `checkWhere` and reaches `reduceRelationKeys`, which throws on it.
-            Some(DeferredWhere::MalformedLogical(op)) => {
-                Err(ParseError::internal(format!("{op} is not an array")))
+            // The conversion's own error, at the conversion's position, which follows the key-name
+            // check. The clauses are only the failed `where`'s shape, kept for the checks above
+            // and this one, so they go before anything resolves them.
+            Some(DeferredWhere::Error(e)) => {
+                let keys = crate::query_parse::validate_query_keys(&where_, master);
+                where_.clauses.clear();
+                keys.and(Err(e))
+            }
+            // Master skips `checkWhere`; the same malformed shape is refused here with the same
+            // message, where upstream answers a 500 for `$or` and `$and`.
+            Some(DeferredWhere::MalformedLogical(message)) => {
+                Err(ParseError::invalid_query(message))
             }
             // `addReadACL` assigns onto it for anyone but master; master's query has no keys.
             Some(DeferredWhere::Scalar) if !master => {

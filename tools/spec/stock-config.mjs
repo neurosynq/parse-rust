@@ -93,7 +93,7 @@ const EXPECTED = {
   'I12 read path order': 38,
   'I13 body credentials': 42,
   'I14 routes and write order': 94,
-  'I15 read parity': 44,
+  'I15 read parity': 58,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
@@ -1624,10 +1624,39 @@ async function gateI15ReadParity(servers) {
       '400 105 Invalid key name: 0');
     eq(`${who}: a where that is a JSON string is parsed again`, error(await call({ path: `/classes/${C}?where=%22s%22` })),
       '400 107 where parameter is not valid JSON');
-    eq(`${who}: $or that is not an array is a sanitized 102 for a client`,
-      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}` })), '400 102 Permission denied');
-    eq(`${who}: and a 500 for master`,
-      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}`, headers: master() })), '500 1 Internal server error.');
+    // Malformed queries parse-rust refuses as such where upstream answers a 500, a misleading
+    // `Permission denied`, or a widened result: deliberate differences, each stated per server.
+    const rust = server.kind === 'parse-rust';
+    const pick = (mine, theirs) => (rust ? mine : theirs);
+    eq(`${who}: $or that is not an array, from a client`,
+      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}` })),
+      pick('400 102 Bad $or format - use an array value.', '400 102 Permission denied'));
+    eq(`${who}: and from master`,
+      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}`, headers: master() })),
+      pick('400 102 Bad $or format - use an array value.', '500 1 Internal server error.'));
+    eq(`${who}: an empty $or`,
+      error(await call({ path: `/classes/${C}?where=${e({ $or: [] })}` })),
+      pick('400 102 Bad $or format - use an array of at least 1 value.', '500 1 An internal server error occurred'));
+    eq(`${who}: a non-object $or element`,
+      (await call({ path: `/classes/${C}?where=${e({ $or: [1] })}` })).status,
+      pick(400, 200));
+    eq(`${who}: a lone $options`,
+      error(await call({ path: `/classes/${C}?where=${e({ n: { $options: 'i' } })}` })),
+      pick('400 102 $options is only valid with $regex', '500 1 An internal server error occurred'));
+    // Parity: master's malformed $nor, $exists given an object on a plain field, and which of two
+    // malformed operators is reported.
+    eq(`${who}: master's $nor that is not an array`,
+      error(await call({ path: `/classes/${C}?where=${e({ $nor: 5 })}`, headers: master() })),
+      '400 102 Bad $nor format - use an array of at least 1 value.');
+    eq(`${who}: $exists given an object on a plain field`,
+      error(await call({ path: `/classes/${C}?where=${e({ n: { $exists: {} } })}` })),
+      '400 107 bad atom: {}');
+    eq(`${who}: an invalid key name is reported before its malformed operand`,
+      error(await call({ path: `/classes/${C}?where=${e({ 'bad-key': { $in: 5 } })}` })),
+      '400 105 Invalid key name: bad-key');
+    eq(`${who}: of two malformed operators, the later name is reported`,
+      error(await call({ path: `/classes/${C}?where=${e({ n: { $in: 5, $nin: 5 } })}` })),
+      '400 107 bad $nin value');
 
     // Order: the internal timestamp names alias the public ones, and an empty entry is a field.
     eq(`${who}: order=_created_at sorts`, count(await call({ path: `/classes/${C}?order=_created_at` })), '200 3');

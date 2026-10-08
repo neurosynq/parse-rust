@@ -40,10 +40,10 @@ pub enum DeferredWhere {
     /// Any error the query's conversion raises. Raised at query validation, after the CLP gate and
     /// pointer permissions, and never on a `limit=0` read, which stops before either.
     Error(ParseError),
-    /// `$or`, `$and` or `$nor` that is not an array. `denyProtectedFields` refuses it for anyone but
-    /// master, sanitized, before the gate (`RestQuery.js:956-963`); master reaches
-    /// `reduceRelationKeys`, which throws on it (`DatabaseController.js:1157-1159`).
-    MalformedLogical(&'static str),
+    /// `$or`, `$and` or `$nor` that is not a non-empty array of objects, with the message to
+    /// refuse it with. Refused for a client where `denyProtectedFields` checks the shape, before the
+    /// gate (`RestQuery.js:956-963`), and for master at query validation; see `malformed_logical`.
+    MalformedLogical(String),
     /// A number or boolean. Master reads every row, because the query has no keys; anyone else
     /// fails when `addReadACL` assigns `_rperm` onto it (`DatabaseController.js:85-88`).
     Scalar,
@@ -152,24 +152,82 @@ pub fn parse_client_where(where_json: &Json) -> ParsedWhere {
     if let Some(op) = malformed_logical(object) {
         return deferred(DeferredWhere::MalformedLogical(op));
     }
-    parse_where(object).unwrap_or_else(|e| deferred(DeferredWhere::Error(e)))
+    parse_where(object).unwrap_or_else(|e| ParsedWhere {
+        clauses: shape_of(object),
+        deferred: Some(DeferredWhere::Error(e)),
+    })
+}
+
+/// The keys of a `where` whose operands failed to convert, as clauses that name them.
+///
+/// Upstream refuses a protected field (119) and an invalid key name (105) before it converts a
+/// single operand, so those checks have to see the keys of a `where` that will fail conversion.
+/// Each field becomes a placeholder equality that is never sent anywhere: the read path reports
+/// the deferred error once the key checks pass, and drops these before resolving the query.
+fn shape_of(where_json: &Json) -> Vec<ParsedClause> {
+    let Json::Object(map) = where_json else {
+        return Vec::new();
+    };
+    let branches = |value: &Json| -> Vec<ParsedWhere> {
+        match value {
+            Json::Array(items) => items
+                .iter()
+                .map(|item| ParsedWhere {
+                    clauses: shape_of(item),
+                    deferred: None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    map.iter()
+        .filter_map(|(key, value)| match key.as_str() {
+            "$or" => Some(ParsedClause::Or(branches(value))),
+            "$and" => Some(ParsedClause::And(branches(value))),
+            "$nor" => Some(ParsedClause::Nor(branches(value))),
+            "$relatedTo" => None,
+            _ => Some(ParsedClause::Field(Constraint::equal(
+                key,
+                ParseValue::Null,
+            ))),
+        })
+        .collect()
 }
 
 /// `checkWhere`'s shape test (`RestQuery.js:942-967`): the first `$or`, `$and` or `$nor` that is
 /// present and not an array, at the top level or inside an array-valued one, in that order.
-fn malformed_logical(where_json: &Json) -> Option<&'static str> {
+///
+/// **Stricter than upstream, deliberately.** A logical operator must be a non-empty array of
+/// objects. Upstream checks only for an array, and only for a client and only inside the protected-
+/// field pass, where the refusal is sanitized to `Permission denied`; for master the same value
+/// reaches `reduceRelationKeys` and answers a 500, an empty array reaches the database and answers a
+/// 500, a `null` element answers a 500, and a non-object element is ignored, widening the query. Each
+/// is a malformed request, so each is refused here as one, with a message that says what is wrong.
+fn malformed_logical(where_json: &Json) -> Option<String> {
     let Json::Object(map) = where_json else {
         return None;
     };
     for op in ["$or", "$and", "$nor"] {
         match map.get(op) {
             None => {}
+            Some(Json::Array(items)) if items.is_empty() => {
+                return Some(format!(
+                    "Bad {op} format - use an array of at least 1 value."
+                ));
+            }
             Some(Json::Array(items)) => {
+                if items.iter().any(|item| !item.is_object()) {
+                    return Some(format!("Bad {op} format - use an array of objects."));
+                }
                 if let Some(found) = items.iter().find_map(malformed_logical) {
                     return Some(found);
                 }
             }
-            Some(_) => return Some(op),
+            // `$nor`'s own message is upstream's for both shapes (`DatabaseController.js:150-158`).
+            Some(_) if op == "$nor" => {
+                return Some("Bad $nor format - use an array of at least 1 value.".to_string());
+            }
+            Some(_) => return Some(format!("Bad {op} format - use an array value.")),
         }
     }
     None
@@ -319,10 +377,14 @@ fn parse_related_to(value: &Json) -> Result<ParsedClause, ParseError> {
 
 /// Turn one operator document into constraints.
 ///
-/// `$regex` and `$options` are two keys producing one comparison, which is why this is not a
-/// straight map over the entries. Upstream keeps them separate all the way down and relies on
-/// reverse-alphabetical key iteration so `$regex` is handled before `$options`
-/// (`MongoTransform.js:670-675`); folding them here removes the ordering dependency.
+/// **In upstream's order.** `transformConstraint` visits a field's operators in reverse
+/// alphabetical order (`MongoTransform.js:674`), so when two of them are malformed the later name's
+/// refusal is the one a client sees. The geo operators are the exception: they travel together and
+/// are checked as a group; see `Comparison::Geo`.
+///
+/// `$regex` and `$options` are read together. An `$options` beside a `$regex` is checked first, as
+/// `validateQuery` checks it. A lone one is refused with 102, where upstream passes it to the
+/// database and answers its refusal as a 500 (`MongoTransform.js:773-775`).
 fn parse_operators(
     field: &str,
     inner: &serde_json::Map<String, Json>,
@@ -331,42 +393,25 @@ fn parse_operators(
 
     let regex = inner.get("$regex");
     let options = inner.get("$options");
-    if regex.is_none() && options.is_some() {
-        // A lone `$options` is meaningless. Accepting it would drop the caller's intent
-        // silently.
-        return Err(ParseError::invalid_query(
-            "$options is only valid with $regex".to_string(),
-        ));
-    }
-    if let Some(regex) = regex {
-        let Json::String(pattern) = regex else {
-            return Err(ParseError::invalid_query(
-                "$regex value must be a string".to_string(),
-            ));
-        };
-        let options = match options {
-            None => None,
+    // `validateQuery` checks `$options` whenever `$regex` is present at all
+    // (`DatabaseController.js:169-178`), before any operand is converted, so these refusals
+    // precede every operand's.
+    if regex.is_some() {
+        match options {
             Some(Json::String(o)) => {
                 if !o.chars().all(|c| matches!(c, 'i' | 'm' | 'x' | 's' | 'u')) || o.is_empty() {
                     return Err(ParseError::invalid_query(format!(
                         "Bad $options value for query: {o}"
                     )));
                 }
-                Some(o.clone())
             }
             Some(_) => {
                 return Err(ParseError::invalid_query(
                     "$options value must be a string".to_string(),
                 ))
             }
-        };
-        out.push(Constraint {
-            field: field.to_string(),
-            comparison: Comparison::Regex {
-                pattern: pattern.clone(),
-                options,
-            },
-        });
+            None => {}
+        }
     }
 
     // The geo operators travel together, raw, in arrival order; see `Comparison::Geo`.
@@ -382,12 +427,46 @@ fn parse_operators(
         });
     }
 
-    for (op, operand) in inner {
-        if op == "$regex"
-            || op == "$options"
-            || parse_rust_storage::GEO_OPERATORS.contains(&op.as_str())
-        {
+    let mut keys: Vec<&String> = inner.keys().collect();
+    keys.sort();
+    keys.reverse();
+    for op in keys {
+        let operand = &inner[op];
+        if parse_rust_storage::GEO_OPERATORS.contains(&op.as_str()) {
             continue;
+        }
+        if op == "$regex" {
+            let Json::String(pattern) = operand else {
+                // `'bad regex: ' + s`, JavaScript's string conversion of whatever was sent.
+                let raw = parse_rust_core::classify_raw(operand.clone())?;
+                return Err(ParseError::invalid_json(format!(
+                    "bad regex: {}",
+                    parse_rust_core::js_number::to_ecma_display(&raw)
+                )));
+            };
+            let options = match options {
+                Some(Json::String(o)) => Some(o.clone()),
+                _ => None,
+            };
+            out.push(Constraint {
+                field: field.to_string(),
+                comparison: Comparison::Regex {
+                    pattern: pattern.clone(),
+                    options,
+                },
+            });
+            continue;
+        }
+        if op == "$options" {
+            // Beside a `$regex` it was checked above and travels with it. Alone it is refused:
+            // upstream sends it to the database, which rejects it with a 500 for a request that is
+            // simply malformed.
+            if regex.is_some() {
+                continue;
+            }
+            return Err(ParseError::invalid_query(
+                "$options is only valid with $regex".to_string(),
+            ));
         }
         // **A query operand is compared, not stored, so it keeps what the client sent, and the
         // parser does not interpret a single `__type` envelope.**
@@ -634,14 +713,30 @@ mod tests {
         assert!(matches!(kind("null"), Some(DeferredWhere::Null)));
         assert!(matches!(kind("5"), Some(DeferredWhere::Scalar)));
         assert!(matches!(kind("true"), Some(DeferredWhere::Scalar)));
-        assert!(matches!(
-            kind(r#"{"$or":5}"#),
-            Some(DeferredWhere::MalformedLogical("$or"))
-        ));
-        assert!(matches!(
-            kind(r#"{"$or":[{"$nor":{}}]}"#),
-            Some(DeferredWhere::MalformedLogical("$nor"))
-        ));
+        let logical = |json: &str| match kind(json) {
+            Some(DeferredWhere::MalformedLogical(message)) => message,
+            other => panic!("{json}: {other:?}"),
+        };
+        assert_eq!(
+            logical(r#"{"$or":5}"#),
+            "Bad $or format - use an array value."
+        );
+        assert_eq!(
+            logical(r#"{"$or":[{"$nor":{}}]}"#),
+            "Bad $nor format - use an array of at least 1 value."
+        );
+        assert_eq!(
+            logical(r#"{"$and":[]}"#),
+            "Bad $and format - use an array of at least 1 value."
+        );
+        assert_eq!(
+            logical(r#"{"$or":[null]}"#),
+            "Bad $or format - use an array of objects."
+        );
+        assert_eq!(
+            logical(r#"{"$or":[1]}"#),
+            "Bad $or format - use an array of objects."
+        );
         assert!(matches!(
             kind(r#"{"n":{"$in":5}}"#),
             Some(DeferredWhere::Error(_))
@@ -710,11 +805,24 @@ mod tests {
 
     #[test]
     fn regex_rejects_a_non_string_pattern_and_bad_options() {
-        assert!(parse_where(&j(r#"{"title":{"$regex":3}}"#)).is_err());
+        let e = parse_where(&j(r#"{"title":{"$regex":3}}"#)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidJson);
+        assert_eq!(e.message, "bad regex: 3");
         let e = parse_where(&j(r#"{"title":{"$regex":"a","$options":"z"}}"#)).unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidQuery);
         assert!(e.message.contains("Bad $options value for query: z"));
-        assert!(parse_where(&j(r#"{"title":{"$options":"i"}}"#)).is_err());
+        let e = parse_where(&j(r#"{"title":{"$regex":"a","$options":5}}"#)).unwrap_err();
+        assert_eq!(e.message, "$options value must be a string");
+        let e = parse_where(&j(r#"{"title":{"$options":"i"}}"#)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidQuery);
+    }
+
+    /// Two malformed operands: the one later in the alphabet is reported, as upstream visits a
+    /// field's operators in reverse alphabetical order.
+    #[test]
+    fn of_two_bad_operators_the_later_name_is_reported() {
+        let e = parse_where(&j(r#"{"n":{"$in":5,"$nin":5}}"#)).unwrap_err();
+        assert_eq!(e.message, "bad $nin value");
     }
 
     #[test]

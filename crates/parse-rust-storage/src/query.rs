@@ -125,12 +125,21 @@ impl Comparison {
             }
             // Upstream hands the value to MongoDB as given (`MongoTransform.js:682`), and MongoDB
             // reads `$exists` by its truthiness: only `false`, `0` and `null` mean "absent".
-            "$exists" => Comparison::Exists(match value {
-                ParseValue::Bool(b) => b,
-                ParseValue::Number(n) => n != 0.0,
-                ParseValue::Null => false,
-                _ => true,
-            }),
+            "$exists" => match value {
+                ParseValue::Bool(b) => Comparison::Exists(b),
+                ParseValue::Number(n) => Comparison::Exists(n != 0.0),
+                ParseValue::Null => Comparison::Exists(false),
+                // Upstream refuses this as a bad atom on most fields and accepts it as `true` on an
+                // `Array` field or a dotted key (`MongoTransform.js:663-669`). It is malformed on
+                // every field, so it is refused on every field.
+                ParseValue::Object(_) | ParseValue::Array(_) => {
+                    return Err(ParseError::invalid_json(format!(
+                        "bad atom: {}",
+                        value.to_json()
+                    )))
+                }
+                _ => Comparison::Exists(true),
+            },
             // Operators upstream implements and this server does not yet: refused by name, because
             // a silently dropped constraint broadens the result, which is an authorization failure.
             "$inQuery" | "$notInQuery" | "$select" | "$dontSelect" | "$containedBy"

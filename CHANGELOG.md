@@ -209,6 +209,10 @@ whose name a client could use.
 
 - Protected fields are enforced across more of the read path.
 - A client delete or read is accepted only on a class whose name a client could use.
+- A malformed query is refused as one: `$or`, `$and` and `$nor` must be non-empty arrays of objects
+  (102, with a message naming the problem), a lone `$options` is 102, and `$exists` given an object
+  or an array is 107 on every field. parse-server answers several of these with a 500, a
+  `Permission denied` or a widened result.
 - The rows an `include` grafts into one response are capped at 128 MiB of JSON; past it the read
   answers the generic 500, which parse-server answers only when its response no longer fits in a
   JavaScript string.
