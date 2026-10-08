@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
-## Unreleased (0.3.0)
+## 0.3.0
 
 The conformance milestone. parse-rust is now measured against parse-server's own test suite rather
 than only against tests this project wrote for itself, and the reference is parse-server **9.10.3**,
