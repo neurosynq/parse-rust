@@ -18,6 +18,8 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
 - **`rand` 0.8 to 0.10.** Session tokens and `objectId`s still draw from the thread-local
   cryptographic generator, and the session-token path still requires a `CryptoRng` at compile
   time. No wire change.
+- **`bcrypt` 0.15 to 0.19.** Hashing and verification still truncate at 72 bytes, as
+  parse-server's bcrypt does, and hashes still verify in both directions against parse-server's.
 
 ## 0.3.0
 
