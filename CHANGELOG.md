@@ -80,6 +80,10 @@ whose name a client could use.
 
 ### Changed
 
+- **Dependencies updated within their current versions**, which takes `rustls` to 0.23.45 for
+  RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption levels, on the MongoDB
+  connection when it uses TLS) and `mongodb` to 3.9.1.
+
 - **A `_User` create mints a session by upstream's rule on both routes**: unless its installation
   id is `cloud`, which a master or maintenance request without `X-Parse-Installation-Id` has. A
   master `POST /classes/_User` with an installation id now answers a `sessionToken`, and a master
