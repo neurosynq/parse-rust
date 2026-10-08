@@ -8,25 +8,47 @@
 //!
 //! The cases it answers were measured against Node; the tests below hold them.
 
+use std::collections::HashMap;
+
+/// V8's limit on capturing groups in one pattern, measured: 32,767 compile, 32,768 do not.
+const MAX_CAPTURES: usize = 32_767;
+
 /// Does `new RegExp(pattern)` succeed?
+///
+/// **Iterative and linear, because the pattern is a client's.** Open groups live on an explicit
+/// stack rather than the call stack, so nesting depth cannot overflow it: V8 itself accepts tens
+/// of thousands of levels. Every scan is done once, so a request carrying a pattern near the body
+/// limit costs time proportional to its length. An earlier recursive version aborted the process
+/// on a deeply nested pattern, and a name lookup per group made long patterns quadratic.
 pub fn is_valid(pattern: &str) -> bool {
     let chars: Vec<char> = pattern.chars().collect();
+    // The position of the next `>` at or after each index, so a group name or a `\k<name>` is
+    // found in constant time however many of them there are.
+    let mut next_gt = vec![usize::MAX; chars.len() + 1];
+    for i in (0..chars.len()).rev() {
+        next_gt[i] = if chars[i] == '>' { i } else { next_gt[i + 1] };
+    }
     let mut p = Parser {
         s: &chars,
+        next_gt: &next_gt,
         i: 0,
-        names: Vec::new(),
+        names: HashMap::new(),
         refs: Vec::new(),
-        path: Vec::new(),
-        next_disjunction: 0,
+        path: vec![(0, 0)],
+        next_disjunction: 1,
+        captures: 0,
     };
-    if p.disjunction().is_none() || p.i != chars.len() {
+    if p.run().is_none() {
         return false;
     }
     // `\k<name>` must name a group somewhere in the pattern once any group is named; with none,
     // `\k` is an identity escape.
     if !p.names.is_empty() {
         return p.refs.iter().all(|r| match r {
-            Some(name) => p.names.iter().any(|(n, _)| n == name),
+            Some((start, end)) => {
+                let name: String = chars[*start..*end].iter().collect();
+                p.names.contains_key(&name)
+            }
             None => false,
         });
     }
@@ -35,14 +57,22 @@ pub fn is_valid(pattern: &str) -> bool {
 
 struct Parser<'a> {
     s: &'a [char],
+    next_gt: &'a [usize],
     i: usize,
-    /// Every named group, with the alternatives it sits in, outermost first.
-    names: Vec<(String, Vec<(usize, usize)>)>,
-    /// Every `\k`: the name it was followed by, if it was followed by one.
-    refs: Vec<Option<String>>,
-    /// The disjunction and alternative currently being parsed, outermost first.
+    /// Each group name, with the alternatives each group of that name sits in, outermost first.
+    names: HashMap<String, Vec<Vec<(usize, usize)>>>,
+    /// Every `\k`: the span of the name it was followed by, if it was followed by one.
+    refs: Vec<Option<(usize, usize)>>,
+    /// The disjunction and alternative currently being parsed, outermost first. One entry per
+    /// open group plus the pattern itself, so it is also the stack of open groups.
     path: Vec<(usize, usize)>,
     next_disjunction: usize,
+    captures: usize,
+}
+
+/// What may follow a group once it closes, kept with the group while it is open.
+struct Open {
+    quantifiable: bool,
 }
 
 impl Parser<'_> {
@@ -54,39 +84,48 @@ impl Parser<'_> {
         self.s.get(self.i + offset).copied()
     }
 
-    /// Alternatives separated by `|`, up to an unconsumed `)` or the end.
-    fn disjunction(&mut self) -> Option<()> {
-        let id = self.next_disjunction;
-        self.next_disjunction += 1;
-        let mut alternative = 0;
-        loop {
-            self.path.push((id, alternative));
-            let ok = self.alternative();
-            self.path.pop();
-            ok?;
-            if self.peek() == Some('|') {
-                self.i += 1;
-                alternative += 1;
-            } else {
-                return Some(());
-            }
-        }
+    fn next_gt_from(&self, from: usize) -> Option<usize> {
+        self.next_gt.get(from).copied().filter(|&j| j != usize::MAX)
     }
 
-    fn alternative(&mut self) -> Option<()> {
+    /// The whole pattern: terms, `|` and groups, with open groups on `open`.
+    fn run(&mut self) -> Option<()> {
+        let mut open: Vec<Open> = Vec::new();
         while let Some(c) = self.peek() {
-            if c == '|' || c == ')' {
-                return Some(());
-            }
-            let quantifiable = self.term()?;
-            if quantifiable {
-                self.quantifier()?;
+            match c {
+                '|' => {
+                    self.i += 1;
+                    let top = self.path.last_mut()?;
+                    top.1 += 1;
+                }
+                ')' => {
+                    // An unmatched `)`.
+                    let group = open.pop()?;
+                    self.path.pop();
+                    self.i += 1;
+                    if group.quantifiable {
+                        self.quantifier()?;
+                    }
+                }
+                '(' => {
+                    let quantifiable = self.group_open()?;
+                    open.push(Open { quantifiable });
+                    let id = self.next_disjunction;
+                    self.next_disjunction += 1;
+                    self.path.push((id, 0));
+                }
+                _ => {
+                    if self.term()? {
+                        self.quantifier()?;
+                    }
+                }
             }
         }
-        Some(())
+        // An unterminated group.
+        open.is_empty().then_some(())
     }
 
-    /// One term. Returns whether a quantifier may follow it.
+    /// One term other than a group, `|` or `)`. Returns whether a quantifier may follow it.
     fn term(&mut self) -> Option<bool> {
         let c = self.peek()?;
         match c {
@@ -98,7 +137,6 @@ impl Parser<'_> {
             '*' | '+' | '?' => None,
             '{' if self.braced_quantifier_len().is_some() => None,
             '\\' => self.escape(),
-            '(' => self.group(),
             '[' => {
                 self.class()?;
                 Some(true)
@@ -175,10 +213,9 @@ impl Parser<'_> {
             'k' => {
                 let name = if self.peek() == Some('<') {
                     let start = self.i + 1;
-                    let end = (start..self.s.len()).find(|&j| self.s[j] == '>');
-                    end.map(|end| {
+                    self.next_gt_from(start).map(|end| {
                         self.i = end + 1;
-                        self.s[start..end].iter().collect::<String>()
+                        (start, end)
                     })
                 } else {
                     None
@@ -199,51 +236,50 @@ impl Parser<'_> {
         }
     }
 
-    fn group(&mut self) -> Option<bool> {
+    /// A group's opening, up to its body. Returns whether a quantifier may follow the group.
+    fn group_open(&mut self) -> Option<bool> {
         self.i += 1;
-        let quantifiable;
-        if self.peek() == Some('?') {
-            self.i += 1;
-            match (self.peek(), self.at(1)) {
-                (Some(':'), _) => {
-                    self.i += 1;
-                    quantifiable = true;
-                }
-                // Annex B lets a lookahead take a quantifier.
-                (Some('=' | '!'), _) => {
-                    self.i += 1;
-                    quantifiable = true;
-                }
-                (Some('<'), Some('=' | '!')) => {
-                    self.i += 2;
-                    quantifiable = false;
-                }
-                (Some('<'), _) => {
-                    self.i += 1;
-                    let start = self.i;
-                    let end = (start..self.s.len()).find(|&j| self.s[j] == '>')?;
-                    let name: String = self.s[start..end].iter().collect();
-                    if !is_identifier(&name) || self.duplicates(&name) {
-                        return None;
-                    }
-                    self.names.push((name, self.path.clone()));
-                    self.i = end + 1;
-                    quantifiable = true;
-                }
-                _ => {
-                    self.modifiers()?;
-                    quantifiable = true;
-                }
+        if self.peek() != Some('?') {
+            return self.capture();
+        }
+        self.i += 1;
+        match (self.peek(), self.at(1)) {
+            (Some(':'), _) => {
+                self.i += 1;
+                Some(true)
             }
-        } else {
-            quantifiable = true;
+            // Annex B lets a lookahead take a quantifier.
+            (Some('=' | '!'), _) => {
+                self.i += 1;
+                Some(true)
+            }
+            (Some('<'), Some('=' | '!')) => {
+                self.i += 2;
+                Some(false)
+            }
+            (Some('<'), _) => {
+                self.i += 1;
+                let start = self.i;
+                let end = self.next_gt_from(start)?;
+                let name: String = self.s[start..end].iter().collect();
+                if !is_identifier(&name) || self.duplicates(&name) {
+                    return None;
+                }
+                self.names.entry(name).or_default().push(self.path.clone());
+                self.i = end + 1;
+                self.capture()
+            }
+            _ => {
+                self.modifiers()?;
+                Some(true)
+            }
         }
-        self.disjunction()?;
-        if self.peek() != Some(')') {
-            return None;
-        }
-        self.i += 1;
-        Some(quantifiable)
+    }
+
+    /// Count a capturing group against V8's limit.
+    fn capture(&mut self) -> Option<bool> {
+        self.captures += 1;
+        (self.captures <= MAX_CAPTURES).then_some(true)
     }
 
     /// `(?ims-ims:`: each flag at most once across both sides, and not both sides empty.
@@ -273,12 +309,13 @@ impl Parser<'_> {
 
     /// Two groups of one name may coexist only in different alternatives of some disjunction.
     fn duplicates(&self, name: &str) -> bool {
-        self.names.iter().any(|(n, path)| {
-            n == name
-                && !path
+        self.names.get(name).is_some_and(|paths| {
+            paths.iter().any(|path| {
+                !path
                     .iter()
                     .zip(self.path.iter())
                     .any(|((d1, a1), (d2, a2))| d1 == d2 && a1 != a2)
+            })
         })
     }
 
@@ -508,6 +545,64 @@ mod tests {
         ];
         for (pattern, valid) in cases {
             assert_eq!(is_valid(pattern), *valid, "{pattern:?}");
+        }
+    }
+
+    /// Depth costs no stack: V8 accepts this, and the recursive version aborted the process.
+    #[test]
+    fn deep_nesting_is_checked_without_recursion() {
+        for n in [10_000, 200_000] {
+            let p = format!("{}{}", "(?:".repeat(n), ")".repeat(n));
+            assert!(is_valid(&p), "{n}");
+            let unclosed = "(?:".repeat(n);
+            assert!(!is_valid(&unclosed), "{n}");
+        }
+        // V8's capture limit, measured: 32,767 compile and 32,768 do not.
+        assert!(is_valid(&"(a)".repeat(32_767)));
+        assert!(!is_valid(&"(a)".repeat(32_768)));
+        assert!(is_valid(&format!(
+            "{}{}",
+            "(".repeat(32_767),
+            ")".repeat(32_767)
+        )));
+    }
+
+    /// The reported case, on the stack size a tokio worker gets: 20,000 groups around `a`, which
+    /// Node accepts, aborted the recursive version.
+    #[test]
+    fn twenty_thousand_groups_fit_a_two_megabyte_stack() {
+        let checked = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let n = 20_000;
+                is_valid(&format!("{}a{}", "(".repeat(n), ")".repeat(n)))
+            })
+            .expect("spawn")
+            .join()
+            .expect("no overflow");
+        assert!(checked);
+    }
+
+    /// Long patterns of the shapes that were quadratic answer in time linear in their length.
+    #[test]
+    fn long_patterns_are_linear() {
+        let cases = [
+            "\\k<".repeat(160_000),
+            (0..60_000)
+                .map(|i| format!("(?<a{i}>)"))
+                .collect::<String>(),
+            format!("(?<a>x){}", "\\k<a>".repeat(100_000)),
+            "(?<a".repeat(200_000),
+        ];
+        for p in &cases {
+            let started = std::time::Instant::now();
+            let _ = is_valid(p);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_secs(2),
+                "{} bytes took {took:?}",
+                p.len()
+            );
         }
     }
 

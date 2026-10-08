@@ -13,13 +13,17 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
 
 ## 0.3.1
 
-Dependency majors, the fixes four reviews of them found, and a read optimization for protected
+Dependency majors, the fixes their review found, and a read optimization for protected
 fields.
 
 **This release breaks the Rust API despite its patch number.** Cargo treats 0.3.1 as compatible with
 0.3.0, so `cargo update` takes an embedder onto it. A project that depends on any parse-rust crate
 directly, not only one that embeds `parse-rust-server`, should read the section below before
-updating, or pin `=0.3.0` until it can. **The minimum Rust is now 1.89.**
+updating. To stay on 0.3.0, pin **every** parse-rust crate in the dependency tree to `=0.3.0`, not
+only the one you name: the 0.3.0 crates depend on each other with caret ranges, so pinning
+`parse-rust-server` alone still resolves its siblings to 0.3.1, which does not compile. Keeping an
+existing `Cargo.lock`, or `cargo install --locked`, also holds 0.3.0. **The minimum Rust is now
+1.89.**
 
 For an SDK talking to the `parse-rust` binary, the wire changes are the routing and batch entries
 under Changed and everything under Fixed, each of which moves parse-rust to parse-server's answer.
@@ -65,13 +69,13 @@ The dependency updates and the protected-field projection change no response.
 - **`parse-rust-storage`: `QueryOptions` has a new field, `omit_fields`**, so a struct literal of
   it needs `..Default::default()`. An adapter may ignore it; see Changed.
 - **A mount path is checked.** It must start with `/` and must not contain `{`, `}`, `*`, `:`, `(`,
-  `)`, `[`, `]`, `+`, `!`, `?` or `#`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
+  `)`, `[`, `]`, `+`, `!`, `\`, `?` or `#`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
   returns an `InvalidInput` error, and `router()` given such a path serves nothing, every request a
   404, and writes the refusal to standard error. `ServerConfig::check_mount_path` is the check, for
   an embedder that builds the router itself. Upstream's Express 5 router reads those characters as
   syntax too, differently: `:name` anywhere in a segment is a parameter, so `/:app` matches any first
   segment and `/a:b` matches `/a` followed by anything; `{...}` is an optional group; and `(`, `)`,
-  `[`, `]`, `+` and `!` are refused at boot. None of it can be served the same way under axum 0.8,
+  `[`, `]`, `+` and `!` are refused at boot, and `\` is an escape. None of it can be served the same way under axum 0.8,
   so all of it is refused rather than served differently.
 
 ### Changed
@@ -97,7 +101,6 @@ The dependency updates and the protected-field projection change no response.
   with 107 before any runs; and `//batch` at a root mount leaves `/`, which a sub-request path must
   start with. In 0.3.0 the prefix was the configured mount: `/batch?x=1` ran its sub-requests and
   `/batch/` was a 404.
-- **An unrouted `HEAD` answers its 404 with `content-length: 0`**, as every other method does.
 - **Protected fields are left out of the database read when every row would lose them.** A read
   whose protected set is the same for every row now asks the database not to return those fields,
   instead of reading them and stripping them afterwards. Upstream declines this projection
@@ -105,14 +108,18 @@ The dependency updates and the protected-field projection change no response.
   change a response. The fields are still stripped afterwards, so an adapter that ignores the new
   `omit_fields` option stays correct. It is skipped wherever the set depends on the row or the
   caller: explicit `keys`, any `userField:` rule on the class, `_User`, and the master and
-  maintenance keys. And only fields the schema declares are projected away, never `objectId`,
-  `createdAt`, `updatedAt` or `ACL`: a protected name set through `PARSE_SERVER_PROTECTED_FIELDS` or
-  a hand-edited `_SCHEMA` is not validated, upstream included, and projecting an internal column, a
-  dotted path or a `$` name changed responses or made MongoDB refuse the read. Measured on one
-  machine against MongoDB 7.0.25, a client reading a whole class with a 2 KB protected field: at
-  1,000 rows the median went from 11.9 ms to 4.9 ms, and at 10,000 rows from about 115 ms to about
-  45 ms, in a before-and-after run of the two builds. With a 25-byte protected field the difference
-  is within noise. Gate J has a new workload for it, `query.protected.large`, at 1,000 rows.
+  maintenance keys. Only plain field names the schema declares are projected away, never
+  `objectId`, `createdAt`, `updatedAt` or `ACL`, because a protected name set through
+  `PARSE_SERVER_PROTECTED_FIELDS` or a hand-edited `_SCHEMA` is not checked against the schema, and
+  projecting an internal column, a dotted path or a `$` name changed responses or made MongoDB
+  refuse the read.
+
+  Gate J has a new workload for it, `query.protected.large`: 1,000 rows, each with a 2 KB
+  protected string, read as one page by a client. Measured once, on an Apple M3 Max against MongoDB
+  7.0.25 in Docker on the same machine, 30 samples per cell after 5 warmup, at the 0 ms latency
+  rung: parse-rust's median was 6.0 ms, of which 2.7 ms in the database (45%); parse-server's was
+  43.8 ms, of which 23.8 ms in the database (54%). These are distributions from one run with no
+  noise floor established, not a verdict.
 
 ### Fixed
 
@@ -135,6 +142,35 @@ The dependency updates and the protected-field projection change no response.
   object`. It is now parsed once.
 - **`explain` builds the query before the text index**, as an ordinary find does and as upstream
   does, so a malformed query is refused before any index is created. Present in 0.3.0.
+- **The binary ends promptly on SIGTERM.** `docker stop` waited out its timeout and then killed the
+  process, because a container's first process has no default action for the signal. Present in
+  0.3.0.
+- **An unparsable `PORT` is refused** rather than replaced by 27800. Present in 0.3.0.
+
+### Deliberate differences
+
+- **A mount path containing route syntax is refused at start**, where parse-server serves it with
+  Express's reading of that syntax. See Breaking.
+- **A nested `/batch` sub-request whose path has a trailing slash is refused before anything
+  runs.** Upstream's nested-batch check compares the path exactly, so `/parse/batch/` passes it
+  there and then crashes in the router, a 500. Refusing it is what the check intends.
+
+### Known limitations
+
+- **Paths match case-sensitively.** Express matches them case-insensitively, so `/Classes/Foo` is a
+  read upstream and a 404 here.
+- **`_method: "HEAD"` is a 404**, where Express serves it through the `GET` route.
+- **An unrouted path with an invalid session token is a 404**, where upstream resolves the token
+  before routing and answers 209.
+- **A top-level array body on a write answers 107**, where upstream validates its indices as field
+  names and answers 105.
+- **`/health/foo` is not the health route**, where Express's `api.use('/health')` serves anything
+  below it.
+- **`$relativeTime` is not implemented**, and a malformed `$containedBy` answers 102 where upstream
+  answers 107.
+- **The `$all` refusal renders a Date or Bytes value as `[object Object]`**, where upstream renders
+  the converted value, a time-zone-dependent date string or the decoded bytes.
+- **`/classes/X%2F` answers 119**, where upstream decodes the parameter and reads the class `X/`.
 
 ## 0.3.0
 

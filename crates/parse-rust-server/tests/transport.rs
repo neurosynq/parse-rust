@@ -238,3 +238,44 @@ async fn health_ignores_a_malformed_body_with_a_double_slash_too() {
         assert_eq!(status, 200, "{path}: {out}");
     }
 }
+
+/// A regex atom nested far deeper than any call stack allows is checked without one: the read
+/// answers, and the server is still there for the next request.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_deeply_nested_regex_does_not_take_the_server_down() {
+    let server = common::boot().await;
+    let depth = 100_000;
+    let deep = format!("^\\Q{}{}\\E", "(?:".repeat(depth), ")".repeat(depth));
+    let body = serde_json::to_vec(&json!({
+        "_method": "GET",
+        "where": { "tags": { "$all": [{ "$regex": deep }] } },
+    }))
+    .expect("json");
+    let (status, out) = raw(
+        &server.host,
+        "POST",
+        "/classes/Deep",
+        "application/json",
+        body,
+    )
+    .await;
+    // JavaScript accepts the pattern; MongoDB's regex engine does not nest that deep, and refuses it
+    // inside the read, which is the sanitized storage failure upstream would answer as well.
+    assert_eq!(
+        (status, out),
+        (
+            500,
+            json!({"code": 1, "error": "An internal server error occurred"})
+        )
+    );
+    let (status, _) = raw(
+        &server.host,
+        "GET",
+        "/health",
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200);
+}

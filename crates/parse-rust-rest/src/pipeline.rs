@@ -930,7 +930,9 @@ pub async fn explain<S: StorageAdapter>(
 /// hand-edited `_SCHEMA`, upstream included, so the set can hold an internal column, a dotted path
 /// or a `$` name. Projected, those emptied the permission columns, dropped `_id`, removed a nested
 /// field the strip would have kept, or made MongoDB refuse the read. A declared field is a plain
-/// top-level column, so projecting it away removes exactly what the strip removes.
+/// top-level column, and only a plain field name is projected, since a hand-edited `_SCHEMA` can
+/// declare `_rperm` or a dotted name too. Projecting such a field away removes exactly what the
+/// strip removes.
 fn projected_away(
     schema: &ClassSchema,
     keys: Option<&Vec<String>>,
@@ -942,8 +944,18 @@ fn projected_away(
         return None;
     }
     let mut fields: Vec<String> = Vec::new();
+    // A client-creatable field name, `fieldNameIsValid`'s `^[A-Za-z][0-9A-Za-z_]*$`. A hand-edited
+    // `_SCHEMA` can declare anything, `_rperm` or `a.b` included, so declaration alone is not enough.
+    let plain = |f: &str| {
+        let mut chars = f.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
     for f in &plan.strip {
-        if !ALWAYS_FETCHED.contains(&f.as_str()) && schema.field(f).is_some() && !fields.contains(f)
+        if !ALWAYS_FETCHED.contains(&f.as_str())
+            && plain(f)
+            && schema.field(f).is_some()
+            && !fields.contains(f)
         {
             fields.push(f.clone());
         }
@@ -4098,6 +4110,19 @@ mod projection_exclusion_tests {
                 &post(),
                 None,
                 Some(&plan(&["address.street", "_rperm"], false))
+            ),
+            None
+        );
+        // Declared, as a hand-edited `_SCHEMA` can declare them, and still not projected.
+        let odd = post()
+            .with_field("_rperm", FieldType::Array)
+            .with_field("_created_at", FieldType::Date)
+            .with_field("a.b", FieldType::String);
+        assert_eq!(
+            projected_away(
+                &odd,
+                None,
+                Some(&plan(&["_rperm", "_created_at", "a.b"], false))
             ),
             None
         );

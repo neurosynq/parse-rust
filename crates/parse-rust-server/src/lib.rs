@@ -110,6 +110,11 @@ fn peer_of(parts: &http::request::Parts) -> Peer {
 /// A mount path [`ServerConfig::check_mount_path`] refuses gets a router that serves nothing, so
 /// every request is a 404, and the refusal is written to standard error. [`serve`] and the binary
 /// refuse such a path before getting here; an embedder calling this directly should check first.
+///
+/// **The router carries its own fallback**, an empty 404 for an unrouted path, and at a root mount
+/// the API is itself the fallback service. So nest it with `nest` or `nest_service`; do not `merge`
+/// it into a router that has a fallback, which axum refuses by panicking, and do not call
+/// `.fallback()` on it, which at a root mount replaces the whole API.
 pub fn router(state: AppState) -> Router {
     if let Err(why) = state.config().check_mount_path() {
         eprintln!("parse-rust: serving nothing: {why}");
@@ -125,11 +130,11 @@ pub fn router(state: AppState) -> Router {
     // that a client can reach through a `_method` override also accepts `POST`, because the
     // JavaScript SDK transports everything that way.
     //
-    // Known differences from Express's routing, each in the divergence register, none reproduced
-    // yet: Express matches paths case-insensitively, so `/Classes/Foo` is a read upstream and a 404
-    // here; it serves a `HEAD`, including one asked for by `_method`, through the `GET` route; and
-    // it resolves an invalid session token before routing, so an unrouted path with a bad token
-    // is 209 upstream and 404 here.
+    // Known differences from Express's routing, none reproduced yet: Express matches paths
+    // case-insensitively, so `/Classes/Foo` is a read upstream and a 404 here; it serves a `HEAD`,
+    // including one asked for by `_method`, through the `GET` route; and it resolves an invalid
+    // session token before routing, so an unrouted path with a bad token is 209 upstream and 404
+    // here.
     let api = Router::new()
         .route("/serverInfo", any(routes::http::server_info))
         // `/health` is credential-free upstream and is the endpoint every bring-up script polls.
@@ -259,7 +264,7 @@ pub(crate) fn below_mount<'a>(path: &'a str, mount: &str) -> BelowMount<'a> {
     }
 }
 
-/// The request's path and query as the client sent them, before [`express_path`] rewrote them:
+/// The request's path and query as the client sent them, before `express_path` rewrote them:
 /// Express's `req.originalUrl`, which the batch route reads.
 #[derive(Debug, Clone)]
 pub struct OriginalUrl(pub String);

@@ -4,7 +4,7 @@
 //!
 //! - **Both create routes mint a session by one rule.** A `_User` created through `POST /users` or
 //!   `POST /classes/_User` gets a session unless its installation id is `cloud`, which a master
-//!   request without the header has; see [`mint_create_session`]. A non-master **create or delete**
+//!   request without the header has; see `mint_create_session`. A non-master **create or delete**
 //!   through the class route is refused; an **update** is allowed, because that is what
 //!   `user.save()` sends. See `classes::enforce_class_security`.
 //! - **The password hash must never reach a response.** Upstream reattaches the hash onto the

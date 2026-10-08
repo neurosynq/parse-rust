@@ -32,6 +32,11 @@ reference. It adds the read surface those files need first (geo queries, `$text`
 and `comment`), a benchmark harness, and a one-command demo. Everything else is ahead of that, not
 behind it.
 
+0.3.1 moves the dependencies to their current majors, including `axum` 0.8 and `bson` 3, which
+changes the Rust API for an embedder despite the patch number; `CHANGELOG.md` says how to migrate.
+It also stops reading protected fields from the database when every row would lose them anyway,
+and brings path matching and `/batch` routing in line with parse-server's.
+
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
 
@@ -122,7 +127,7 @@ can observe changes. Internal structure is free. The external surface is not.
 
 That contract is why the tests look the way they do. Everything that touches upstream behavior is
 checked against upstream rather than against someone's reading of it: the ECMAScript number
-formatter against Node, bcrypt in both directions against the module parse-server loads, the
+formatter against Node, bcrypt in both directions against both modules parse-server can load, the
 Parse/BSON transform against upstream's own `MongoTransform`, the `_SCHEMA` type strings against
 what parse-server actually writes into MongoDB, and the acceptance gates against a running
 parse-server.
@@ -146,7 +151,7 @@ suite runs against MongoDB 7 and 9; a single node is fine, no replica set needed
 Install the server:
 
 ```
-cargo install parse-rust-cli      # installs a binary named `parse-rust`
+cargo install parse-rust-cli      # installs a binary named `parse-rust`; needs Rust 1.89 or later
 ```
 
 Or embed it, which is the primary way this is meant to be used, since native Rust triggers and

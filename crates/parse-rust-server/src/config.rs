@@ -418,7 +418,8 @@ impl ServerConfig {
         if path.contains(['?', '#']) {
             return refuse("`?` and `#` cannot occur in a request path");
         }
-        const SYNTAX: [char; 10] = ['{', '}', '*', ':', '(', ')', '[', ']', '+', '!'];
+        // A backslash too: upstream's router reads it as an escape, so the path is not literal there.
+        const SYNTAX: [char; 11] = ['{', '}', '*', ':', '(', ')', '[', ']', '+', '!', '\\'];
         if let Some(c) = path.chars().find(|c| SYNTAX.contains(c)) {
             return refuse(&format!("`{c}` is route syntax, not literal text"));
         }
@@ -469,6 +470,7 @@ mod tests {
             "/a[b]",
             "/a+",
             "/a!",
+            "/a\\b",
         ] {
             assert!(check(bad).is_err(), "{bad}");
         }

@@ -205,7 +205,14 @@ async fn run() -> std::io::Result<()> {
     // machine, and 1337 is exactly where that one is. The default sits in the 27xxx block this
     // repository has registered for differential runs. `PORT=0` binds an ephemeral port and is
     // what every test uses, so parallel test batteries cannot collide with each other.
-    let port: u16 = env("PORT").and_then(|p| p.parse().ok()).unwrap_or(27800);
+    // An unparsable `PORT` is refused rather than replaced by the default: a typo must not quietly
+    // put the server on a port nobody configured.
+    let port: u16 = match env("PORT") {
+        Some(p) => p
+            .parse()
+            .map_err(|_| std::io::Error::other(format!("PORT must be a port number, got {p:?}")))?,
+        None => 27800,
+    };
 
     // `PARSE_SERVER_HOST` is upstream's option name, but the default is deliberately different:
     // upstream defaults to `0.0.0.0` (`Options/Definitions.js:326-328`) and this defaults to
@@ -225,7 +232,36 @@ async fn run() -> std::io::Result<()> {
     let (bound, server) = parse_rust_server::serve(state, addr).await?;
     // Machine-readable on its own line, so a harness can bind port 0 and discover the result.
     println!("parse-rust listening on http://{bound}");
-    server.await
+    // SIGTERM is how `docker stop` and most supervisors ask a process to end. Without a handler the
+    // default action does end it, but a process running as PID 1 in a container has no default
+    // action and was killed only after the stop timeout. Ending on the signal makes the stop prompt.
+    tokio::select! {
+        result = server => result,
+        _ = shutdown_signal() => Ok(()),
+    }
+}
+
+/// SIGTERM or Ctrl-C.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// `parsers.arrayParser`, which is a plain `split(',')` and nothing else

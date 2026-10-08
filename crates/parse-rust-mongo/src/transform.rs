@@ -419,7 +419,12 @@ fn raw_typed_value(value: &ParseValue) -> Result<Bson, ParseError> {
 ///
 /// Only used to build the `$all` mixed-regex message, whose upstream form is string concatenation
 /// of the array. `null` and `undefined` join as the empty string, an array joins its own elements
-/// with commas, and any other object joins as `[object Object]`.
+/// with commas, a regex atom as `/source/`, and other objects as `[object Object]`.
+///
+/// **Not upstream's rendering for every value.** Upstream joins the values after converting them,
+/// so a Date renders as JavaScript's `Date.prototype.toString()`, which depends on the server's
+/// time zone, and Bytes as the decoded buffer. Both join as `[object Object]` here. A known
+/// limitation of the message text only; the code and the refusal are the same.
 fn js_join_element(value: &ParseValue) -> String {
     match value {
         // A nested array is not mapped through `transformInteriorAtom`, so a regex atom inside one

@@ -11,7 +11,7 @@
 //!   `_SessionToken`, `_InstallationId`, `_ContentType` and friends from the body, and **deletes
 //!   them**, which is why a saved Parse object never grows an `_ApplicationId` field. It does so
 //!   only for a request whose headers do not already name the app, and it reads exactly that set:
-//!   see [`Mode`].
+//!   see `Mode`.
 //! - `ClassesRouter` merges `req.body` with the decoded query string, so a `where` sent in the
 //!   body reaches the same code as one sent in the URL.
 //!
@@ -223,8 +223,8 @@ pub struct ParsedBody(pub Json);
 
 /// The health endpoint: the mount plus `/health`, as routing normalizes the path, so a trailing
 /// slash or one extra leading slash is still the health route. Express's `api.use('/health', ...)`
-/// also matches any path below it, `/health/foo`, which this does not; that is recorded in the
-/// divergence register. A suffix test also matched `/classes/health`.
+/// also matches any path below it, `/health/foo`, which this does not: a known difference. A suffix
+/// test also matched `/classes/health`.
 fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
     matches!(
         crate::below_mount(parts.uri.path(), &state.config().mount_path),
@@ -346,9 +346,11 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
     let overridden = if parts.method == http::Method::POST && map.get("_method").is_some_and(truthy)
     {
         // A name that is not a valid method token still replaces the method upstream, and then
-        // matches no route: Express answers 404. Known difference, in the divergence register:
-        // `_method: "HEAD"` is served by the `GET` route upstream and is a 404 here. Falling back to the transport `POST` ran the
+        // matches no route: Express answers 404. Falling back to the transport `POST` ran the
         // request as a create instead.
+        //
+        // Known difference: `_method: "HEAD"` is served by the `GET` route upstream and is a 404
+        // here.
         match map.shift_remove("_method") {
             Some(Json::String(m)) => Some(
                 m.to_uppercase()
