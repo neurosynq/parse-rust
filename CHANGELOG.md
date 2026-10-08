@@ -11,6 +11,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [semantic](https://semver.org/), with the caveat that everything below 1.0.0 is subject to change:
 the API this project promises to keep stable is Parse Server's, not its own Rust surface.
 
+## Unreleased
+
+### Changed
+
+- **`rand` 0.8 to 0.10.** Session tokens and `objectId`s still draw from the thread-local
+  cryptographic generator, and the session-token path still requires a `CryptoRng` at compile
+  time. No wire change.
+
 ## 0.3.0
 
 The conformance milestone. parse-rust is now measured against parse-server's own test suite rather

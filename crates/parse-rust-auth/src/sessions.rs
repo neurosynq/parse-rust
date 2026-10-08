@@ -26,7 +26,7 @@
 //! - **`POST /upgradeToRevocableSession`**, and client-driven `_Session` create and update.
 
 use indexmap::IndexMap;
-use rand::{CryptoRng, RngCore};
+use rand::CryptoRng;
 
 use parse_rust_core::{new_object_id, ErrorCode, ParseDate, ParseError, ParseMap, ParseValue};
 use parse_rust_schema::default_schema;
@@ -54,7 +54,7 @@ const SESSION_CLASS: &str = "_Session";
 /// Note that `random_string` in `parse-rust-core` is not usable here even though it draws from
 /// the same generator: its alphabet is the 62-character `objectId` set, and a session token's
 /// character set is observable to a client.
-fn fill_secure<R: RngCore + CryptoRng>(rng: &mut R, buf: &mut [u8]) {
+fn fill_secure<R: CryptoRng>(rng: &mut R, buf: &mut [u8]) {
     rng.fill_bytes(buf);
 }
 
@@ -64,7 +64,7 @@ fn fill_secure<R: RngCore + CryptoRng>(rng: &mut R, buf: &mut [u8]) {
 /// (`RestWrite.js:1203`, `cryptoUtils.js:41`).
 pub fn new_session_token() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
-    fill_secure(&mut rand::thread_rng(), &mut bytes);
+    fill_secure(&mut rand::rng(), &mut bytes);
 
     let mut token = String::with_capacity(SESSION_TOKEN_PREFIX.len() + TOKEN_BYTES * 2);
     token.push_str(SESSION_TOKEN_PREFIX);

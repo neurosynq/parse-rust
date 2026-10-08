@@ -14,7 +14,7 @@
 //! reproducing a weak RNG on purpose is worse than fixing it, so this uses rejection sampling.
 //! This is a deliberate, recorded difference from upstream rather than an oversight.
 
-use rand::RngCore;
+use rand::Rng;
 
 /// Uppercase, then lowercase, then digits. Order matters only for matching upstream's source;
 /// the set is what the client-visible contract depends on.
@@ -30,7 +30,7 @@ pub const DEFAULT_OBJECT_ID_SIZE: usize = 10;
 /// below 256 is 248, so bytes 248..=255 are rejected and redrawn. Expected redraws are about
 /// 3.2%, which is not worth a smarter scheme.
 pub fn random_string(size: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut out = String::with_capacity(size);
     let mut buf = [0u8; 64];
     let mut have = 0usize;
