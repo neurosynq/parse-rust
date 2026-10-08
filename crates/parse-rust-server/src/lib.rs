@@ -71,7 +71,6 @@ pub use state::AppState;
 /// [`Peer::Unknown`], and every master-key and maintenance-key request is then refused. That is
 /// the intended direction: the alternative, treating an absent address as unfiltered, is the
 /// 0.2.0 behavior this release exists to remove.
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for Authority
 where
     Arc<ServerConfig>: axum::extract::FromRef<S>,
@@ -126,29 +125,32 @@ pub fn router(state: AppState) -> Router {
         // Users. `POST /users` is signup and is deliberately not reachable through /classes.
         .route("/users", any(routes::http::users_collection))
         .route("/users/me", any(routes::http::users_me))
-        .route("/users/:objectId", any(routes::http::users_object))
+        .route("/users/{objectId}", any(routes::http::users_object))
         .route("/login", any(routes::http::login))
         .route("/logout", any(routes::http::logout))
         // Classes.
-        .route("/classes/:className", any(routes::http::classes_collection))
         .route(
-            "/classes/:className/:objectId",
+            "/classes/{className}",
+            any(routes::http::classes_collection),
+        )
+        .route(
+            "/classes/{className}/{objectId}",
             any(routes::http::classes_object),
         )
         // Roles: `ClassesRouter` with `className()` pinned to `_Role` (`RolesRouter.js:3-25`).
         .route("/roles", any(routes::http::roles_collection))
-        .route("/roles/:objectId", any(routes::http::roles_object))
+        .route("/roles/{objectId}", any(routes::http::roles_object))
         // Sessions. `/sessions/me` is registered before `/sessions/:objectId` because upstream
         // depends on registration order (`SessionsRouter.js:113-121`). axum matches a literal
         // segment ahead of a parameter regardless, which the route tests assert; the order is
         // kept anyway so the two files read the same way.
         .route("/sessions/me", any(routes::http::sessions_me))
         .route("/sessions", any(routes::http::sessions_collection))
-        .route("/sessions/:objectId", any(routes::http::sessions_object))
+        .route("/sessions/{objectId}", any(routes::http::sessions_object))
         // Schemas and purge, master key only.
         .route("/schemas", any(routes::http::schemas_collection))
-        .route("/schemas/:className", any(routes::http::schemas_class))
-        .route("/purge/:className", any(routes::http::purge))
+        .route("/schemas/{className}", any(routes::http::schemas_class))
+        .route("/purge/{className}", any(routes::http::purge))
         .route("/batch", any(routes::http::batch))
         // axum's `Json` extractor has its own 2 MB default, under the 20 MB `maxUploadSize` the body
         // layer enforces, so a body between the two was refused as not JSON.
@@ -165,7 +167,12 @@ pub fn router(state: AppState) -> Router {
     // middleware on the router (`ParseServer.ts:312`). Outermost is what makes the headers appear
     // on error responses too, and what lets an `OPTIONS` preflight be answered before anything
     // downstream can reject it for lacking credentials it is not allowed to send yet.
-    let app = Router::new().nest(&mount, api);
+    // Trimmed as `body_credentials` trims it, and merged at the root rather than nested there,
+    // because `nest` refuses a root or empty prefix by panicking.
+    let app = match mount.trim_end_matches('/') {
+        "" => Router::new().merge(api),
+        prefix => Router::new().nest(prefix, api),
+    };
     // Inside the body layer, so it sees the method a `_method` override asked for.
     let app = app.layer(axum::middleware::from_fn_with_state(
         mount.clone(),

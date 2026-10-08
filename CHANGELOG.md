@@ -22,6 +22,10 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
   parse-server's bcrypt does, and hashes still verify in both directions against parse-server's.
 - **`bson` 2 to 3**, with the `mongodb` driver switched to its bson 3 support. Stored documents and
   query encoding are unchanged.
+- **`axum` 0.7 to 0.8.** This is a breaking change for an embedder that adds its own routes or
+  extractors to the router `parse-rust-server` returns: path parameters are now written `{name}`
+  rather than `:name`, and `#[async_trait]` is gone from extractor impls. The routes parse-rust
+  serves and their responses are unchanged, including a request body that is not JSON.
 
 ## 0.3.0
 
