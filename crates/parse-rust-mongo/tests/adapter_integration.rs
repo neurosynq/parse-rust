@@ -985,3 +985,58 @@ async fn field_options_are_reserved_with_the_type_and_addressed_per_field() {
 
     drop_db(&db).await;
 }
+
+/// `exclude_keys` is an exclusion projection: the database never returns those fields, a pointer
+/// included under its storage name, and everything else still arrives.
+#[tokio::test]
+#[ignore = "requires MongoDB on 27017; run via tools/test.sh"]
+async fn exclude_keys_are_never_read() {
+    let (a, db) = adapter("excludekeys").await;
+    let schema = post_schema();
+    a.create(
+        &schema,
+        &row(vec![
+            ("objectId", ParseValue::String("oid0000009".into())),
+            ("title", ParseValue::String("kept".into())),
+            ("views", ParseValue::Number(7.0)),
+            (
+                "author",
+                ParseValue::Pointer {
+                    class_name: "_User".into(),
+                    object_id: "u1".into(),
+                },
+            ),
+        ]),
+    )
+    .await
+    .expect("create");
+
+    let opts = QueryOptions {
+        exclude_keys: Some(vec!["views".into(), "author".into()]),
+        ..Default::default()
+    };
+    let found = a.find(&schema, &Query::new(), &opts).await.expect("find");
+    assert_eq!(found.len(), 1);
+    let row = &found[0];
+    assert!(row.get("views").is_none(), "{row:?}");
+    assert!(row.get("author").is_none(), "{row:?}");
+    assert!(
+        matches!(row.get("title"), Some(ParseValue::String(t)) if t == "kept"),
+        "{row:?}"
+    );
+
+    // `keys` decides the projection on its own; `exclude_keys` is ignored beside it.
+    let opts = QueryOptions {
+        keys: Some(vec!["views".into()]),
+        exclude_keys: Some(vec!["views".into()]),
+        ..Default::default()
+    };
+    let found = a.find(&schema, &Query::new(), &opts).await.expect("find");
+    assert!(
+        matches!(found[0].get("views"), Some(ParseValue::Number(n)) if *n == 7.0),
+        "{:?}",
+        found[0]
+    );
+
+    drop_db(&db).await;
+}

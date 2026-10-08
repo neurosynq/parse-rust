@@ -51,6 +51,8 @@ Fixed. Each moves parse-rust toward parse-server's answer.
 - **`parse-rust-core`: `ParseErrorInfo` has a new field, `at_query`**, so a struct literal of it
   needs `..Default::default()`. `ParseError::before_query()` no longer marks an error that carries
   `at_query`: such an error is raised by the database call upstream, wherever parse-rust finds it.
+- **`parse-rust-storage`: `QueryOptions` has a new field, `exclude_keys`**, so a struct literal of
+  it needs `..Default::default()`. An adapter may ignore it; see Changed.
 - **A mount path is checked.** It must start with `/` and must not contain `{`, `}`, `*`, `?`, `#`
   or a segment starting with `:`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve` returns
   an `InvalidInput` error, and `router()` given such a path serves nothing, every request a 404,
@@ -78,6 +80,13 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   is, because upstream recovers its mount from that suffix. `/batch/` and `/batch?x=1` were a 404
   in 0.3.0, and reached the handler during this release's development.
 - **An unrouted `HEAD` answers its 404 with `content-length: 0`**, as every other method does.
+- **Protected fields are left out of the database read when every row would lose them.** A read
+  whose protected set is the same for every row now asks the database not to return those fields,
+  instead of reading them and stripping them afterwards. They are still stripped afterwards, so an
+  adapter that ignores the new `exclude_keys` option stays correct. The projection is skipped
+  wherever the set depends on the row or the caller: explicit `keys`, any `userField:` rule on the
+  class, `_User`, and the master and maintenance keys. `objectId`, `createdAt`, `updatedAt` and
+  `ACL` are always read. Responses are unchanged; only what is read from the database differs.
 
 ### Fixed
 

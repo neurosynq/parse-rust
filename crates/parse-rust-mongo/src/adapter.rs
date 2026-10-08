@@ -401,8 +401,18 @@ fn sort_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
 }
 
 /// The projection for a read, or `None` for every field.
+///
+/// Without `keys`, `exclude_keys` becomes an exclusion projection: those fields are never read
+/// from the database. The read path strips them from every row afterwards regardless.
 fn projection_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
-    let keys = options.keys.as_ref()?;
+    let Some(keys) = options.keys.as_ref() else {
+        let exclude = options.exclude_keys.as_ref().filter(|e| !e.is_empty())?;
+        let mut projection = Document::new();
+        for k in exclude {
+            projection.insert(storage_key(schema, k), 0);
+        }
+        return Some(projection);
+    };
     let mut projection = Document::new();
     for k in keys {
         // A selected `$score` is the search's relevance, returned as `score`
