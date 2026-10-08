@@ -77,6 +77,10 @@ whose name a client could use.
   after checking both servers give the same answer, and four microbenchmark families over frozen
   corpora. The report publishes distributions only, with no faster or slower verdict, until a noise
   floor exists to justify one.
+- **A one-command demo**, `docker compose up`, which builds parse-rust from the checkout, starts a
+  MongoDB beside it and serves `http://127.0.0.1:27800/parse` with application id `demo` and master
+  key `demo-master-key`. The keys are public and the database has no authentication, so it is a
+  demo, not a deployment. `tools/demo/check.sh` brings it up from a fresh clone and checks it.
 
 ### Changed
 
