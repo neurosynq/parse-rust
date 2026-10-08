@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-auth"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bcrypt",
  "bson",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-bench"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bson",
  "hdrhistogram",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "parse-rust-mongo",
  "parse-rust-server",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "indexmap",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-mongo"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bson",
  "futures",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-rest"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "futures",
  "indexmap",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-schema"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "parse-rust-core",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bson",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "parse-rust-storage"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "parse-rust-core",
