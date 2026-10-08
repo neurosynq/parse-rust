@@ -1,7 +1,6 @@
 //! The conformance harness's control plane. Compiled only with the `test-harness` feature.
 //!
-//! **Two stages decide whether it answers, and they are different on purpose** (0.3.0 contract,
-//! section 3). Without the feature there is no handler and no path, so a release binary answers
+//! **Two stages decide whether it answers, and they are different on purpose.** Without the feature there is no handler and no path, so a release binary answers
 //! these with the ordinary 404 for an unrouted path. With the feature compiled in but
 //! `PARSE_RUST_TESTING` unset, the routes exist and refuse with `OPERATION_FORBIDDEN`, so a harness
 //! build started without the variable fails loudly instead of quietly serving a control plane.

@@ -496,7 +496,7 @@ fn render_clp(clp: Option<&ClassLevelPermissions>) -> Json {
 }
 
 fn to_json(map: &ParseMap) -> Json {
-    serde_json::from_str(&ParseValue::Object(map.clone()).to_json()).unwrap_or(Json::Null)
+    ParseValue::Object(map.clone()).to_serde_json()
 }
 
 // -------------------------------------------------------------------------------------------

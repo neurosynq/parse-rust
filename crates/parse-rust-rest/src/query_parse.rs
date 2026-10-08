@@ -24,6 +24,31 @@ use serde_json::Value as Json;
 #[derive(Debug, Clone, Default)]
 pub struct ParsedWhere {
     pub clauses: Vec<ParsedClause>,
+    /// A `where` that will fail, carried to the point upstream fails it. See [`DeferredWhere`].
+    pub deferred: Option<DeferredWhere>,
+}
+
+/// Why a `where` will fail, and so where the read path raises it.
+///
+/// Upstream reads `where` in stages: the route only decodes the JSON, `RestQuery` checks the shape
+/// of `$or`/`$and`/`$nor` while denying protected fields, and every operand is converted only when
+/// the database query is built, after the CLP gate (`DatabaseController.js:1524`,
+/// `MongoTransform.js`). Raising everything at decode time answered 102 where upstream answers 119
+/// for a caller the CLP refuses, and an error where a `limit=0` read answers `[]`.
+#[derive(Debug, Clone)]
+pub enum DeferredWhere {
+    /// Any error the query's conversion raises. Raised at query validation, after the CLP gate and
+    /// pointer permissions, and never on a `limit=0` read, which stops before either.
+    Error(ParseError),
+    /// `$or`, `$and` or `$nor` that is not an array. `denyProtectedFields` refuses it for anyone but
+    /// master, sanitized, before the gate (`RestQuery.js:956-963`); master reaches
+    /// `reduceRelationKeys`, which throws on it (`DatabaseController.js:1157-1159`).
+    MalformedLogical(&'static str),
+    /// A number or boolean. Master reads every row, because the query has no keys; anyone else
+    /// fails when `addReadACL` assigns `_rperm` onto it (`DatabaseController.js:85-88`).
+    Scalar,
+    /// `null`, which `find` dereferences before anything else (`DatabaseController.js:1414`).
+    Null,
 }
 
 /// One element of a parsed `where`.
@@ -97,6 +122,57 @@ impl ParsedWhere {
 /// Parse a decoded `where` object.
 pub fn parse_where(where_json: &Json) -> Result<ParsedWhere, ParseError> {
     parse_where_at(where_json, true)
+}
+
+/// A client's `where` as upstream receives it, with any failure deferred to upstream's position.
+///
+/// An array is an object keyed by its indices, as `Object.keys` sees it, so `[1]` names a field
+/// `0` and fails key validation as upstream does.
+pub fn parse_client_where(where_json: &Json) -> ParsedWhere {
+    let deferred = |d| ParsedWhere {
+        clauses: Vec::new(),
+        deferred: Some(d),
+    };
+    let indexed;
+    let object = match where_json {
+        Json::Null => return deferred(DeferredWhere::Null),
+        Json::Bool(_) | Json::Number(_) => return deferred(DeferredWhere::Scalar),
+        Json::Array(items) => {
+            indexed = Json::Object(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (i.to_string(), v.clone()))
+                    .collect(),
+            );
+            &indexed
+        }
+        other => other,
+    };
+    if let Some(op) = malformed_logical(object) {
+        return deferred(DeferredWhere::MalformedLogical(op));
+    }
+    parse_where(object).unwrap_or_else(|e| deferred(DeferredWhere::Error(e)))
+}
+
+/// `checkWhere`'s shape test (`RestQuery.js:942-967`): the first `$or`, `$and` or `$nor` that is
+/// present and not an array, at the top level or inside an array-valued one, in that order.
+fn malformed_logical(where_json: &Json) -> Option<&'static str> {
+    let Json::Object(map) = where_json else {
+        return None;
+    };
+    for op in ["$or", "$and", "$nor"] {
+        match map.get(op) {
+            None => {}
+            Some(Json::Array(items)) => {
+                if let Some(found) = items.iter().find_map(malformed_logical) {
+                    return Some(found);
+                }
+            }
+            Some(_) => return Some(op),
+        }
+    }
+    None
 }
 
 /// `top_level` carries whether `replaceEquality` applies, which is not a detail worth hiding.
@@ -455,7 +531,9 @@ pub const MAX_INCLUDE_PATHS: usize = 500;
 pub fn parse_include(include: &str) -> Result<Vec<Vec<String>>, ParseError> {
     let mut paths: Vec<Vec<String>> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
-    for raw in include.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    // Split as upstream splits it, untrimmed (`RestQuery.js:235`): ` a` is a path to a field named
+    // ` a`, which nothing has. An empty entry is a path to nothing, so dropping it is the same.
+    for raw in include.split(',').filter(|s| !s.is_empty()) {
         if raw == "*" {
             return Err(ParseError::new(
                 ErrorCode::CommandUnavailable,
@@ -548,6 +626,31 @@ mod tests {
         assert_eq!(map.len(), 4, "{map:?}");
         assert!(matches!(map.get("objectId"), Some(ParseValue::String(s)) if s == "u1"));
         assert!(matches!(map.get("extra"), Some(ParseValue::Number(n)) if *n == 7.0));
+    }
+
+    #[test]
+    fn a_client_where_defers_its_failure_by_kind() {
+        let kind = |json: &str| parse_client_where(&j(json)).deferred;
+        assert!(matches!(kind("null"), Some(DeferredWhere::Null)));
+        assert!(matches!(kind("5"), Some(DeferredWhere::Scalar)));
+        assert!(matches!(kind("true"), Some(DeferredWhere::Scalar)));
+        assert!(matches!(
+            kind(r#"{"$or":5}"#),
+            Some(DeferredWhere::MalformedLogical("$or"))
+        ));
+        assert!(matches!(
+            kind(r#"{"$or":[{"$nor":{}}]}"#),
+            Some(DeferredWhere::MalformedLogical("$nor"))
+        ));
+        assert!(matches!(
+            kind(r#"{"n":{"$in":5}}"#),
+            Some(DeferredWhere::Error(_))
+        ));
+        assert!(kind(r#"{"n":1}"#).is_none());
+        // An array is an object keyed by its indices, so it parses and fails key validation later.
+        let w = parse_client_where(&j("[1]"));
+        assert!(w.deferred.is_none());
+        assert_eq!(w.field_keys(), vec!["0".to_string()]);
     }
 
     /// The rule that stops a dropped constraint from broadening a result set. The list shrank at

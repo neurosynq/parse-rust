@@ -191,12 +191,18 @@ impl Params {
     /// JSON is decoded by the route, before class security (`ClassesRouter.js:32-37`), and read as
     /// a query only by `RestQuery`, after it and after the explain gate.
     pub fn where_json(&self) -> Result<Option<Json>, ParseError> {
-        let Some(raw) = self.get("where") else {
+        // `JSONFromQuery` first, then `if (typeof body.where === 'string') JSON.parse(body.where)`
+        // (`ClassesRouter.js:23`, `:32-37`). So a query value that is a JSON string is parsed a
+        // second time, `where="s"` fails as not valid JSON, and a body value is parsed once.
+        let Some(value) = self.js_value("where") else {
             return Ok(None);
         };
-        serde_json::from_str(raw)
-            .map(Some)
-            .map_err(|_| ParseError::invalid_json("where parameter is not valid JSON"))
+        match value {
+            Json::String(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| ParseError::invalid_json("where parameter is not valid JSON")),
+            other => Ok(Some(other)),
+        }
     }
 
     pub fn wants_count(&self) -> bool {
@@ -329,10 +335,7 @@ impl Params {
                 .unwrap_or_default(),
             keys: self.csv("keys"),
             exclude_keys: self.csv("excludeKeys"),
-            include: match self.js_string_unless_nullish("include") {
-                Some(raw) => parse_include(&raw)?,
-                None => Vec::new(),
-            },
+            include: self.include_paths()?,
         })
     }
 
@@ -346,11 +349,34 @@ impl Params {
             order: Vec::new(),
             keys: self.csv("keys"),
             exclude_keys: self.csv("excludeKeys"),
-            include: match self.js_string_unless_nullish("include") {
-                Some(raw) => parse_include(&raw)?,
-                None => Vec::new(),
-            },
+            include: self.include_paths()?,
         })
+    }
+
+    /// `include`, plus the parents dotted `keys` and `excludeKeys` force.
+    ///
+    /// `RestQuery.js:146-183`: every dotted key in the raw `keys` string, then in the raw
+    /// `excludeKeys` string, contributes its path minus the last component, so `keys=author.name`
+    /// includes `author`. Those are appended to whatever `include` asked for, or replace an empty
+    /// one, before the `include` option is read.
+    fn include_paths(&self) -> Result<Vec<Vec<String>>, ParseError> {
+        let split = |key: &str| -> Vec<String> {
+            self.js_string_unless_nullish(key)
+                .map(|raw| raw.split(',').map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        let forced = parse_rust_rest::include::paths_forced_by_projection(
+            &split("keys"),
+            &split("excludeKeys"),
+        )
+        .join(",");
+        let include = match (self.js_string_unless_nullish("include"), forced.is_empty()) {
+            (Some(raw), true) => raw,
+            (Some(raw), false) if !raw.is_empty() => format!("{raw},{forced}"),
+            (_, false) => forced,
+            (None, true) => return Ok(Vec::new()),
+        };
+        parse_include(&include)
     }
 
     /// `order` as `optionsFromBody` reads it: `if (body.order) String(body.order)`
@@ -370,10 +396,13 @@ impl Params {
             .map(|v| js_string(&v))
     }
 
+    /// Split on commas, dropping empty entries and nothing else: `keys` is
+    /// `.split(',').filter(key => key.length > 0)` (`RestQuery.js:188-191`), with no trimming, so
+    /// `keys=a, b` names `a` and ` b`, and ` b` matches no field. An empty `excludeKeys` entry
+    /// excludes nothing, so dropping it there is the same answer.
     fn csv(&self, key: &str) -> Option<Vec<String>> {
         self.js_string_unless_nullish(key).map(|raw| {
             raw.split(',')
-                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect()

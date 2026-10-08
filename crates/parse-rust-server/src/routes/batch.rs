@@ -33,7 +33,7 @@ const BATCH_PATH: &str = "/batch";
 /// builder input, never inferred from the request.
 pub async fn handle(
     state: &AppState,
-    rc: &RequestContext,
+    rc: &mut RequestContext,
     authority: &Authority,
     mount_path: &str,
     body: Option<&Json>,
@@ -41,14 +41,6 @@ pub async fn handle(
     let Some(Json::Object(body)) = body else {
         return Err(ParseError::invalid_json("requests must be an array"));
     };
-
-    if matches!(body.get("transaction"), Some(Json::Bool(true))) {
-        return Err(ParseError::new(
-            ErrorCode::CommandUnavailable,
-            "Batch transactions are not supported yet. Retry without `transaction: true`; \
-             the sub-requests will be applied independently and reported per operation.",
-        ));
-    }
 
     let Some(Json::Array(requests)) = body.get("requests") else {
         return Err(ParseError::invalid_json("requests must be an array"));
@@ -66,7 +58,7 @@ pub async fn handle(
 
     // Both validation passes run over the whole array before anything executes, so a batch with
     // one malformed element performs none of the others (`batch.js:79-83`, `:104-108`).
-    let mut parsed = Vec::with_capacity(requests.len());
+    let mut checked = Vec::with_capacity(requests.len());
     for request in requests {
         let Json::Object(request) = request else {
             return Err(ParseError::invalid_json(
@@ -78,11 +70,25 @@ pub async fn handle(
                 "batch request path must be a string",
             ));
         };
+        checked.push((request, path));
+    }
+    // A second pass, as upstream's is a second loop: every path is a string before any is
+    // routed or any method normalized.
+    let mut parsed = Vec::with_capacity(checked.len());
+    for (request, path) in checked {
         let routable = routable_path(path, mount_path)?;
         // `(restRequest.method || 'GET').toUpperCase()`: the nested-batch check normalizes the
-        // method. Routing, below, does not.
+        // method. Routing, below, does not. A truthy method that is not a string has no
+        // `toUpperCase`, so upstream's pre-flight throws a `TypeError` before any sub-request runs
+        // and the batch is a bare 500 (`batch.js:106`). Converting it to text instead made
+        // `"method": ["DELETE"]` an executable delete.
         let normalized = match request.get("method") {
             Some(Json::String(m)) if !m.is_empty() => m.to_uppercase(),
+            Some(m) if js_truthy(m) => {
+                return Err(ParseError::internal(
+                    "batch sub-request method is not a string".to_string(),
+                ));
+            }
             _ => "GET".to_string(),
         };
         if normalized == "POST" && routable == BATCH_PATH {
@@ -111,6 +117,15 @@ pub async fn handle(
     //
     // The method is matched exactly as sent, as `PromiseRouter.match` compares it
     // (`PromiseRouter.js:90-93`), so `post` and a missing method do not route.
+    // Where upstream opens its transactional session: after every check of the batch's shape, so a
+    // malformed transactional batch answers as a malformed batch (`batch.js:154-157`).
+    if matches!(body.get("transaction"), Some(Json::Bool(true))) {
+        return Err(ParseError::new(
+            ErrorCode::CommandUnavailable,
+            "Batch transactions are not supported yet. Retry without `transaction: true`; \
+             the sub-requests will be applied independently and reported per operation.",
+        ));
+    }
     let mut runnable = Vec::with_capacity(parsed.len());
     let mut unroutable = None;
     for (method, path, body) in parsed {
@@ -122,6 +137,31 @@ pub async fn handle(
             }
         }
     }
+    // Every class the sub-requests that will run name is in the snapshot before any of them runs,
+    // as a direct request's is. Taking the cache as it stood let a sub-request read or write a
+    // class another server had created since with no CLP at all, which is unrestricted.
+    let mut classes: Vec<String> = Vec::new();
+    let mut reload = false;
+    for ((_, route), _, _) in &runnable {
+        match route.schema_freshness() {
+            crate::schema_cache::Freshness::Containing(class) => {
+                if !classes.iter().any(|c| c == class) {
+                    classes.push(class.to_string());
+                }
+            }
+            crate::schema_cache::Freshness::Reload => reload = true,
+            _ => {}
+        }
+    }
+    if reload || !classes.iter().all(|c| rc.snapshot.contains(c)) {
+        let freshness = if reload {
+            crate::schema_cache::Freshness::Reload
+        } else {
+            crate::schema_cache::Freshness::ContainingAll(&classes)
+        };
+        rc.snapshot = state.schema_snapshot(freshness).await?;
+    }
+    let rc: &RequestContext = rc;
     let results = futures::future::join_all(runnable.iter().map(|(route, path, body)| {
         run_one(state, rc, authority, route.clone(), path, body.as_ref())
     }))
@@ -130,6 +170,17 @@ pub async fn handle(
         return Err(ParseError::invalid_json(message));
     }
     Ok(Json::Array(results))
+}
+
+/// JavaScript truthiness, for the `||` in the method normalization.
+fn js_truthy(value: &Json) -> bool {
+    match value {
+        Json::Null => false,
+        Json::Bool(b) => *b,
+        Json::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
+        Json::String(s) => !s.is_empty(),
+        Json::Array(_) | Json::Object(_) => true,
+    }
 }
 
 /// `restRequest.method` as JavaScript would print it in `'cannot route ' + method`.
@@ -177,6 +228,7 @@ async fn run_one(
 ) -> Json {
     // A sub-request has no URL, so its query parameters are its body. That is why upstream's
     // `handleFind` merges the two before reading either (`ClassesRouter.js:23`).
+    let method_of_incoming = method.clone();
     let params = if matches!(method, http::Method::GET | http::Method::DELETE) {
         Params::from_json(body)
     } else {
@@ -188,9 +240,29 @@ async fn run_one(
         route,
         path: path.to_string(),
         params,
-        body: body.cloned(),
+        // An absent sub-request body reaches upstream's handlers as `undefined`, and a write reads
+        // that as no fields (`batch.js:167`), so it is the empty object here.
+        body: match body {
+            Some(b) => Some(b.clone()),
+            None if !matches!(method_of_incoming, http::Method::GET | http::Method::DELETE) => {
+                Some(Json::Object(serde_json::Map::new()))
+            }
+            None => None,
+        },
     };
-    match dispatch::dispatch(state, rc, authority, &incoming).await {
+    let mut outcome = dispatch::dispatch(state, rc, authority, &incoming).await;
+    // As over HTTP: a read that reached a class the batch's snapshot predates runs again on a
+    // rebuilt one. Only that sub-request; the others keep the snapshot they share.
+    if matches!(&outcome, Err(RouteError::Parse(e)) if e.is_schema_stale()) {
+        outcome = match state
+            .request_context(authority, crate::schema_cache::Freshness::Reload)
+            .await
+        {
+            Ok(fresh) => dispatch::dispatch(state, &fresh, authority, &incoming).await,
+            Err(e) => Err(RouteError::Parse(e)),
+        };
+    }
+    match outcome {
         Ok(response) => json!({ "success": response.body }),
         // A sub-request's failure is rendered as `{code, error}` (`batch.js:176-178`). parse-rust
         // withholds the detail of an internal error on every path, inside a batch as well as
@@ -235,12 +307,22 @@ fn routable_path(path: &str, mount_path: &str) -> Result<String, ParseError> {
         )));
     };
     // `path.posix.join('/', x)`: a leading slash is guaranteed and a trailing one is dropped
-    // unless the whole path is `/`.
-    let trimmed = rest.trim_matches('/');
-    if trimmed.is_empty() {
+    // unless the whole path is `/`. The join also normalizes, so `.` segments go and `..` removes
+    // the segment before it, never climbing above the root.
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    if segments.is_empty() {
         return Ok("/".to_string());
     }
-    Ok(format!("/{trimmed}"))
+    Ok(format!("/{}", segments.join("/")))
 }
 
 #[cfg(test)]
@@ -257,6 +339,23 @@ mod tests {
         assert_eq!(
             routable_path("/classes/Post", "/").expect("routes"),
             "/classes/Post"
+        );
+    }
+
+    /// `path.posix.join` normalizes, so dot segments resolve before routing.
+    #[test]
+    fn dot_segments_resolve_as_a_posix_join_does() {
+        assert_eq!(
+            routable_path("/parse/./classes/../classes/Dot", "/parse").expect("routes"),
+            "/classes/Dot"
+        );
+        assert_eq!(
+            routable_path("/parse/../../classes/X", "/parse").expect("routes"),
+            "/classes/X"
+        );
+        assert_eq!(
+            routable_path("/parse/classes/..", "/parse").expect("routes"),
+            "/"
         );
     }
 

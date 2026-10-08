@@ -136,6 +136,10 @@ impl StorageAdapter for FakeStorage {
         Ok(self.lock().schemas.values().cloned().collect())
     }
 
+    async fn class_exists(&self, class_name: &str) -> Result<bool, ParseError> {
+        Ok(self.lock().schemas.contains_key(class_name))
+    }
+
     async fn insert_schema(&self, schema: &ClassSchema) -> Result<(), ParseError> {
         let mut state = self.lock();
         if state.schemas.contains_key(&schema.class_name) {

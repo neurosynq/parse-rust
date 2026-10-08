@@ -17,11 +17,14 @@ The conformance milestone. parse-rust is now measured against parse-server's own
 than only against tests this project wrote for itself, and the reference is parse-server **9.10.3**,
 a release, where 0.2.x was measured against a 9.10.1 alpha.
 
-**Two authorization fixes apply to 0.2.0 and 0.2.1, and they are the reason to take this release
+**Five authorization fixes apply to 0.2.0 and 0.2.1, and they are the reason to take this release
 promptly.** A `_User` update now checks that the caller may write the target account before it
-reads anything about it, as parse-server 9.10.3 does (GHSA-p49q-9w65-f9p7). And `ACL` values on a
+reads anything about it, as parse-server 9.10.3 does (GHSA-p49q-9w65-f9p7). `ACL` values on a
 create are now lowered exactly as parse-server lowers them, so the stored permissions match
-parse-server's for every shape a client can send.
+parse-server's for every shape a client can send. Credentials in a request body are read exactly
+where parse-server reads them. A session token whose user no longer exists is refused with 209
+`Invalid session token`, as parse-server refuses it. And a client delete is accepted only on a class
+whose name a client could use.
 
 ### Added
 
@@ -60,8 +63,8 @@ parse-server's for every shape a client can send.
   present, as it does upstream. The deduplication that follows upstream is not implemented.
 - **A schema cache.** Every request read `_SCHEMA` before its own query; it is now served from
   memory, as parse-server serves it. A schema change made through this server applies to the next
-  request; a class another server created is loaded the first time a request names it; `GET
-  /schemas` reloads. A change another server makes to a class already loaded waits for
+  request; a class another server created is loaded the first time a request names it, along with
+  every other class; `GET /schemas` reloads. A change another server makes to a class already loaded waits for
   `databaseOptions.schemaCacheTtl` (milliseconds, `PARSE_SERVER_DATABASE_SCHEMA_CACHE_TTL`) or a
   restart, which is parse-server's behavior between its own nodes. Unset, the cache never expires,
   as upstream's does. `enableSchemaHooks` is refused at boot rather than accepted, because the
@@ -77,15 +80,49 @@ parse-server's for every shape a client can send.
 
 ### Changed
 
+- **`keys` naming a dotted path includes its parent**, as upstream forces the include, so
+  `keys=author.name` returns `author` with only `name`.
+- **A `where` is checked where upstream checks it.** A bad operand is refused after the CLP gate
+  and not on a `limit=0` read; `$in`, `$nin` and `$all` with a non-array, and an unknown operator,
+  are 107; `$exists` follows MongoDB's truthiness; a scalar or `null` `where` answers as upstream's
+  does.
+- **`order`** accepts `_created_at` and `_updated_at` as `createdAt` and `updatedAt`, and keeps the
+  first position of a repeated key.
+- **A `null` pointer** reads back as upstream's does: present as `null` after a create, absent after
+  an update.
+- **`userField:` rules** match a pointer inside an array.
+
+- **Routing follows the effective method on every path.** A known path with a method it does not
+  serve answers 404, as an Express router does, where it answered 405. A `POST` whose `_method`
+  names a served method reaches it on every route, `/serverInfo` included, and one that names no
+  valid method is a 404 rather than a `POST`. `/health` answers any method.
+- **A write with no body is the empty object**, as body-parser's empty body is, so a body-less
+  create, update, schema create, signup or batch sub-request runs rather than being refused. A body
+  that is not JSON answers 400 `{error}`, body-parser's envelope; the message is this parser's.
+- **A create answers with `Location`**, the new object's URL: the request's host and mount, then
+  `/users/<id>` for a `_User` or `/classes/<className>/<id>`.
+- **Schema field options are applied.** A create missing a field marked `required`, or sending it
+  as `null`, `""` or a `Delete`, is 142 `<field> is required`, and so is an update that clears one.
+  A field with a `defaultValue` that a create leaves out or deletes takes the default, which the
+  response reports, as it reports a default ACL.
+- **`/batch` validates before it refuses a transaction**, so a malformed transactional batch is
+  reported as malformed, and sub-request paths are normalized as a POSIX join normalizes them, `.`
+  and `..` included.
 - **An unroutable `/batch` sub-request fails the whole batch** with 400 and 107
   `cannot route <method> <path>`, as upstream's router does; the sub-requests before it have run and
   the ones after it do not. The method is matched as sent, so a lower-case or missing method does
   not route, and neither does `/health`, which upstream mounts outside its router. Each was
-  reported per item before.
+  reported per item before. A sub-request method that is not a string fails the whole batch with a 500 before
+  any of it runs, as upstream's does; 0.2.x ran it as a `GET`.
 - **`/batch` sub-requests run concurrently, and so do the queries of an `include`**, as upstream
   runs them. A batch's results stay in request order. Two sub-requests touching the same object
   have no defined order between them, which is upstream's behavior and never was a guarantee. An
   include queries every path of one depth at once, and a deeper path after the depth above it.
+- **`include` expands through an array of pointers**, as upstream's does: a pointer stored inside
+  an array, which comes back from storage as a plain `{"__type":"Pointer"}` object, is expanded
+  like a pointer field. It was returned as the raw pointer.
+- **A request body over 20 MB is refused with `413 {"error":"request entity too large"}`**, which
+  is Express's answer at upstream's default `maxUploadSize`. It reached its route as an empty body.
 - **The MongoDB connection pool defaults to 100 connections**, the Node driver's default and so
   parse-server's, where the Rust driver's is 10. A `maxPoolSize` in the connection URI still wins.
 - **`GET /login` is served**, and so is the SDK's `POST` with `_method: "GET"`. A login reads its
@@ -160,8 +197,14 @@ parse-server's for every shape a client can send.
 ### Deliberate differences
 
 - Protected fields are enforced across more of the read path.
+- A client delete is accepted only on a class whose name a client could use.
+- A create sending `null` for a field that is both `required` and has a `defaultValue` is 142
+  `<field> is required`. parse-server answers a 500 there.
 - The on-demand geo index is built only for a field declared as a GeoPoint. A geo query on any
   other field fails.
+- A request naming a class the schema cache lacks and `_SCHEMA` does not have keeps the cache.
+  parse-server reloads every class on any miss; parse-rust reloads them when the class exists,
+  which means another server changed the schema, and otherwise answers from the cache it has.
 - `databaseOptions.enableSchemaHooks: true` is refused at boot. parse-server accepts it and
   invalidates its schema cache from a change stream, which parse-rust does not implement;
   `schemaCacheTtl` bounds staleness instead.
@@ -211,7 +254,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
 ### Fixed
 
 - **`masterKeyIps` is enforced, at upstream's default of `['127.0.0.1', '::1']`**
-  (`Options/Definitions.js:396-399`, `middlewares.js:452`). The option was unimplemented, and its
+  (`Options/Definitions.js:402-405`, `middlewares.js:452`). The option was unimplemented, and its
   default is a control rather than a convenience, so an absent implementation was an open one. A
   master key presented from an address outside the list is refused with upstream's bare 403
   `unauthorized` and is **not** demoted to an ordinary client request, matching upstream, which
@@ -237,7 +280,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
     throws on the first master-key request; here it stops the server and names the entry.
   - **No `PARSE_SERVER_MAINTENANCE_KEY_IPS`, and that is a parse-rust CLI limitation rather than a
     gap upstream.** The pin defines both `PARSE_SERVER_MAINTENANCE_KEY` and
-    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:381`, `:386`). This binary exposes
+    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:387`, `:386`). This binary exposes
     neither, because master and maintenance are still one scope internally, so shipping the key
     through the CLI would advertise an authority the server only partly distinguishes. Both are
     reachable through `ServerConfig`.
@@ -247,7 +290,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
     whether the request is refused at all.
 - **A `_User` whose `ACL` is not a principal map is no longer created world-readable.** Upstream
   runs two tests on it, `if (!ACL) { ACL = {}; }` and then `ACL[objectId] = {read, write}`
-  (`RestWrite.js:1676-1686`), and both were read as "is it an object" here:
+  (`RestWrite.js:1815-1825`), and both were read as "is it an object" here:
   - `null`, `false`, `0` and `""` are **falsy**, so they mean "no ACL" and get the owner-only ACL
     an absent one gets.
   - An op envelope, an array and a tagged value are all **JavaScript objects**, so they receive the
@@ -267,7 +310,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   left as sent and is master-only; upstream throws a `TypeError` and answers a bare 500 there, so
   there is no answer worth reproducing.
 - **A `_User` update can no longer strip the owner's own access.** `force_owner_into_acl` re-adds
-  the owner entry for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1590-1599`)
+  the owner entry for every non-privileged update carrying a truthy `ACL` (`RestWrite.js:1729-1738`)
   and it handled a principal map and `{"__op":"Delete"}` and nothing else. Every other truthy shape
   reached the lowering, which cleared both permission columns, and a `_User` with empty permissions
   is a row its owner can no longer read, write or log in with. **Any principal permitted to write a
@@ -279,7 +322,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   arrays keep the owner now but still lose their numeric-index principals, as recorded below.
 - **A truthy non-string `objectId` with an inferable schema type on a `_User` create is refused
   rather than replaced.** Upstream's substitution test is `if (!this.data.objectId)`
-  (`RestWrite.js:429-431`), so a truthy id survives to the type check and, for numbers, booleans,
+  (`RestWrite.js:489-491`), so a truthy id survives to the type check and, for numbers, booleans,
   arrays, tagged values, ordinary objects and typed operations, answers `INCORRECT_TYPE`. Reading
   "not a string" as "absent" generated one instead: measured at the pin with
   `allowCustomObjectId` enabled and a body of `{"objectId": 123}`, upstream answered 400 code 111
@@ -293,7 +336,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   was gone before the permission columns were computed and none were written. Upstream keeps the op
   object and writes two **empty** arrays, which is master-only. Measured at the pin on an ordinary
   class: an anonymous read of the created object answered 200 here and 404 upstream.
-- **A CLP-declared default ACL is applied on create** (`RestWrite.js:378-395`). The setting was
+- **A CLP-declared default ACL is applied on create** (`RestWrite.js:438-455`). The setting was
   accepted by `POST /schemas`, stored, and echoed back by `GET /schemas`, and nothing ever read it,
   so every object in the class was created with no `_rperm` or `_wperm` columns and an absent
   `_rperm` is public. The class said private and the data was world-readable, which is worse than
@@ -305,7 +348,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
   one.
 - **The create response carries the ACL the server generated.** It is the only way a client learns
   what permissions its object was given, and on a private class it cannot read the row back to find
-  out. Upstream marks the field server-changed and returns it (`RestWrite.js:394`), including the
+  out. Upstream marks the field server-changed and returns it (`RestWrite.js:454`), including the
   empty `{}` an anonymous create produces once `currentUser` has nobody to resolve to.
 
 ### Changed
@@ -477,7 +520,7 @@ route list in them is exhaustive. Treat any Parse Server endpoint not named ther
   upstream's, plus the legacy `_expiresAt` spelling.
 - **`emailVerified` was accepted on signup.** Upstream refuses it on any `_User` write through
   `checkRestrictedFields`, which sits in the chain both create and update run
-  (`RestWrite.js:116`, `:716-728`), so the create half was an omission rather than a decision: a
+  (`RestWrite.js:119`, `:716-728`), so the create half was an omission rather than a decision: a
   client could mark its own address verified at signup. Both paths now refuse it. `authData` is
   refused alongside it, which is a deliberate difference rather than restored parity, and is
   recorded as one below: upstream accepts `authData` on signup and validates it through the auth
@@ -564,7 +607,7 @@ route list in them is exhaustive. Treat any Parse Server endpoint not named ther
   client naming the same field the server was about to constrain, its own session's `user` or the
   pointer field a `pointerFields` entry names, got `INVALID_QUERY` `conflicting constraints` where
   upstream returns the row. Both now nest under `$and`, which is what upstream does and for the
-  same reason (`DatabaseController.js:1806-1811`, `RestQuery.js:121-131`).
+  same reason (`DatabaseController.js:1808-1811`, `RestQuery.js:121-131`).
 - **`enforceRoleSecurity` saw the wrong method.** The read method was derived from the query shape
   rather than taken from the route, so a `find` whose `where` pinned one objectId, and every
   `include` regardless of size, were checked as a `get`. Clients may `get` an installation and may

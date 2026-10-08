@@ -55,6 +55,22 @@ fn in_flight() -> &'static InFlight {
     IN_FLIGHT.get_or_init(Mutex::default)
 }
 
+/// `f`, still counted against the current request when it runs on another task.
+///
+/// A task-local does not follow `tokio::spawn`, and the server runs each request's work on its own
+/// task so that a client disconnect cannot cancel it. Without this, that work's commands would be
+/// attributed to no request.
+pub fn carry<F>(f: F) -> std::pin::Pin<Box<dyn std::future::Future<Output = F::Output> + Send>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send,
+{
+    match REQUEST.try_with(Arc::clone) {
+        Ok(tally) => Box::pin(REQUEST.scope(tally, f)),
+        Err(_) => Box::pin(f),
+    }
+}
+
 /// Run `f` as one request, and report what it spent in the database.
 pub async fn scope<F: std::future::Future>(f: F) -> (F::Output, DbSummary) {
     let tally = Arc::new(Tally::default());

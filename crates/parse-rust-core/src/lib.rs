@@ -9,8 +9,9 @@
 //! equality predicate rather than the obvious Rust defaults for each. See
 //! the modules below, each of which states the upstream behavior it reproduces.
 //!
-//! Citations of the form `File.js:LINE` refer to parse-server at pin `ca75b1fe`, recorded in
-//! `PIN` at the repository root. Read them with `git -C ../parse-server show ca75b1fe:<path>`.
+//! Citations of the form `File.js:LINE` refer to parse-server at the commit recorded in `PIN` at
+//! the repository root, which is not restated here so it cannot go stale. Read them with
+//! `git -C ../parse-server show $(awk '/^parse-server /{print $3}' PIN):<path>`.
 
 #![forbid(unsafe_code)]
 // "No `unwrap()` or `panic!()` in request paths": a malformed request from an untrusted client

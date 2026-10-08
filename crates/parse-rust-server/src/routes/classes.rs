@@ -26,6 +26,11 @@ use crate::state::AppState;
 /// layer matters.
 pub const SESSION_CLASS: &str = "_Session";
 
+/// [`body_of`] for a row that is not needed afterwards, which a find's results are not.
+pub fn into_body(row: ParseMap) -> Json {
+    ParseValue::Object(parse_rust_rest::into_response_body(row)).to_serde_json()
+}
+
 /// Convert a Parse-format map into a JSON response body.
 ///
 /// Strips every `_`-prefixed key and flattens the top-level timestamps. This is the single audit
@@ -33,7 +38,7 @@ pub const SESSION_CLASS: &str = "_Session";
 /// produces.
 pub fn body_of(row: &ParseMap) -> Json {
     let row = parse_rust_rest::to_response_body(row);
-    serde_json::from_str(&ParseValue::Object(row).to_json()).unwrap_or(Json::Null)
+    ParseValue::Object(row).to_serde_json()
 }
 
 /// Decode a JSON request body into a write body.
@@ -83,7 +88,8 @@ pub async fn find_core(
     }
 
     let where_ = match where_json {
-        Some(value) => parse_rust_rest::parse_where(&value)?,
+        // Read as upstream reads it, with any failure carried to upstream's position.
+        Some(value) => parse_rust_rest::parse_client_where(&value),
         None => parse_rust_rest::ParsedWhere::default(),
     };
     let options = params.find_options(&state.config().limit_policy())?;
@@ -107,7 +113,7 @@ pub async fn find_core(
         json!({ "results": explained })
     } else {
         let results = parse_rust_rest::find(&ctx, class_name, where_.clone(), options).await?;
-        json!({ "results": results.iter().map(body_of).collect::<Vec<_>>() })
+        json!({ "results": results.into_iter().map(into_body).collect::<Vec<_>>() })
     };
     if wants_count {
         let n = parse_rust_rest::count(&ctx, class_name, where_, &order, &count_options).await?;
@@ -370,6 +376,29 @@ pub async fn delete_core(
     class_name: &str,
     object_id: &str,
 ) -> Result<Json, ParseError> {
+    // Upstream's refusals of a `_User` delete that parse-rust would refuse anyway, with upstream's
+    // codes. An anonymous caller is `SESSION_MISSING` before any class check, unsanitized
+    // (`rest.js:168-170`). Another user's row is not found under the caller's ACL and
+    // `handleSessionMissingError` reports that as `SESSION_MISSING` too (`rest.js:316-331`). An
+    // owner deleting their own row still meets the class refusal below.
+    if class_name == crate::routes::users::USER_CLASS && !authority.is_privileged() {
+        match rc.user_id.as_deref() {
+            None => {
+                return Err(ParseError::new(
+                    ErrorCode::SessionMissing,
+                    "Insufficient auth to delete user",
+                ))
+            }
+            Some(uid) if uid != object_id => {
+                return Err(crate::routes::users::as_session_missing(
+                    ParseError::new(ErrorCode::ObjectNotFound, "Object not found."),
+                    rc,
+                    authority,
+                ))
+            }
+            Some(_) => {}
+        }
+    }
     parse_rust_rest::enforce_class_security(
         class_name,
         authority.is_privileged(),

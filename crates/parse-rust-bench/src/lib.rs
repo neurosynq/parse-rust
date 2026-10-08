@@ -24,9 +24,10 @@ pub const SCHEMA: &str = "parse-rust-bench/1";
 /// The only verdict 0.3.0 may write.
 pub const VERDICT: &str = "baseline-unclassified";
 
-/// The nine frozen corpora: three sizes in three shapes.
+/// The twelve frozen corpora: three sizes in four shapes. `dated` was added on 2026-10-07, last,
+/// so its seeds are new and the nine before it kept their bytes.
 pub const SIZES: [&str; 3] = ["200b", "2kb", "8kb"];
-pub const SHAPES: [&str; 3] = ["flat", "nested", "pointers"];
+pub const SHAPES: [&str; 4] = ["flat", "nested", "pointers", "dated"];
 
 /// Where the committed corpora live.
 pub fn corpus_dir() -> PathBuf {

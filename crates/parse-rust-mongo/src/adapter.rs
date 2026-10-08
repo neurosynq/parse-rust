@@ -112,6 +112,21 @@ impl MongoAdapter {
         self.schema_epoch.load(Ordering::Acquire)
     }
 
+    /// Does `_SCHEMA` hold any of these classes? One query, by `_id`, however many are named.
+    pub async fn any_class_exists(&self, class_names: &[&str]) -> Result<bool, ParseError> {
+        if class_names.is_empty() {
+            return Ok(false);
+        }
+        let found = self
+            .db
+            .collection::<Document>(SCHEMA_COLLECTION)
+            .find_one(doc! { "_id": { "$in": class_names } })
+            .projection(doc! { "_id": 1 })
+            .await
+            .map_err(mongo_err)?;
+        Ok(found.is_some())
+    }
+
     fn schema_write(&self) -> SchemaWrite<'_> {
         SchemaWrite(&self.schema_epoch)
     }
@@ -498,6 +513,15 @@ impl MongoAdapter {
         }
         if let Some(limit) = options.limit {
             find = find.limit(i64::from(limit));
+            // The whole page in the first reply. Without it the Rust driver's first batch stops at
+            // 101 documents and a 1,000-row page costs a `getMore` round trip that parse-server's
+            // read does not make. Bounded by the limit, which `maxLimit` already caps.
+            // Capped below the driver's range, a signed 32-bit count, which a `limit` of 1e12
+            // exceeds. One below, because a batch size equal to the limit is sent as one more, so
+            // the cursor closes with its last batch. Each reply is held to 16 MB by the server.
+            if limit > 0 {
+                find = find.batch_size(limit.min(i32::MAX as u32 - 1));
+            }
         }
         // `find` has refused a negative skip by now; see there.
         if let Some(skip) = options.skip.and_then(|s| u64::try_from(s).ok()) {
@@ -651,7 +675,63 @@ fn find_geo_index_field(query: &Document) -> Option<String> {
     None
 }
 
+/// One `_SCHEMA` document as a class schema, or `None` for a document with no string `_id`.
+fn schema_from_document(doc: &Document) -> Result<Option<ClassSchema>, ParseError> {
+    let Some(class_name) = doc.get_str("_id").ok() else {
+        return Ok(None);
+    };
+    let mut schema = parse_rust_schema::default_schema(class_name);
+    for (key, value) in doc {
+        if NON_FIELD_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let Bson::String(type_str) = value else {
+            continue;
+        };
+        // An unrecognised type string is skipped rather than erroring, which is what
+        // upstream's missing default case amounts to. A mixed fleet can contain one.
+        if let Some(ty) = storage_to_field_type(type_str) {
+            schema.fields.insert(key.clone(), ty);
+        }
+    }
+
+    if let Ok(metadata) = doc.get_document("_metadata") {
+        // **Only when the key is present.** Absent stays `None`, and `None` is not
+        // "public": upstream reads an absent block back as `defaultCLPS`, a fully open
+        // document including an `ACL` key that the present-but-partial case never carries
+        // (`MongoSchemaCollection.js:95-101`). Materializing that default into the struct
+        // would make an absent block indistinguishable from an explicitly-public one, and
+        // the next write-back would then store a block parse-server never had, turning an
+        // unset CLP into a set one for every node reading the same database.
+        if let Ok(class_permissions) = metadata.get_document("class_permissions") {
+            schema.clp = Some(ClassLevelPermissions::from_map(merge_over_empty_clps(
+                class_permissions,
+            )?));
+        }
+        // Round-tripped verbatim and never interpreted.
+        if let Ok(indexes) = metadata.get_document("indexes") {
+            schema.indexes = Some(bson_document_to_parse_map(indexes)?);
+        }
+        if let Ok(fields_options) = metadata.get_document("fields_options") {
+            schema.field_options = Some(bson_document_to_parse_map(fields_options)?);
+        }
+    }
+    Ok(Some(schema))
+}
+
 impl StorageAdapter for MongoAdapter {
+    /// By `_id` alone, from the collection's own index.
+    async fn class_exists(&self, class_name: &str) -> Result<bool, ParseError> {
+        let found = self
+            .db
+            .collection::<Document>(SCHEMA_COLLECTION)
+            .find_one(doc! { "_id": class_name })
+            .projection(doc! { "_id": 1 })
+            .await
+            .map_err(mongo_err)?;
+        Ok(found.is_some())
+    }
+
     async fn all_schemas(&self) -> Result<Vec<ClassSchema>, ParseError> {
         let mut cursor = self
             .db
@@ -662,47 +742,9 @@ impl StorageAdapter for MongoAdapter {
 
         let mut out = Vec::new();
         while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-            let Some(class_name) = doc.get_str("_id").ok() else {
-                continue;
-            };
-            let mut schema = parse_rust_schema::default_schema(class_name);
-            for (key, value) in &doc {
-                if NON_FIELD_KEYS.contains(&key.as_str()) {
-                    continue;
-                }
-                let Bson::String(type_str) = value else {
-                    continue;
-                };
-                // An unrecognised type string is skipped rather than erroring, which is what
-                // upstream's missing default case amounts to. A mixed fleet can contain one.
-                if let Some(ty) = storage_to_field_type(type_str) {
-                    schema.fields.insert(key.clone(), ty);
-                }
+            if let Some(schema) = schema_from_document(&doc)? {
+                out.push(schema);
             }
-
-            if let Ok(metadata) = doc.get_document("_metadata") {
-                // **Only when the key is present.** Absent stays `None`, and `None` is not
-                // "public": upstream reads an absent block back as `defaultCLPS`, a fully open
-                // document including an `ACL` key that the present-but-partial case never carries
-                // (`MongoSchemaCollection.js:95-101`). Materializing that default into the struct
-                // would make an absent block indistinguishable from an explicitly-public one, and
-                // the next write-back would then store a block parse-server never had, turning an
-                // unset CLP into a set one for every node reading the same database.
-                if let Ok(class_permissions) = metadata.get_document("class_permissions") {
-                    schema.clp = Some(ClassLevelPermissions::from_map(merge_over_empty_clps(
-                        class_permissions,
-                    )?));
-                }
-                // Round-tripped verbatim and never interpreted.
-                if let Ok(indexes) = metadata.get_document("indexes") {
-                    schema.indexes = Some(bson_document_to_parse_map(indexes)?);
-                }
-                if let Ok(fields_options) = metadata.get_document("fields_options") {
-                    schema.field_options = Some(bson_document_to_parse_map(fields_options)?);
-                }
-            }
-
-            out.push(schema);
         }
         Ok(out)
     }
@@ -1446,11 +1488,41 @@ fn index_model_fields(model: &IndexModel) -> IndexFields {
             }
         }
     }
+    // A partial index's filter fields are fields it reads, as its keys are.
+    if let Some(filter) = options.and_then(|o| o.partial_filter_expression.as_ref()) {
+        let mut columns = Vec::new();
+        filter_columns(filter, &mut columns);
+        for column in columns {
+            push(parse_field_of_column(&column));
+        }
+    }
     IndexFields {
         name,
         columns,
         fields,
         text,
+    }
+}
+
+/// Every column a filter document names at its top level or inside `$and`, `$or` or `$nor`.
+///
+/// Only those three hold further filter documents. Everything under a field is about that field,
+/// so a literal array or object in its operand (`{tags: {$in: [{a: 1}]}}`, `{loc: {$elemMatch:
+/// {x: 1}}}`) names no other column, and treating its keys as columns refused queries the index
+/// does not affect.
+fn filter_columns(filter: &Document, out: &mut Vec<String>) {
+    for (key, value) in filter {
+        match (key.as_str(), value) {
+            ("$and" | "$or" | "$nor", Bson::Array(items)) => {
+                for item in items {
+                    if let Bson::Document(inner) = item {
+                        filter_columns(inner, out);
+                    }
+                }
+            }
+            (k, _) if k.starts_with('$') => {}
+            _ => out.push(key.clone()),
+        }
     }
 }
 
@@ -1632,6 +1704,29 @@ mod index_field_tests {
         assert!(listed.text);
         assert_eq!(listed.fields, ["title", "secret"]);
         assert_eq!(listed.columns, ["_fts", "_ftsx"]);
+    }
+
+    #[test]
+    fn a_partial_index_reads_its_filter_fields() {
+        let mut options = IndexOptions::builder().name("n_where".to_string()).build();
+        options.partial_filter_expression = Some(doc! {
+            "salary": { "$gt": 100 },
+            "$or": [ { "_p_manager": { "$exists": true } }, { "dept.code": "x" } ],
+            // Operands are about their own field and name no other column.
+            "tags": { "$in": [ { "secret": 1 } ] },
+            "loc": { "$elemMatch": { "inner": 1 } },
+        });
+        let listed = index_model_fields(
+            &IndexModel::builder()
+                .keys(doc! { "n": 1 })
+                .options(options)
+                .build(),
+        );
+        assert_eq!(
+            listed.fields,
+            ["n", "salary", "manager", "dept", "tags", "loc"]
+        );
+        assert_eq!(listed.columns, ["n"], "the filter is not a sort key");
     }
 
     #[test]

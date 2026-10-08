@@ -324,3 +324,45 @@ async fn the_batch_request_limit_is_disabled_by_default_and_master_bypasses_it()
         allowed.raw
     );
 }
+
+/// A truthy method that is not a string fails the whole batch before anything runs, as upstream's
+/// `toUpperCase` throws on it (`batch.js:106`). Converting it to text made `["DELETE"]` delete.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_non_string_method_runs_nothing() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let made = post(host, "/classes/Kept", &As::anonymous(), &json!({"a": 1})).await;
+    let id = made.body["objectId"]
+        .as_str()
+        .expect("objectId")
+        .to_string();
+
+    for method in [
+        json!(["DELETE"]),
+        json!({"m": "DELETE"}),
+        json!(1),
+        json!(true),
+    ] {
+        let r = post(
+            host,
+            "/batch",
+            &As::anonymous(),
+            &json!({"requests": [
+                {"method": "POST", "path": "/parse/classes/Kept", "body": {"a": 2}},
+                {"method": method, "path": format!("/parse/classes/Kept/{id}")},
+            ]}),
+        )
+        .await;
+        assert_eq!(r.status, 500, "{method}: {}", r.raw);
+        assert_eq!(r.code(), Some(1), "{method}: {}", r.raw);
+    }
+    assert_eq!(
+        get(host, &format!("/classes/Kept/{id}"), &As::anonymous())
+            .await
+            .status,
+        200
+    );
+    let rows = get(host, "/classes/Kept", &As::anonymous()).await.results();
+    assert_eq!(rows.len(), 1, "no sub-request of a refused batch may run");
+}

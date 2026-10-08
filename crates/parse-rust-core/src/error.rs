@@ -138,6 +138,11 @@ pub struct ParseErrorInfo {
     /// attaches the `.catch` that rewrites storage failures (`DatabaseController.js:1583-1596`).
     /// [`ParseError::before_query`] sets it, and the read path leaves such an error as it is.
     pub before_query: bool,
+    /// A read reached a class its request's schema snapshot lacks, and `_SCHEMA` has it: another
+    /// server created the class after the snapshot was taken. Never sent to a client. The server
+    /// rebuilds its schema cache and runs the read again, as upstream's `getOneSchema` reloads on
+    /// a miss (`SchemaController.js:812-822`). Without it the read would run under no CLP at all.
+    pub schema_stale: bool,
 }
 
 /// A Parse error: a code plus a message, plus how much of it may be seen.
@@ -199,6 +204,19 @@ impl ParseError {
     pub fn before_query(mut self) -> Self {
         self.info.before_query = true;
         self
+    }
+
+    /// See [`ParseErrorInfo::schema_stale`].
+    pub fn schema_stale(class_name: &str) -> Self {
+        let mut e = Self::internal(format!(
+            "schema snapshot lacks class {class_name}, which now exists"
+        ));
+        e.info.schema_stale = true;
+        e
+    }
+
+    pub fn is_schema_stale(&self) -> bool {
+        self.info.schema_stale
     }
 
     /// The field whose unique index collided, if the adapter could recover it.

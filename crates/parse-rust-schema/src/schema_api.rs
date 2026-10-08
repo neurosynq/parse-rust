@@ -1017,7 +1017,7 @@ mod tests {
             opts(),
         )
         .expect("valid");
-        // Stored, not enforced. The 0.2.0 contract in one assertion.
+        // Stored, not enforced, as 0.2.0 shipped it.
         let stored = s.field_options.expect("options stored");
         assert!(stored.contains_key("views"));
     }

@@ -110,10 +110,14 @@ pub fn flatten_top_level_dates(row: &mut ParseMap) {
 ///
 /// One function so there is exactly one place to audit, and no route can apply half of it.
 pub fn to_response_body(row: &ParseMap) -> ParseMap {
-    let mut out = row.clone();
-    strip_internal_keys(&mut out);
-    flatten_top_level_dates(&mut out);
-    out
+    into_response_body(row.clone())
+}
+
+/// [`to_response_body`] for a row the caller no longer needs, without copying it.
+pub fn into_response_body(mut row: ParseMap) -> ParseMap {
+    strip_internal_keys(&mut row);
+    flatten_top_level_dates(&mut row);
+    row
 }
 
 #[cfg(test)]

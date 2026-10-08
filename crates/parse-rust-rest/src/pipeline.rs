@@ -41,7 +41,7 @@ use crate::clp::{
     ProtectedFieldPlan, WriteAction,
 };
 use crate::include;
-use crate::query_parse::{ParsedClause, ParsedWhere};
+use crate::query_parse::{DeferredWhere, ParsedClause, ParsedWhere};
 use crate::relations::{self, RelationConstraint};
 use crate::snapshot::SchemaSnapshot;
 use crate::write::{
@@ -243,6 +243,8 @@ fn zero_limit_checks<S: StorageAdapter>(
             &options.order,
             ctx.options.error_detail,
         )?;
+        // `denyProtectedFields` runs before the `limit=0` answer, so this refusal does too.
+        deny_malformed_logical(&where_, ctx.options.error_detail)?;
     }
     Ok(())
 }
@@ -427,6 +429,7 @@ fn narrow_sessions(
                 object_id: user_id.to_string(),
             },
         ))],
+        deferred: None,
     };
     // `$and: [restWhere, {user}]` and not a pushed constraint (`RestQuery.js:121-131`). A client
     // is free to send its own `user` constraint, and two equalities on one field spliced side by
@@ -435,19 +438,47 @@ fn narrow_sessions(
     //
     // The one departure: an empty `restWhere` is dropped rather than nested as `{}`. Upstream
     // nests it, and `$and: [{}, ...]` is a valid but pointless branch.
+    // A deferred failure stays at the top, where the read path looks for it.
+    let deferred = where_.deferred.take();
     if where_.is_empty() {
         *where_ = mine;
     } else {
         let client = std::mem::take(where_);
         where_.push(ParsedClause::And(vec![client, mine]));
     }
+    where_.deferred = deferred;
     Ok(())
+}
+
+/// `checkWhere`'s refusal of a `$or`, `$and` or `$nor` that is not an array, for a caller other
+/// than master and maintenance, whether or not anything is protected (`RestQuery.js:956-963`).
+fn deny_malformed_logical(
+    where_: &ParsedWhere,
+    detail: parse_rust_core::ErrorDetail,
+) -> Result<(), ParseError> {
+    match &where_.deferred {
+        Some(DeferredWhere::MalformedLogical(op)) => Err(ParseError::permission_denied(
+            ErrorCode::InvalidQuery,
+            format!("{op} must be an array"),
+            detail,
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// [`deny_protected_fields`] for a field a read reaches through an index rather than by name.
 ///
 /// Held to the same rule, with the same refusals. Only a caller with something protected pays for
 /// listing the class's indexes.
+/// A field of an index that only the server reads: an `_`-prefixed column such as a token or the
+/// password hash, or `authData`, which the adapter stores under `_auth_data_*`.
+fn internal_index_field(fields: &[String]) -> Option<&str> {
+    fields
+        .iter()
+        .find(|field| field.starts_with('_') || field.as_str() == "authData")
+        .map(String::as_str)
+}
+
 async fn deny_protected_index_fields<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
@@ -455,11 +486,11 @@ async fn deny_protected_index_fields<S: StorageAdapter>(
     query: &Query,
     hint: Option<&parse_rust_storage::Hint>,
 ) -> Result<(), ParseError> {
-    if protected.is_none_or(|p| p.strip.is_empty()) {
-        return Ok(());
-    }
-    let text = has_text_search(query);
-    if hint.is_none() && !text {
+    // A hinted index is checked for every caller but master, because an internal column is
+    // never readable by one. A text index is checked only when something is protected.
+    let has_protected = protected.is_some_and(|p| !p.strip.is_empty());
+    let text = has_protected && has_text_search(query);
+    if ctx.scope.is_master() || (hint.is_none() && !text) {
         return Ok(());
     }
     let indexes = ctx.storage.index_fields(class_name).await?;
@@ -479,9 +510,10 @@ async fn deny_protected_index_fields<S: StorageAdapter>(
                     && index.columns.iter().zip(keys.keys()).all(|(c, k)| c == k)
             }
         });
-        if let Some(field) =
-            hinted.and_then(|index| clp::protected_index_field(protected, &index.fields))
-        {
+        if let Some(field) = hinted.and_then(|index| {
+            clp::protected_index_field(protected, &index.fields)
+                .or_else(|| internal_index_field(&index.fields))
+        }) {
             return Err(refuse("sort by", field));
         }
     }
@@ -569,6 +601,12 @@ fn plan_read<'a, S: StorageAdapter>(
                 order,
                 ctx.options.error_detail,
             )?;
+            deny_malformed_logical(&where_, ctx.options.error_detail)?;
+        }
+        // `find` reads `query.objectId` before it loads the schema, so a null `where` fails here,
+        // for every caller.
+        if matches!(where_.deferred, Some(DeferredWhere::Null)) {
+            return Err(ParseError::internal("where is null".to_string()));
         }
 
         // 3. Sort validation. Unknown keys are dropped rather than refused, except `score`.
@@ -593,7 +631,19 @@ fn plan_read<'a, S: StorageAdapter>(
         //     checking the client's keys is the same predicate over a smaller set. The position
         //     matters: a query a pointer permission denies outright answers empty, whatever keys
         //     it names (`DatabaseController.js:1510-1516` before `:1524`).
-        let keys_checked = crate::query_parse::validate_query_keys(&where_, master);
+        let keys_checked = match where_.deferred.take() {
+            // The conversion's own error, at the conversion's position.
+            Some(DeferredWhere::Error(e)) => Err(e),
+            // Master skips `checkWhere` and reaches `reduceRelationKeys`, which throws on it.
+            Some(DeferredWhere::MalformedLogical(op)) => {
+                Err(ParseError::internal(format!("{op} is not an array")))
+            }
+            // `addReadACL` assigns onto it for anyone but master; master's query has no keys.
+            Some(DeferredWhere::Scalar) if !master => {
+                Err(ParseError::internal("where is not an object".to_string()))
+            }
+            _ => crate::query_parse::validate_query_keys(&where_, master),
+        };
 
         // 5 and 6. `$relatedTo` and relation-field constraints, both join-table reads.
         let mut query = resolve_where(ctx, class_name, schema, where_).await?;
@@ -674,11 +724,25 @@ fn find_core<'a, S: StorageAdapter>(
         // **A class that does not exist is still read.** Upstream reads it under `{fields: {}}`
         // and asks the adapter anyway (`DatabaseController.js:1423-1433`, `:1561-1563`), so the
         // query is built and its errors raised: a malformed `$within` is 107 on any class.
+        // A `userField:` rule reads its pointer field, so a `keys` that leaves it out projects it
+        // anyway and the field is removed again after filtering (`DatabaseController.js:1865-1874`,
+        // `:285`). Without it the rule never matched and the caller's own fields stayed
+        // stripped.
+        let mut keys = projection(&schema, &options);
+        let mut temporary: Vec<String> = Vec::new();
+        if let (Some(keys), Some(plan)) = (keys.as_mut(), protected.as_ref()) {
+            for (field, _) in &plan.user_field_rules {
+                if !keys.iter().any(|k| k == field) {
+                    keys.push(field.clone());
+                    temporary.push(field.clone());
+                }
+            }
+        }
         let query_options = QueryOptions {
             limit: options.limit,
             skip: options.skip,
             order,
-            keys: projection(&schema, &options),
+            keys,
             case_insensitive: false,
             hint: options.hint.clone(),
             comment: options.comment.clone(),
@@ -703,6 +767,18 @@ fn find_core<'a, S: StorageAdapter>(
                     is_read,
                     ctx.options,
                 );
+                // Removed where upstream removes them: everywhere but a caller's own `_User` row
+                // under the owner exemption.
+                let own_user_row = class_name == USER_CLASS
+                    && ctx.options.protected_fields_owner_exempt
+                    && ctx.scope.user_id().is_some_and(|uid| {
+                        matches!(row.get("objectId"), Some(ParseValue::String(id)) if id == uid)
+                    });
+                if !own_user_row {
+                    for field in &temporary {
+                        row.shift_remove(field);
+                    }
+                }
                 row
             })
             .collect())
@@ -828,7 +904,20 @@ pub async fn explain<S: StorageAdapter>(
 fn projection(schema: &ClassSchema, options: &FindOptions) -> Option<Vec<String>> {
     // The four keys a projection can never drop (`AlwaysSelectedKeys`, `RestQuery.js:9`).
     const ALWAYS: [&str; 4] = ["objectId", "createdAt", "updatedAt", "ACL"];
-    match (&options.keys, &options.exclude_keys) {
+    // The database is asked for each key's root: `owner.email` projects `owner`
+    // (`RestQuery.js:869-872`). The dotted form is for an include's own `keys`, which
+    // `include::keys_for_path` reads from the options; projecting it here dropped the field.
+    let roots = options.keys.as_ref().map(|keys| {
+        let mut out: Vec<String> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let root = key.split('.').next().unwrap_or(key);
+            if !out.iter().any(|k| k == root) {
+                out.push(root.to_string());
+            }
+        }
+        out
+    });
+    match (&roots, &options.exclude_keys) {
         (None, None) => None,
         (Some(keys), None) => {
             let mut out = keys.clone();
@@ -989,6 +1078,7 @@ async fn resolve_related_to<S: StorageAdapter>(
         let ids = relations::related_ids(ctx.storage, owning_class, key, owning_id).await?;
         return Ok(relations::RelatedToOutcome::Ids(ids));
     }
+    ensure_in_snapshot(ctx, owning_class).await?;
 
     let owning_protected = plan_protected_fields(
         owning_class,
@@ -1049,8 +1139,22 @@ fn validate_sort(
     class_name: &str,
     order: &[(String, SortDirection)],
 ) -> Result<Vec<(String, SortDirection)>, ParseError> {
-    let mut out = Vec::new();
+    // The sort is a JavaScript object upstream: a repeated key keeps its first position and its
+    // last direction.
+    let mut sort: IndexMap<String, SortDirection> = IndexMap::new();
     for (field, direction) in order {
+        sort.insert(field.clone(), *direction);
+    }
+    // `_created_at` and `_updated_at` sort as `createdAt` and `updatedAt`
+    // (`DatabaseController.js:1435-1445`): the alias is deleted and the public name assigned, which
+    // keeps the public name's position if it was already there and appends it otherwise.
+    for (alias, public) in [("_created_at", "createdAt"), ("_updated_at", "updatedAt")] {
+        if let Some(direction) = sort.shift_remove(alias) {
+            sort.insert(public.to_string(), direction);
+        }
+    }
+    let mut out = Vec::new();
+    for (field, direction) in &sort {
         if is_auth_data_id_path(field) {
             return Err(ParseError::invalid_key_name(format!(
                 "Cannot sort by {field}"
@@ -1153,6 +1257,23 @@ async fn expand_includes<S: StorageAdapter>(
     Ok(())
 }
 
+/// Refuse to read `class_name` under a snapshot that lacks it while `_SCHEMA` has it.
+///
+/// The request's own class is loaded before the request runs. A class reached through the data,
+/// an include target or a `$relatedTo` owner, is not, and a snapshot taken before another server
+/// created it would read it with no CLP, which is unrestricted. A class that exists nowhere reads
+/// as empty, as upstream reads it; one that exists sends the request back to be run on a rebuilt
+/// snapshot. See [`ParseError::schema_stale`].
+async fn ensure_in_snapshot<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+) -> Result<(), ParseError> {
+    if ctx.snapshot.contains(class_name) || !ctx.storage.class_exists(class_name).await? {
+        return Ok(());
+    }
+    Err(ParseError::schema_stale(class_name))
+}
+
 /// One include query: the rows of `target_class` that `path` points at.
 async fn include_read<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
@@ -1162,6 +1283,7 @@ async fn include_read<S: StorageAdapter>(
     keys: &[String],
     exclude_keys: &[String],
 ) -> Result<Vec<ParseMap>, ParseError> {
+    ensure_in_snapshot(ctx, target_class).await?;
     let mut where_ = ParsedWhere::default();
     // One id is an equality, several are an `$in` (`RestQuery.js:1244-1249`), and the same
     // count picks the method: `get` for one, `find` for several
@@ -1392,6 +1514,17 @@ pub async fn create<S: StorageAdapter>(
     let delta = validate_write_fields(&schema, &body)?;
     reserve_schema(ctx, class_name, &schema, &delta.added).await?;
     apply(&mut schema, &delta);
+    let defaulted = apply_field_options(&schema, &mut body, true)?;
+    // Upstream appends defaults to the body after its own default fields, and the Mongo transform
+    // then moves `createdAt` and `updatedAt` to the end of the stored document
+    // (`MongoTransform.js:483-487`), so a defaulted field is stored, and read back, ahead of them.
+    if !defaulted.is_empty() {
+        for key in ["objectId", "createdAt", "updatedAt"] {
+            if let Some(value) = body.shift_remove(key) {
+                body.insert(key.to_string(), value);
+            }
+        }
+    }
 
     // **An `ACL` carrying an operation is lowered as upstream lowers it, before relation ops are
     // collected** (`DatabaseController.js:922` then `:931`): `transformObjectACL` walks the op
@@ -1421,12 +1554,76 @@ pub async fn create<S: StorageAdapter>(
     if let Some(acl) = generated_acl {
         echoed.insert("ACL".to_string(), acl);
     }
+    // A default the server applied is reported as the default ACL is: both are pushed onto
+    // `fieldsChangedByTrigger` (`RestWrite.js:426-430`), which the response echoes.
+    for (field, value) in defaulted {
+        echoed.insert(field, value);
+    }
 
     Ok(CreateResponse {
         object_id,
         created_at: now,
         echoed,
     })
+}
+
+/// A field's schema options, `required` and `defaultValue`, applied to a write
+/// (`setRequiredFieldsIfNeeded`, `RestWrite.js:408-436`, `:493-503`).
+///
+/// A field counts as unset when it is absent, `null`, `""` or a `Delete`. On a create every field
+/// the schema declares is checked: an absent or deleted one takes its `defaultValue` when the
+/// schema has one, and otherwise an unset `required` one is 142 `<field> is required`. A `null` or
+/// `""` is never replaced by a default, so on a required field it is the error. On an update only
+/// the fields the body names are checked, and no default is applied.
+///
+/// Runs after the body's fields are validated against the schema, as upstream's step follows
+/// `validateSchema`. Returns the defaults applied, which the create response reports.
+fn apply_field_options(
+    schema: &ClassSchema,
+    body: &mut WriteBody,
+    create: bool,
+) -> Result<Vec<(String, ParseValue)>, ParseError> {
+    let Some(options) = schema.field_options.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let fields: Vec<String> = if create {
+        schema.fields.keys().cloned().collect()
+    } else {
+        body.keys().cloned().collect()
+    };
+    let mut defaulted = Vec::new();
+    for field in fields {
+        let Some(ParseValue::Object(option)) = options.get(&field) else {
+            continue;
+        };
+        let (unset, replaceable) = match body.get(&field) {
+            None => (true, true),
+            Some(FieldWrite::Op(Op::Delete)) => (true, true),
+            Some(FieldWrite::Value(ParseValue::Null)) => (true, false),
+            Some(FieldWrite::Value(ParseValue::String(s))) if s.is_empty() => (true, false),
+            Some(_) => (false, false),
+        };
+        if !unset {
+            continue;
+        }
+        let default = option
+            .get("defaultValue")
+            .filter(|v| !matches!(v, ParseValue::Null));
+        match default {
+            Some(value) if create && replaceable => {
+                body.insert(field.clone(), FieldWrite::Value(value.clone()));
+                defaulted.push((field, value.clone()));
+            }
+            _ if matches!(option.get("required"), Some(ParseValue::Bool(true))) => {
+                return Err(ParseError::new(
+                    ErrorCode::ValidationError,
+                    format!("{field} is required"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(defaulted)
 }
 
 /// The query an update runs, carrying every authorization constraint a non-master caller is under:
@@ -1600,6 +1797,7 @@ pub async fn update<S: StorageAdapter>(
     let delta = validate_write_fields(&schema, &body)?;
     reserve_schema(ctx, class_name, &schema, &delta.added).await?;
     apply(&mut schema, &delta);
+    apply_field_options(&schema, &mut body, false)?;
 
     let relation_updates = relations::collect_relation_updates(&mut body);
 
@@ -1712,6 +1910,17 @@ pub async fn delete<S: StorageAdapter>(
     let clp = ctx.snapshot.clp(class_name);
     let acl_group = ctx.scope.acl_group();
     let master = ctx.scope.is_master();
+
+    // A client deletes only from a class whose name a client could use.
+    if !master && !parse_rust_schema::class_name_is_valid(class_name) {
+        return Err(ParseError::permission_denied(
+            ErrorCode::OperationForbidden,
+            format!(
+                "Clients aren't allowed to perform the delete operation on the {class_name} collection."
+            ),
+            ctx.options.error_detail,
+        ));
+    }
 
     if !master {
         validate_permission(
@@ -2401,6 +2610,66 @@ mod tests {
     /// An explain takes the `limit=0` branch too: before the CLP gate, the include pass and the
     /// adapter's validation of the explain value. Each of those refuses the same request with any
     /// other limit.
+    /// A where that will fail is refused at its position, never read as an empty where that
+    /// matches every row. The CLP refusal comes first, and `limit=0` never reaches it.
+    #[tokio::test]
+    async fn a_deferred_where_failure_refuses_rather_than_matching_everything() {
+        let mut row = ParseMap::new();
+        row.insert("objectId".into(), ParseValue::String("p1".into()));
+        let storage = FakeStorage::new()
+            .with_schema(default_schema("Post"))
+            .with_row("Post", row);
+        let snap = snapshot(&storage).await;
+        let options = opts();
+        let anon = AclScope::Anonymous;
+        let ctx = Ctx::new(&storage, &snap, &anon, &options);
+        let bad = || crate::query_parse::parse_client_where(&serde_json::json!({"n": {"$in": 5}}));
+        let e = find(&ctx, "Post", bad(), FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidJson);
+        assert_eq!(e.message, "bad $in value");
+        let zero = FindOptions {
+            limit: Some(0),
+            ..Default::default()
+        };
+        assert!(find(&ctx, "Post", bad(), zero)
+            .await
+            .expect("empty")
+            .is_empty());
+        let scalar = crate::query_parse::parse_client_where(&serde_json::json!(5));
+        let e = find(&ctx, "Post", scalar, FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InternalServerError);
+
+        let closed = FakeStorage::new()
+            .with_schema(default_schema("Post").with_clp(clp(r#"{"find":{},"get":{}}"#)));
+        let snap = snapshot(&closed).await;
+        let ctx = Ctx::new(&closed, &snap, &anon, &options);
+        let e = find(&ctx, "Post", bad(), FindOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::OperationForbidden);
+    }
+
+    #[test]
+    fn an_index_on_an_internal_column_is_internal() {
+        let fields = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            internal_index_field(&fields(&["n", "_perishable_token"])),
+            Some("_perishable_token")
+        );
+        assert_eq!(
+            internal_index_field(&fields(&["authData"])),
+            Some("authData")
+        );
+        assert_eq!(
+            internal_index_field(&fields(&["objectId", "createdAt"])),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn a_zero_limit_explain_answers_before_the_gate_include_and_verbosity() {
         let storage = FakeStorage::new()

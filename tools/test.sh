@@ -78,9 +78,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # The citation check reads content at the pin through `git show`, so it was never affected. The
 # runtime gates load `lib/`, which is whatever the checkout built.
 #
-# Not resolved by picking a different default: a mismatch is a real problem that wants a human, so
-# it stops the run and names both revisions and the two ways out. `PARSE_SERVER_ROOT` is honoured
-# so a pinned worktree can be used once it has been built.
+# A checkout that is not at the pin, and no pinned worktree to fall back on, is a real problem
+# that wants a human: `oracle_problem` below stops every step that needs the oracle and names both
+# revisions.
+
 # The declared release target. Every differential below is only as good as this.
 PIN_COMMIT=$(awk '/^parse-server /{print $3}' PIN)
 

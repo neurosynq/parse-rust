@@ -36,7 +36,7 @@ const MIN_SAMPLES = 1000n;
 const MAX_SAMPLES = 100_000n;
 
 const SIZES = ['200b', '2kb', '8kb'];
-const SHAPES = ['flat', 'nested', 'pointers'];
+const SHAPES = ['flat', 'nested', 'pointers', 'dated'];
 const CLASS_NAME = 'BenchObject';
 const SCHEMA = 'parse-rust-bench/1';
 const VERDICT = 'baseline-unclassified';

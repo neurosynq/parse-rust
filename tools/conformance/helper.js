@@ -7,7 +7,8 @@
  *   1. **It starts no server.** Upstream's helper boots a parse-server in this process. Here the
  *      server is whatever `CONFORMANCE_SERVER_URL` names, started by `run.mjs` in another process.
  *      Nothing in this file requires `../lib/index`, so there is no in-process server for a request
- *      to reach by accident. That is the first hazard the 0.3.0 contract names.
+ *      to reach by accident. A suite that quietly ran against an in-process server would report
+ *      upstream's results as parse-rust's, which is the first thing this harness has to rule out.
  *   2. **Every request carries its block and phase**, in `X-Parse-Conformance-Block`, set through
  *      the SDK's `REQUEST_HEADERS` and through the `../lib/request` wrapper.
  *   3. **It writes a result per block** to `CONFORMANCE_RESULTS`, with the client-side request

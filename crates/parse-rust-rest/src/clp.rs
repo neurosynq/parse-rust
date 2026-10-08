@@ -567,9 +567,16 @@ fn row_field_points_at(value: Option<&ParseValue>, user_id: Option<&str>) -> boo
     let Some(user_id) = user_id else { return false };
     match value {
         Some(ParseValue::Pointer { object_id, .. }) => object_id == user_id,
-        Some(ParseValue::Array(items)) => items
-            .iter()
-            .any(|v| matches!(v, ParseValue::Pointer { object_id, .. } if object_id == user_id)),
+        // Each element by its `.objectId`, as upstream reads it (`DatabaseController.js:228-231`).
+        // A pointer stored in an array has no column type and decodes as a plain object, so both
+        // forms count.
+        Some(ParseValue::Array(items)) => items.iter().any(|v| match v {
+            ParseValue::Pointer { object_id, .. } => object_id == user_id,
+            ParseValue::Object(map) => {
+                matches!(map.get("objectId"), Some(ParseValue::String(id)) if id == user_id)
+            }
+            _ => false,
+        }),
         // An `Object`-typed field holding a raw `{objectId: ...}` map, which is what upstream
         // reads: it inspects `.objectId` without checking `__type`.
         Some(ParseValue::Object(map)) => {

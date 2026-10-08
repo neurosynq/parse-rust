@@ -643,40 +643,25 @@ async fn a_dead_session_token_does_not_block_a_login() {
     );
 }
 
-/// The exact statuses an unserved method produces, because the changelog states them.
+/// The status an unserved method produces: Express's 404, on every path.
 ///
-/// Two mechanisms, and they answer differently. axum matches the path first, so a method it has no
-/// arm for is 405. But `POST` is registered on nearly every path as the JavaScript SDK's
-/// method-override transport, so a bare `POST` with no usable override reaches the dispatcher,
-/// finds no `POST` arm for that route, and is reported as an unroutable method-and-path pair: 404.
-///
-/// Asserted rather than described, so the changelog sentence has something behind it.
+/// Every route takes any method and dispatches on the effective one, the `_method` override
+/// included, so a method a path does not serve finds no arm and is a 404, as an Express router
+/// answers it. It used to be 405 for a method axum had no arm for.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
-async fn an_unserved_method_is_405_unless_post_carries_it_to_dispatch() {
+async fn an_unserved_method_is_404() {
     let server = common::boot().await;
     let host = &server.host;
 
-    // `POST` exists on the path as the override transport, so this reaches dispatch and 404s.
     for path in ["/sessions", "/users/me"] {
         let r = post(host, path, &As::master(), &json!({})).await;
-        assert_eq!(
-            r.status, 404,
-            "POST {path} reaches dispatch and finds no arm: {}",
-            r.raw
-        );
+        assert_eq!(r.status, 404, "POST {path}: {}", r.raw);
     }
-
-    // No `PUT` on these paths at all, so axum refuses before dispatch.
-    for path in ["/sessions", "/login"] {
+    for path in ["/sessions", "/login", "/serverInfo"] {
         let r = put(host, path, &As::master(), &json!({})).await;
-        assert_eq!(
-            r.status, 405,
-            "PUT {path} is refused by the router: {}",
-            r.raw
-        );
+        assert_eq!(r.status, 404, "PUT {path}: {}", r.raw);
     }
-
     // An unknown path is 404 whatever the method.
     let r = get(host, "/nonesuch", &As::master()).await;
     assert_eq!(r.status, 404, "{}", r.raw);

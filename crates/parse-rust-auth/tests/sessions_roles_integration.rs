@@ -33,6 +33,21 @@ fn uri() -> String {
         .unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string())
 }
 
+/// The `_User` rows a test's sessions point at: a session resolves only to a user that exists.
+async fn insert_users(db: &str, ids: &[&str]) {
+    let users = mongodb::Client::with_uri_str(uri())
+        .await
+        .expect("mongo")
+        .database(db)
+        .collection::<bson::Document>("_User");
+    for id in ids {
+        users
+            .insert_one(bson::doc! { "_id": *id })
+            .await
+            .expect("insert user");
+    }
+}
+
 async fn adapter(test: &str) -> (MongoAdapter, String) {
     let db = format!("parse_rust_auth_it_{}_{}", std::process::id(), test);
     let a = MongoAdapter::connect(&uri(), &db)
@@ -173,6 +188,7 @@ async fn a_session_with_no_expiry_stores_no_expires_at_key() {
 #[ignore = "requires MongoDB on 27017; run via tools/test.sh"]
 async fn a_token_round_trips_through_storage() {
     let (a, db) = adapter("session_roundtrip").await;
+    insert_users(&db, &["user000001"]).await;
 
     let created = create_session(
         &a,
@@ -203,6 +219,7 @@ async fn a_token_round_trips_through_storage() {
 #[ignore = "requires MongoDB on 27017; run via tools/test.sh"]
 async fn duplicate_destruction_and_bulk_revocation_work_against_real_storage() {
     let (a, db) = adapter("session_revoke").await;
+    insert_users(&db, &["alice", "bob"]).await;
     let cfg = SessionConfig::default();
     let mk = |user: &'static str, install: Option<&'static str>| NewSession {
         user_object_id: user,

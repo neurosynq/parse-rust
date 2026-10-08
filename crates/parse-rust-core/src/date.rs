@@ -34,6 +34,16 @@ impl ParseDate {
         Self(DateTime::from_timestamp_millis(ms).unwrap_or(dt))
     }
 
+    /// A stored date, from its millisecond count. `None` outside years 0 through 9999, the range
+    /// an ISO 8601 string with a four-digit year can carry, which is what refused such a value
+    /// when it was read through its text form.
+    pub fn from_timestamp_millis(ms: i64) -> Option<Self> {
+        use chrono::Datelike;
+        DateTime::from_timestamp_millis(ms)
+            .filter(|dt| (0..=9999).contains(&dt.year()))
+            .map(Self)
+    }
+
     pub fn now() -> Self {
         Self::from_datetime(Utc::now())
     }
@@ -55,8 +65,41 @@ impl ParseDate {
     }
 
     /// The ISO form Parse emits: exactly three fractional digits, `Z`, never `+00:00`.
+    ///
+    /// Written digit by digit for years 0 through 9999, which is every date a stored value or a
+    /// client's ISO string can carry. A response pays this once per date, and chrono's general
+    /// formatter costs several times as much. Any other year takes chrono's form, as before.
     pub fn to_iso(&self) -> String {
-        self.0.to_rfc3339_opts(SecondsFormat::Millis, true)
+        use chrono::{Datelike, Timelike};
+        let dt = &self.0;
+        let year = dt.year();
+        if !(0..=9999).contains(&year) {
+            return dt.to_rfc3339_opts(SecondsFormat::Millis, true);
+        }
+        let mut out = [0u8; 24];
+        let mut put = |at: usize, value: u32, width: usize| {
+            let mut v = value;
+            for i in (0..width).rev() {
+                out[at + i] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+        };
+        put(0, year as u32, 4);
+        put(5, dt.month(), 2);
+        put(8, dt.day(), 2);
+        put(11, dt.hour(), 2);
+        put(14, dt.minute(), 2);
+        put(17, dt.second(), 2);
+        put(20, dt.timestamp_subsec_millis(), 3);
+        out[4] = b'-';
+        out[7] = b'-';
+        out[10] = b'T';
+        out[13] = b':';
+        out[16] = b':';
+        out[19] = b'.';
+        out[23] = b'Z';
+        // Every byte is an ASCII digit or separator.
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     /// Parse an ISO 8601 string.
@@ -75,6 +118,48 @@ impl ParseDate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_millisecond_count_reads_as_its_text_form_did() {
+        let ms = 1_728_051_862_287;
+        let direct = ParseDate::from_timestamp_millis(ms).expect("in range");
+        assert_eq!(direct.to_iso(), "2024-10-04T14:24:22.287Z");
+        assert_eq!(
+            ParseDate::parse_iso(&direct.to_iso()).expect("parses"),
+            direct
+        );
+        // Year 10000 and year -1 have no four-digit form.
+        assert!(ParseDate::from_timestamp_millis(253_402_300_800_000).is_none());
+        assert!(ParseDate::from_timestamp_millis(-62_167_219_200_001).is_none());
+        assert!(ParseDate::from_timestamp_millis(-62_167_219_200_000).is_some());
+    }
+
+    #[test]
+    fn the_hand_written_form_is_chronos_across_the_range() {
+        // Every boundary that changes a digit's width or a field's carry, plus a spread.
+        let mut ms: Vec<i64> = vec![
+            -62_167_219_200_000, // 0000-01-01T00:00:00.000Z
+            0,
+            951_782_399_999,     // 2000-02-28T23:59:59.999Z
+            951_868_800_000,     // 2000-03-01
+            253_402_300_799_999, // 9999-12-31T23:59:59.999Z
+        ];
+        let mut x: i64 = 1;
+        for _ in 0..10_000 {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ms.push(x.rem_euclid(253_402_300_800_000));
+        }
+        for m in ms {
+            let date = ParseDate::from_timestamp_millis(m).expect("in range");
+            assert_eq!(
+                date.to_iso(),
+                date.0.to_rfc3339_opts(SecondsFormat::Millis, true),
+                "{m}"
+            );
+        }
+    }
 
     #[test]
     fn iso_form_is_exactly_upstreams() {

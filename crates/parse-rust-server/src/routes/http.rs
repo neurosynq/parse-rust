@@ -25,8 +25,40 @@ use crate::routes::dispatch::{self, Incoming, Route, RouteError};
 use crate::schema_cache::Freshness;
 use crate::state::AppState;
 
-/// Resolve the context and run one route.
+/// Run a request's work to completion whether or not its client stays connected.
+///
+/// axum drops a handler's future when the client disconnects, which cancels it at its next await,
+/// part way through a write. Express does not stop a request when its socket closes, so upstream's
+/// writes complete. Cancelling mid-way is worse than either outcome: a schema write could land at
+/// the database after its cache invalidation had already been consumed, leaving this node serving
+/// the old permissions, and a batch could stop with an arbitrary subset of its sub-requests
+/// applied. A spawned task is not cancelled by dropping its handle.
+async fn detached<F>(work: F) -> Response
+where
+    F: std::future::Future<Output = Response> + Send + 'static,
+{
+    // The benchmark build's per-request database tally lives in a task-local; carry it across.
+    #[cfg(feature = "bench-instrumentation")]
+    let work = parse_rust_mongo::bench::carry(work);
+    match tokio::spawn(work).await {
+        Ok(response) => response,
+        // The task panicked, which no request path is allowed to do; answer as for any internal
+        // failure rather than propagate it.
+        Err(_) => ParseErrorResponse(parse_rust_core::ParseError::internal(
+            "request task failed".to_string(),
+        ))
+        .into_response(),
+    }
+}
+
+/// Resolve the context and run one route, detached from the client's connection.
 async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Response {
+    let (state, authority) = (state.clone(), authority.clone());
+    detached(async move { run_attached(&state, &authority, incoming).await }).await
+}
+
+/// Resolve the context and run one route.
+async fn run_attached(state: &AppState, authority: &Authority, incoming: Incoming) -> Response {
     // **A session token attached to `/login` is discarded before it is resolved**
     // (`middlewares.js:267-268`). Upstream deletes it in `handleParseHeaders`, after the client-key
     // check and before any `Auth` is built, so the token is never looked up at all.
@@ -60,7 +92,15 @@ async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Res
         Ok(rc) => rc,
         Err(e) => return ParseErrorResponse(e).into_response(),
     };
-    let outcome = dispatch::dispatch(state, &rc, authority, &incoming).await;
+    let mut outcome = dispatch::dispatch(state, &rc, authority, &incoming).await;
+    // A read reached a class this snapshot predates. Only reads raise it, so running the request
+    // again on a rebuilt snapshot repeats no write.
+    if matches!(&outcome, Err(RouteError::Parse(e)) if e.is_schema_stale()) {
+        outcome = match state.request_context(authority, Freshness::Reload).await {
+            Ok(fresh) => dispatch::dispatch(state, &fresh, authority, &incoming).await,
+            Err(e) => Err(RouteError::Parse(e)),
+        };
+    }
     match outcome {
         Ok(response) => (response.status, Json(response.body)).into_response(),
         Err(RouteError::Parse(e)) => ParseErrorResponse(e).into_response(),
@@ -75,6 +115,15 @@ async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Res
         }
         .into_response(),
     }
+}
+
+/// Express's answer for a method no route on the path serves: a 404, in the `code`-less envelope.
+fn not_found(method: &http::Method, path: &str) -> Response {
+    HttpError {
+        status: http::StatusCode::NOT_FOUND,
+        message: format!("cannot route {method} {path}"),
+    }
+    .into_response()
 }
 
 /// The method a request is really asking for.
@@ -127,7 +176,17 @@ pub async fn health(State(state): State<AppState>) -> Response {
     Json(crate::routes::health::body()).into_response()
 }
 
-pub async fn server_info(State(state): State<AppState>, authority: Authority) -> Response {
+pub async fn server_info(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    // GET only (`FeaturesRouter.js`), reached by a `POST` overridden to `GET` too.
+    let method = effective_method(transport, method);
+    if method != http::Method::GET {
+        return not_found(&method, "/serverInfo");
+    }
     // The one route that needs no request context: it reads config and nothing else, so it stays
     // answerable when the database is down.
     if !authority.is_master() {
@@ -268,7 +327,16 @@ fn login_payload(body: Option<Json_>, query: HashMap<String, String>) -> Json_ {
     }
 }
 
-pub async fn logout(State(state): State<AppState>, authority: Authority) -> Response {
+pub async fn logout(
+    State(state): State<AppState>,
+    authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
+) -> Response {
+    let method = effective_method(transport, method);
+    if method != http::Method::POST {
+        return not_found(&method, "/logout");
+    }
     run(
         &state,
         &authority,
@@ -530,19 +598,30 @@ pub async fn purge(
 pub async fn batch(
     State(state): State<AppState>,
     authority: Authority,
+    method: Option<axum::Extension<MethodOverride>>,
+    transport: http::Method,
     body: Option<Json<Json_>>,
 ) -> Response {
-    // A batch names its classes in sub-request paths it has not parsed yet, so it takes the cache
-    // as it stands. A sub-request on a class another node created since is the one case a batch
-    // sees as missing where a direct request would reload.
-    let rc = match state.request_context(&authority, Freshness::Cached).await {
-        Ok(rc) => rc,
-        Err(e) => return ParseErrorResponse(e).into_response(),
-    };
-    let body = body.map(|b| b.0);
-    let mount_path = state.config().mount_path.clone();
-    match crate::routes::batch::handle(&state, &rc, &authority, &mount_path, body.as_ref()).await {
-        Ok(results) => Json(results).into_response(),
-        Err(e) => ParseErrorResponse(e).into_response(),
+    let method = effective_method(transport, method);
+    if method != http::Method::POST {
+        return not_found(&method, "/batch");
     }
+    // The session first, as upstream's middleware resolves it before the batch handler runs. The
+    // classes the sub-requests name are loaded by `handle` once the batch has been validated, so a
+    // batch refused for its size or shape costs no schema lookup.
+    detached(async move {
+        let mount_path = state.config().mount_path.clone();
+        let mut rc = match state.request_context(&authority, Freshness::Cached).await {
+            Ok(rc) => rc,
+            Err(e) => return ParseErrorResponse(e).into_response(),
+        };
+        let body = body.map(|b| b.0);
+        match crate::routes::batch::handle(&state, &mut rc, &authority, &mount_path, body.as_ref())
+            .await
+        {
+            Ok(results) => Json(results).into_response(),
+            Err(e) => ParseErrorResponse(e).into_response(),
+        }
+    })
+    .await
 }

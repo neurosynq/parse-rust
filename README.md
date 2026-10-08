@@ -43,8 +43,8 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 | Area | Endpoints and behavior |
 |---|---|
 | Objects | `POST`, `GET`, `PUT`, `DELETE` on `/classes/:class`, and `GET` with `where`, `limit`, `skip`, `order`, `keys`, `excludeKeys`, `count` |
-| Queries | `$or`, `$and`, `$nor`, `$regex` with `$options`, `$all`, `$relatedTo`, `include` with dotted paths, geo (`$nearSphere`, `$within`, `$geoWithin`, `$geoIntersects`), `$text`, and `explain`, `hint` and `comment` |
-| Users | `POST /users` (signup, bcrypt), `POST /login`, `GET /users/me`, `POST /logout`, and account lockout |
+| Queries | `$or`, `$and`, `$nor`, `$regex` with `$options`, `$all`, `$relatedTo`, `include` with dotted paths and through arrays of pointers, geo (`$nearSphere`, `$within`, `$geoWithin`, `$geoIntersects`), `$text` with `$score` ordering, and `explain`, `hint` and `comment` |
+| Users | `POST /users` (signup, bcrypt), `GET` and `POST /login`, `GET /users/me`, `GET /users`, `GET`, `PUT` and `DELETE /users/:objectId`, `POST /logout`, and account lockout |
 | Installations | `/classes/_Installation` with upstream's write checks; not its deduplication |
 | Sessions | `_Session` rows in upstream's format, surviving a restart and readable by parse-server. `/sessions` with `me`, list, get and delete |
 | Roles | `_Role` with its `users` and `roles` relations, the five `/roles` verbs, and transitive role graph expansion |
@@ -52,21 +52,21 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 | Schema | Classes and fields created by first write with types inferred, plus the full `/schemas` API and `/purge`, master-key only |
 | Relations | `_Join` tables, `AddRelation` and `RemoveRelation`, and constraints on a `Relation`-typed field |
 | Writes | The atomic update operations: `Increment`, `Add`, `AddUnique`, `Remove`, `Delete` |
-| Batch | `/batch` with per-operation results and upstream's error shape |
+| Batch | `/batch` with per-operation results and upstream's error shape, its sub-requests run concurrently as upstream runs them |
 | Types | Pointer, Date, Bytes, GeoPoint, File, Polygon, Relation and the update operations, encoded as upstream encodes them |
 | Errors | Upstream's numeric codes, messages and both error envelopes |
-| Transport | The JavaScript SDK's `POST`-everything form, normalized before routing |
+| Transport | The JavaScript SDK's `POST`-everything form, normalized before routing, and upstream's 20 MB request body limit, answered with a 413 |
 | Server | `GET /serverInfo`, `GET /health`, the master key gate with source-address filtering, client-key validation |
 | Browsers | Upstream's CORS headers on every response including errors, and an `OPTIONS` preflight answered directly. `allowOrigin` and `allowHeaders` are configurable |
 
 ### What is not there yet
 
 LiveQuery, Cloud Code and triggers, files, push, aggregate, GraphQL, `$inQuery`, `$notInQuery`,
-`$select`, `$dontSelect`, `$score` ordering, password reset, email verification, auth adapters,
-MFA, password policy, rate limiting, idempotency, and PostgreSQL. Of
-the `_User` routes, `/users/:objectId` does not exist and `/classes/_User` refuses an ordinary
-client's create and delete, so `signUp`, `logIn` and `user.save()` on an existing user all work,
-while creating or deleting a user outside `POST /users` does not.
+`$select`, `$dontSelect`, password reset, email verification, auth adapters, MFA, password
+policy, rate limiting, idempotency, and PostgreSQL. An ordinary client's create and delete of a
+`_User` through `/classes/_User` or `/users/:objectId` are refused, so `signUp`, `logIn` and
+`user.save()` on an existing user all work, while creating a user outside `POST /users`, or a client
+deleting one, does not.
 
 Three of those absences are not inert, and matter before you try anything against real data:
 

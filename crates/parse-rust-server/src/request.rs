@@ -97,11 +97,7 @@ pub async fn resolve(
 
     // One snapshot, with the option folded in before it is built. Taking a second one would
     // reintroduce exactly the mid-request schema change the snapshot exists to prevent.
-    let snapshot = schemas
-        .snapshot(storage, freshness, |classes| {
-            merge_server_protected_fields(classes, config)
-        })
-        .await?;
+    let snapshot = snapshot(storage, schemas, config, freshness).await?;
 
     Ok(RequestContext {
         snapshot,
@@ -115,6 +111,20 @@ pub async fn resolve(
         // decision reads them differently; see `Ctx::is_maintenance`.
         is_maintenance: matches!(authority.credentials, Credentials::Maintenance),
     })
+}
+
+/// A snapshot from the cache, with the server's `protectedFields` folded in.
+pub(crate) async fn snapshot(
+    storage: &MongoAdapter,
+    schemas: &SchemaCache,
+    config: &ServerConfig,
+    freshness: Freshness<'_>,
+) -> Result<Arc<SchemaSnapshot>, ParseError> {
+    schemas
+        .snapshot(storage, freshness, |classes| {
+            merge_server_protected_fields(classes, config)
+        })
+        .await
 }
 
 /// Fold the server-level `protectedFields` option into the snapshot's CLP blocks.

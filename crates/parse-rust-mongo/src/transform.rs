@@ -501,6 +501,15 @@ pub fn parse_object_to_mongo_create(
     let mut out = Document::new();
 
     for (key, value) in object {
+        // A null creates under the field's own name even on a Pointer field: the create transform
+        // adds `_p_` only `if (restValue && ...)` (`MongoTransform.js:423-428`), so the row reads
+        // back with `"<field>": null`. An update names the column from the schema and writes
+        // `_p_<field>: null`, which reads back with no key (`:1231-1233`); the two differ upstream
+        // and a client sees which one happened.
+        if matches!(value, ParseValue::Null) && schema.is_pointer_field(key) {
+            out.insert(key.clone(), Bson::Null);
+            continue;
+        }
         if let Some((mongo_key, bson)) = field_to_column(schema, key, value)? {
             out.insert(mongo_key, bson);
         }
@@ -617,8 +626,13 @@ pub fn mongo_object_to_parse(schema: &ClassSchema, doc: &Document) -> Result<Par
             None => key.clone(),
         };
 
-        // A `_p_` field carries "<Class>$<id>".
+        // A `_p_` field carries "<Class>$<id>". Upstream drops the column, leaving no key, when
+        // the schema does not declare it, when it declares another type, and when the stored value
+        // is null (`MongoTransform.js:1211-1233`).
         if let Some(stripped) = key.strip_prefix("_p_") {
+            if !matches!(schema.field(stripped), Some(FieldType::Pointer { .. })) {
+                continue;
+            }
             match value {
                 Bson::String(s) => {
                     let (class_name, object_id) = s.split_once('$').ok_or_else(|| {
@@ -634,9 +648,7 @@ pub fn mongo_object_to_parse(schema: &ClassSchema, doc: &Document) -> Result<Par
                         },
                     );
                 }
-                Bson::Null => {
-                    out.insert(stripped.to_string(), ParseValue::Null);
-                }
+                Bson::Null => {}
                 _ => {
                     return Err(ParseError::incorrect_type(format!(
                         "pointer field {stripped} is not a string"
@@ -841,12 +853,14 @@ pub fn bson_to_parse_value(value: &Bson) -> Result<ParseValue, ParseError> {
         Bson::Int64(n) => ParseValue::Number(*n as f64),
         Bson::Double(n) => ParseValue::Number(*n),
         Bson::String(s) => ParseValue::String(s.clone()),
-        Bson::DateTime(dt) => ParseValue::Date(ParseDate::parse_iso(
-            // The driver's own text quotes the out-of-range millisecond value, and a stored value
-            // does not belong in a client-visible message.
-            &dt.try_to_rfc3339_string()
-                .map_err(|_| ParseError::invalid_json("undecodable stored date"))?,
-        )?),
+        // Straight from the stored milliseconds. Rendering the driver's text and parsing it back
+        // gave the same date at twice the cost per value, which a large result set pays per date.
+        // The refusal is unchanged: a value outside the representable range is not quoted back,
+        // because a stored value does not belong in a client-visible message.
+        Bson::DateTime(dt) => ParseValue::Date(
+            ParseDate::from_timestamp_millis(dt.timestamp_millis())
+                .ok_or_else(|| ParseError::invalid_json("undecodable stored date"))?,
+        ),
         Bson::Binary(b) => ParseValue::Bytes(b.bytes.clone()),
         Bson::Array(items) => ParseValue::Array(
             items

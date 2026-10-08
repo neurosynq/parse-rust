@@ -1392,3 +1392,35 @@ async fn sdk_body_parameters_keep_their_json_types() {
         limited.raw
     );
 }
+
+/// A client deletes only from a class whose name a client could use; master is unaffected.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_client_cannot_delete_from_an_internal_collection() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let made = common::put(
+        host,
+        "/schemas/Kept",
+        &common::As::master(),
+        &serde_json::json!({}),
+    )
+    .await;
+    let made = if made.status == 200 {
+        made
+    } else {
+        common::post(
+            host,
+            "/schemas/Kept",
+            &common::As::master(),
+            &serde_json::json!({}),
+        )
+        .await
+    };
+    assert_eq!(made.status, 200, "{}", made.raw);
+
+    let r = common::delete(host, "/classes/_SCHEMA/Kept", &common::As::anonymous()).await;
+    assert_eq!(r.code(), Some(119), "{}", r.raw);
+    let still = common::get(host, "/schemas/Kept", &common::As::master()).await;
+    assert_eq!(still.status, 200, "the class must survive: {}", still.raw);
+}

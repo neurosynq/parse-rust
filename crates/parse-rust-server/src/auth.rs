@@ -146,7 +146,11 @@ pub fn resolve_with_peer(
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
 
     let installation_id = get(headers::INSTALLATION_ID).map(str::to_string);
-    let session_token = get(headers::SESSION_TOKEN).map(str::to_string);
+    // Empty is absent: upstream builds an anonymous `Auth` on `!info.sessionToken`
+    // (`middlewares.js:281-287`), so a blank header is not a token to look up and fail.
+    let session_token = get(headers::SESSION_TOKEN)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let with = |credentials: Credentials| Authority {
         credentials,
         session_token: session_token.clone(),

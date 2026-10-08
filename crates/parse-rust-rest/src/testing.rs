@@ -383,6 +383,10 @@ impl StorageAdapter for FakeStorage {
         Ok(self.locked()?.schemas.values().cloned().collect())
     }
 
+    async fn class_exists(&self, class_name: &str) -> Result<bool, ParseError> {
+        Ok(self.locked()?.schemas.contains_key(class_name))
+    }
+
     async fn insert_schema(&self, schema: &ClassSchema) -> Result<(), ParseError> {
         let mut inner = self.locked()?;
         if inner.schemas.contains_key(&schema.class_name) {

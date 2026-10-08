@@ -36,13 +36,16 @@ pub use clp::{
     validate_permission, PermissionOptions, PointerPermOutcome, ProtectedFieldPlan, WriteAction,
 };
 pub use guard::{
-    reject_reserved_keys, reject_reserved_keys_in, strip_internal_keys, to_response_body,
+    into_response_body, reject_reserved_keys, reject_reserved_keys_in, strip_internal_keys,
+    to_response_body,
 };
 pub use pipeline::{
     authorize_update, count, create, delete, explain, find, get, update, update_gate,
     CreateResponse, Ctx, FindOptions, UpdateResponse,
 };
-pub use query_parse::{parse_include, parse_where, ParsedClause, ParsedWhere};
+pub use query_parse::{
+    parse_client_where, parse_include, parse_where, DeferredWhere, ParsedClause, ParsedWhere,
+};
 pub use relations::RelatedToOutcome;
 pub use snapshot::SchemaSnapshot;
 pub use write::{decode_write_body, enforce_object_id_policy, WriteBody};

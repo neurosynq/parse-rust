@@ -16,8 +16,8 @@
  *   - The identical patched suite must pass against parse-server built at the pin, so a rewrite
  *     cannot have changed what is asked.
  *
- * The two rewrites applied to upstream's spec text are the only two permitted (contract section
- * 4): the hardcoded `http://localhost:8378/1` becomes `global.CONFORMANCE_SERVER_URL`, and
+ * The two rewrites applied to upstream's spec text are the only two permitted, because any other
+ * edit to a spec would be testing something other than upstream's suite: the hardcoded `http://localhost:8378/1` becomes `global.CONFORMANCE_SERVER_URL`, and
  * `require('../lib/{rest,Config,Auth}')` resolves to a throwing stub. The second needs no text
  * change at all: the vendored tree places the stubs at the path those requires resolve to.
  */
@@ -59,7 +59,7 @@ if (files.length === 0) {
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
 
-// The floors the 0.3.0 contract commits, used when a file is first classified. A floor already in
+// The floors committed for 0.3.0, used when a file is first classified. A floor already in
 // the inventory is never replaced by a run.
 const FLOORS = {
   'ParseObject.spec.js': 82,
@@ -235,7 +235,8 @@ const INERT = {
   directAccess: 'only changes in-process server-to-server calls',
   // The harness runs every target against its own per-run database, so a spec's fixed
   // `mongodb://localhost:27017/parse` is mapped onto that one rather than onto a shared database
-  // other runs also use. Same reasoning as `collectionPrefix`, contract section 4.
+  // other runs also use. Same reasoning as `collectionPrefix`: the option only says where the data
+  // lives, which no client observes.
   databaseURI: 'mapped to the run\'s own database',
   databaseAdapter: 'only `undefined` is accepted, which selects `databaseURI`',
 };
@@ -643,7 +644,7 @@ function judgeRust(results, stats, server) {
     const missing = Object.keys(spec.blocks).filter(k => !rows.some(x => x.key === k));
     for (const k of missing) { problem(`[inventory] ${file}: a committed block did not run: ${spec.blocks[k].name}`); }
   }
-  // The contract's list, section 6: these four are never an acceptable steady state. A 500 is
+  // These four failure classes are never an acceptable steady state. A 500 is
   // parse-rust failing to answer, not answering differently, so it is not an ordinary red block.
   for (const x of rows) {
     if (FATAL_CLASSES.includes(x.failure_class)) {

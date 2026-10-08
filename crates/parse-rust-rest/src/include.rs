@@ -45,19 +45,14 @@ fn collect_from_value(value: &ParseValue, path: &[String], out: &mut PointersByC
         return;
     }
     match (path.split_first(), value) {
-        (
-            None,
-            ParseValue::Pointer {
-                class_name,
-                object_id,
-            },
-        ) => {
-            let ids = out.entry(class_name.clone()).or_default();
-            if !ids.contains(object_id) {
-                ids.push(object_id.clone());
+        (None, _) => {
+            if let Some((class_name, object_id)) = pointer_parts(value) {
+                let ids = out.entry(class_name.to_string()).or_default();
+                if !ids.iter().any(|id| id == object_id) {
+                    ids.push(object_id.to_string());
+                }
             }
         }
-        (None, _) => {}
         (Some((head, rest)), ParseValue::Object(map)) => {
             if let Some(next) = map.get(head) {
                 collect_from_value(next, rest, out);
@@ -65,6 +60,33 @@ fn collect_from_value(value: &ParseValue, path: &[String], out: &mut PointersByC
         }
         _ => {}
     }
+}
+
+/// The class and id of a pointer, in either of the forms one arrives in.
+///
+/// A pointer at a schema-typed field decodes as [`ParseValue::Pointer`]. One stored inside an
+/// array or a plain object has no column type to decode it by, so it reads back as the plain
+/// `{"__type":"Pointer",...}` object it was stored as. Upstream tests `__type == 'Pointer'` on plain
+/// JSON (`RestQuery.js:1305`, `:1336`), so both are pointers to it, and an include through an array
+/// of pointers expands. A plain one without a string class or id is not collected.
+fn pointer_parts(value: &ParseValue) -> Option<(&str, &str)> {
+    match value {
+        ParseValue::Pointer {
+            class_name,
+            object_id,
+        } => Some((class_name, object_id)),
+        ParseValue::Object(map) if is_plain_pointer(map) => {
+            match (map.get("className"), map.get("objectId")) {
+                (Some(ParseValue::String(c)), Some(ParseValue::String(id))) => Some((c, id)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_plain_pointer(map: &ParseMap) -> bool {
+    matches!(map.get("__type"), Some(ParseValue::String(t)) if t == "Pointer")
 }
 
 /// Replace the pointers at `path` with the fetched objects.
@@ -129,6 +151,14 @@ fn graft_value(
         (None, ParseValue::Pointer { object_id, .. }) => fetched
             .get(&object_id)
             .map(|row| ParseValue::Object(row.clone())),
+        // `replace[object.objectId]`: a plain pointer resolves by its id alone, and one whose id
+        // matches nothing, or that has none, becomes `undefined` and is dropped.
+        (None, ParseValue::Object(map)) if is_plain_pointer(&map) => match map.get("objectId") {
+            Some(ParseValue::String(id)) => {
+                fetched.get(id).map(|row| ParseValue::Object(row.clone()))
+            }
+            _ => None,
+        },
         (None, other) => Some(other),
         (Some((head, rest)), ParseValue::Object(mut map)) => {
             replace_in_place(&mut map, head, |inner| graft_value(inner, rest, fetched));
@@ -144,6 +174,10 @@ fn graft_value(
 /// (`RestQuery.js:1269-1275`). Note this is on top of the target class's own
 /// `filterSensitiveData`, not instead of it.
 pub fn shape_included(row: &mut ParseMap, class_name: &str, is_master: bool) {
+    // An included row is a REST read's result, so its server timestamps are bare strings, as they
+    // are at the top level (`MongoTransform.js:1172-1187`). Each included row passes through here
+    // at its own depth, so nested includes are flattened too.
+    crate::guard::flatten_top_level_dates(row);
     row.insert(
         "__type".to_string(),
         ParseValue::String("Object".to_string()),
@@ -243,6 +277,29 @@ mod tests {
     }
 
     #[test]
+    fn an_included_row_has_bare_string_timestamps() {
+        let date =
+            parse_rust_core::ParseDate::from_timestamp_millis(1_728_051_862_287).expect("date");
+        let mut fetched = row(vec![
+            ("objectId", ParseValue::String("t1".into())),
+            ("createdAt", ParseValue::Date(date)),
+            ("updatedAt", ParseValue::Date(date)),
+            ("when", ParseValue::Date(date)),
+        ]);
+        shape_included(&mut fetched, "Target", false);
+        for key in ["createdAt", "updatedAt"] {
+            assert!(
+                matches!(fetched.get(key), Some(ParseValue::String(s)) if s == "2024-10-04T14:24:22.287Z"),
+                "{key}"
+            );
+        }
+        assert!(
+            matches!(fetched.get("when"), Some(ParseValue::Date(_))),
+            "a user Date stays typed"
+        );
+    }
+
+    #[test]
     fn pointers_group_by_class_and_dedupe() {
         let results = vec![
             row(vec![("author", pointer("_User", "u1"))]),
@@ -265,6 +322,49 @@ mod tests {
             found.get("_User"),
             Some(&vec!["u1".to_string(), "u2".to_string()])
         );
+    }
+
+    /// How a pointer inside an array comes back from storage: no column type, so a plain object.
+    fn plain_pointer(class: &str, id: &str) -> ParseValue {
+        ParseValue::Object(row(vec![
+            ("__type", ParseValue::String("Pointer".into())),
+            ("className", ParseValue::String(class.into())),
+            ("objectId", ParseValue::String(id.into())),
+        ]))
+    }
+
+    #[test]
+    fn a_stored_array_of_pointers_is_collected_and_grafted() {
+        let mut results = vec![row(vec![(
+            "refs",
+            ParseValue::Array(vec![
+                plain_pointer("Target", "t1"),
+                plain_pointer("Target", "gone"),
+                ParseValue::String("not a pointer".into()),
+            ]),
+        )])];
+        let path = ["refs".to_string()];
+        let found = collect_pointers(&results, &path);
+        assert_eq!(
+            found.get("Target"),
+            Some(&vec!["t1".to_string(), "gone".to_string()])
+        );
+
+        let mut fetched = IndexMap::new();
+        fetched.insert(
+            "t1".to_string(),
+            row(vec![("objectId", ParseValue::String("t1".into()))]),
+        );
+        graft(&mut results, &path, &fetched);
+        let Some(ParseValue::Array(items)) = results[0].get("refs") else {
+            panic!("refs is still an array");
+        };
+        // The resolved one is the object, the unresolved one is dropped, the rest is untouched.
+        assert_eq!(items.len(), 2);
+        assert!(
+            matches!(&items[0], ParseValue::Object(m) if matches!(m.get("objectId"), Some(ParseValue::String(id)) if id == "t1"))
+        );
+        assert!(matches!(&items[1], ParseValue::String(s) if s == "not a pointer"));
     }
 
     #[test]

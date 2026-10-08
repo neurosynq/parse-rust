@@ -190,6 +190,113 @@ impl ParseValue {
     }
 }
 
+impl ParseValue {
+    /// The value as a `serde_json::Value`, for a response body.
+    ///
+    /// **The same value [`Self::to_json`] text parses to, built without the text.** Responses used
+    /// to go through the string and back, which costs a full encode and a full parse per row and
+    /// changes nothing: without serde_json's `arbitrary_precision` feature a parsed number keeps
+    /// its value and not its spelling, so the ECMAScript formatting never reached the wire through
+    /// that path either. The number rule below is the parse's: an integral value that fits `u64`,
+    /// or a negative one that fits `i64`, is an integer, and anything else is an `f64`. The
+    /// equivalence is tested, not argued.
+    pub fn to_serde_json(&self) -> serde_json::Value {
+        use serde_json::Value as J;
+        let object = |pairs: Vec<(&str, J)>| {
+            J::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        };
+        match self {
+            ParseValue::Null => J::Null,
+            ParseValue::Bool(b) => J::Bool(*b),
+            ParseValue::Number(n) => json_number(*n),
+            ParseValue::String(s) => J::String(s.clone()),
+            ParseValue::Array(items) => J::Array(items.iter().map(Self::to_serde_json).collect()),
+            ParseValue::Object(map) => J::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.to_serde_json()))
+                    .collect(),
+            ),
+            ParseValue::Date(d) => object(vec![
+                ("__type", J::String("Date".into())),
+                ("iso", J::String(d.to_iso())),
+            ]),
+            ParseValue::Pointer {
+                class_name,
+                object_id,
+            } => object(vec![
+                ("__type", J::String("Pointer".into())),
+                ("className", J::String(class_name.clone())),
+                ("objectId", J::String(object_id.clone())),
+            ]),
+            ParseValue::GeoPoint {
+                latitude,
+                longitude,
+            } => object(vec![
+                ("__type", J::String("GeoPoint".into())),
+                ("latitude", json_number(*latitude)),
+                ("longitude", json_number(*longitude)),
+            ]),
+            ParseValue::Bytes(raw) => object(vec![
+                ("__type", J::String("Bytes".into())),
+                ("base64", J::String(base64_encode(raw))),
+            ]),
+            ParseValue::File { name, url } => {
+                let mut pairs = vec![
+                    ("__type", J::String("File".into())),
+                    ("name", J::String(name.clone())),
+                ];
+                if let Some(u) = url {
+                    pairs.push(("url", J::String(u.clone())));
+                }
+                object(pairs)
+            }
+            ParseValue::Polygon(coords) => object(vec![
+                ("__type", J::String("Polygon".into())),
+                (
+                    "coordinates",
+                    J::Array(
+                        coords
+                            .iter()
+                            .map(|(lat, lng)| J::Array(vec![json_number(*lat), json_number(*lng)]))
+                            .collect(),
+                    ),
+                ),
+            ]),
+            ParseValue::Relation { class_name } => object(vec![
+                ("__type", J::String("Relation".into())),
+                ("className", J::String(class_name.clone())),
+            ]),
+        }
+    }
+}
+
+/// A number as serde_json would hold it after parsing [`js_number::to_ecma_string`]'s text.
+///
+/// Below 2^53 an integral value's text is its exact digits, so it converts directly. At and above
+/// it, JavaScript prints the shortest round-trip digits padded with zeros, `2**60` as
+/// `1152921504606847000` rather than its exact `1152921504606846976`, so those few go through the
+/// text, which is the only way to get the same integer.
+fn json_number(n: f64) -> serde_json::Value {
+    const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+    if !n.is_finite() {
+        return serde_json::Value::Null;
+    }
+    if n.fract() == 0.0 && n.abs() < EXACT {
+        // `-0` prints as `0`, and `0` parses as an unsigned integer.
+        return if n >= 0.0 {
+            serde_json::Value::Number((n as u64).into())
+        } else {
+            serde_json::Value::Number((n as i64).into())
+        };
+    }
+    if n.fract() == 0.0 {
+        if let Ok(parsed) = serde_json::from_str(&js_number::to_ecma_string(n)) {
+            return parsed;
+        }
+    }
+    serde_json::Number::from_f64(n).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
 /// Standard base64 with padding, matching what `BytesCoder` accepts
 /// (`MongoTransform.js:1306`). Hand-rolled to keep `parse-rust-core` dependency-light; it is 20 lines
 /// and the alphabet is fixed by the wire format.
@@ -371,6 +478,82 @@ fn js_object_is(x: f64, y: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The direct conversion against the text round trip it replaces, over the values most likely
+    /// to differ: number edges, escapes, every typed envelope, nesting.
+    #[test]
+    fn to_serde_json_is_the_parse_of_to_json() {
+        let numbers = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            1.5,
+            -2.25,
+            1e-7,
+            1e21,
+            1e20,
+            123456789012.0,
+            9_007_199_254_740_993.0,
+            9.3e18,
+            1.8e19,
+            1.9e19,
+            -9.3e18,
+            -9.3e19,
+            5e-324,
+            1.7e308,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            4294967295.0,
+            0.30000000000000004,
+        ];
+        let mut values: Vec<ParseValue> = numbers.iter().map(|n| ParseValue::Number(*n)).collect();
+        values.extend([
+            ParseValue::Null,
+            ParseValue::Bool(true),
+            ParseValue::String(
+                "quote \" slash \\ nl \n tab \t ctrl \u{1} uni \u{2028} é \u{1F600}".into(),
+            ),
+            ParseValue::Date(ParseDate::from_timestamp_millis(1_728_051_862_287).expect("date")),
+            ParseValue::Pointer {
+                class_name: "C".into(),
+                object_id: "x".into(),
+            },
+            ParseValue::GeoPoint {
+                latitude: -33.5,
+                longitude: 151.0,
+            },
+            ParseValue::Bytes(vec![0, 1, 2, 250, 251]),
+            ParseValue::File {
+                name: "f.png".into(),
+                url: None,
+            },
+            ParseValue::File {
+                name: "f.png".into(),
+                url: Some("http://x/f.png".into()),
+            },
+            ParseValue::Polygon(vec![(1.0, 2.5), (-3.0, 4.0)]),
+            ParseValue::Relation {
+                class_name: "R".into(),
+            },
+        ]);
+        let mut nested = ParseMap::new();
+        nested.insert("z".into(), ParseValue::Array(values.clone()));
+        nested.insert("a".into(), ParseValue::Number(1e21));
+        values.push(ParseValue::Object(nested));
+        for v in values {
+            let via_text: serde_json::Value =
+                serde_json::from_str(&v.to_json()).expect("valid JSON");
+            let direct = v.to_serde_json();
+            assert_eq!(direct, via_text, "{}", v.to_json());
+            assert_eq!(
+                serde_json::to_string(&direct).expect("encodes"),
+                serde_json::to_string(&via_text).expect("encodes")
+            );
+        }
+    }
 
     fn n(v: f64) -> ParseValue {
         ParseValue::Number(v)

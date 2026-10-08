@@ -113,11 +113,9 @@ impl Comparison {
             "$in" | "$nin" | "$all" => {
                 let items = match value {
                     ParseValue::Array(items) => items,
-                    _ => {
-                        return Err(ParseError::invalid_query(format!(
-                            "bad {op} value: expected an array"
-                        )))
-                    }
+                    // `INVALID_JSON`, `bad $in value`, as the transform words it
+                    // (`MongoTransform.js:725`, `:741`).
+                    _ => return Err(ParseError::invalid_json(format!("bad {op} value"))),
                 };
                 match op {
                     "$in" => Comparison::In(items),
@@ -125,17 +123,29 @@ impl Comparison {
                     _ => Comparison::All(items),
                 }
             }
-            "$exists" => match value {
-                ParseValue::Bool(b) => Comparison::Exists(b),
-                _ => {
-                    return Err(ParseError::invalid_query(
-                        "bad $exists value: expected a boolean".to_string(),
-                    ))
-                }
-            },
-            other => {
+            // Upstream hands the value to MongoDB as given (`MongoTransform.js:682`), and MongoDB
+            // reads `$exists` by its truthiness: only `false`, `0` and `null` mean "absent".
+            "$exists" => Comparison::Exists(match value {
+                ParseValue::Bool(b) => b,
+                ParseValue::Number(n) => n != 0.0,
+                ParseValue::Null => false,
+                _ => true,
+            }),
+            // Operators upstream implements and this server does not yet: refused by name, because
+            // a silently dropped constraint broadens the result, which is an authorization failure.
+            "$inQuery" | "$notInQuery" | "$select" | "$dontSelect" | "$containedBy"
+            // Parsed before this is reached; named here so a path that bypasses that parse still
+            // refuses rather than reporting an operator upstream knows as unknown.
+            | "$nearSphere" | "$near" | "$geoWithin" | "$within" | "$geoIntersects" | "$text" => {
                 return Err(ParseError::invalid_query(format!(
-                    "unsupported query operator: {other}"
+                    "unsupported query operator: {op}"
+                )))
+            }
+            // Anything else is upstream's `INVALID_JSON`, `bad constraint: $op`
+            // (`MongoTransform.js:956`).
+            other => {
+                return Err(ParseError::invalid_json(format!(
+                    "bad constraint: {other}"
                 )))
             }
         })
@@ -444,10 +454,11 @@ impl ExplainVerbosity {
 impl QueryOptions {
     /// Parse Parse's `order` parameter: comma-separated keys, `-` prefix for descending.
     pub fn parse_order(order: &str) -> Vec<(String, SortDirection)> {
+        // Trimmed and never filtered (`RestQuery.js:221-232`): `order=n,` names an empty field,
+        // which the read path refuses as `Invalid field name: .` where dropping it answered 200.
         order
             .split(',')
             .map(str::trim)
-            .filter(|s| !s.is_empty())
             .map(|k| match k {
                 "$score" | "-$score" => ("score".to_string(), SortDirection::TextScore),
                 _ => match k.strip_prefix('-') {
@@ -510,10 +521,25 @@ mod tests {
     }
 
     #[test]
-    fn in_requires_an_array_and_exists_requires_a_boolean() {
-        assert!(Comparison::from_operator("$in", ParseValue::Number(1.0)).is_err());
-        assert!(Comparison::from_operator("$all", ParseValue::Number(1.0)).is_err());
-        assert!(Comparison::from_operator("$exists", ParseValue::Number(1.0)).is_err());
+    fn in_requires_an_array_and_exists_reads_truthiness() {
+        for op in ["$in", "$nin", "$all"] {
+            let e = Comparison::from_operator(op, ParseValue::Number(1.0)).unwrap_err();
+            assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidJson, "{op}");
+            assert_eq!(e.message, format!("bad {op} value"));
+        }
+        let e = Comparison::from_operator("$foo", ParseValue::Null).unwrap_err();
+        assert_eq!(e.code, parse_rust_core::ErrorCode::InvalidJson);
+        assert_eq!(e.message, "bad constraint: $foo");
+        for (value, exists) in [
+            (ParseValue::Number(1.0), true),
+            (ParseValue::Number(0.0), false),
+            (ParseValue::Null, false),
+            (ParseValue::String("false".into()), true),
+        ] {
+            assert!(
+                matches!(Comparison::from_operator("$exists", value).expect("accepted"), Comparison::Exists(b) if b == exists)
+            );
+        }
     }
 
     #[test]
@@ -532,7 +558,15 @@ mod tests {
                 ("score".to_string(), SortDirection::Ascending),
             ]
         );
-        assert!(QueryOptions::parse_order("").is_empty());
+        // An empty entry survives for the read path to refuse; the caller never passes a falsy
+        // `order` at all.
+        assert_eq!(
+            QueryOptions::parse_order("n,"),
+            vec![
+                ("n".to_string(), SortDirection::Ascending),
+                (String::new(), SortDirection::Ascending),
+            ]
+        );
     }
 
     /// `reduceOrOperation` collapses a single-element disjunction. Reproduced so that a class with

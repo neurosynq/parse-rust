@@ -668,6 +668,13 @@ pub async fn login_core(
     // Kept for the multi-row preference below, which compares against the submitted username.
     let username_for_preference = identifier.clone();
     let email = email.filter(|_| has_email);
+    // What the client named, for the lockout gate on a login that finds no account. A NUL cannot
+    // be part of a stored username, so this cannot share a gate with a real account's.
+    let submitted = format!(
+        "\0{}\0{}",
+        identifier.as_deref().unwrap_or_default(),
+        email.as_deref().unwrap_or_default()
+    );
     let query = match (identifier, email) {
         // Both given: an AND, so a mismatched pair is not a login.
         (Some(username), Some(email)) => Query::from_constraints(vec![
@@ -717,7 +724,17 @@ pub async fn login_core(
     // answer in microseconds where a real one answers in milliseconds, and that difference is
     // measurable across a network, so the shared error message stops hiding which accounts exist.
     // Upstream runs the same dummy compare in both branches (`UsersRouter.js:112-118`, `:132-136`).
+    //
+    // **And both wait the same way.** With `accountLockout` on, attempts on one account are
+    // serialized (see `serialize_attempts`). A login that finds no account takes the same kind of
+    // gate, keyed on what was submitted, so a burst of concurrent attempts queues identically
+    // whether or not the account exists. Taking it only for a real account made a burst on a real
+    // name measurably slower than one on a made-up name, which told a caller which names exist.
     let Some(row) = row else {
+        let _attempt = match &state.config().account_lockout {
+            Some(_) => Some(crate::lockout::serialize_attempts(&submitted).await),
+            None => None,
+        };
         parse_rust_auth::password::verify_dummy(password).await;
         return Err(invalid());
     };
@@ -913,8 +930,22 @@ pub async fn me_core(state: &AppState, rc: &RequestContext) -> Result<Json, Pars
             rc.options.error_detail,
         )
     };
-    let (Some(token), Some(user_id)) = (rc.session_token.as_deref(), rc.user_id.as_deref()) else {
+    let Some(token) = rc.session_token.as_deref() else {
         return Err(invalid());
+    };
+    // A master or maintenance request never resolves its token into a user, but `handleMe` looks
+    // the token up itself, with the master key, whoever is asking (`UsersRouter.js:195-213`), so
+    // `/users/me` with the master key and a token answers that token's user.
+    let resolved;
+    let user_id = match rc.user_id.as_deref() {
+        Some(id) => id,
+        None => {
+            resolved = parse_rust_auth::resolve_session(state.storage(), token)
+                .await
+                .map_err(|_| invalid())?
+                .user_object_id;
+            resolved.as_str()
+        }
     };
 
     let ctx = rc.ctx(state.storage());

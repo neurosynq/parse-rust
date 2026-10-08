@@ -411,7 +411,8 @@ async fn destroy_duplicated_sessions<S: StorageAdapter>(
 /// `getAuthForSessionToken`'s miss path (`Auth.js:157-197`). The order of the three failures is
 /// upstream's and is observable, because the first one reached is the error the client sees:
 ///
-/// 1. no row, or a row with no `user`: `INVALID_SESSION_TOKEN` (209) `Invalid session token`
+/// 1. no row, a row with no `user`, or a `user` naming no `_User` row: `INVALID_SESSION_TOKEN`
+///    (209) `Invalid session token`
 /// 2. `expiresAt` in the past: 209 `Session token is expired.`
 /// 3. the user objectId starts with `role:`: `INTERNAL_SERVER_ERROR` (1) `Invalid object ID.`
 ///
@@ -422,10 +423,10 @@ async fn destroy_duplicated_sessions<S: StorageAdapter>(
 /// `expireInactiveSessions: false`, or by an older server, working. Reproduced exactly. See
 /// `a_session_with_no_expiry_never_expires` for the test that makes "fixing" this fail loudly.
 ///
-/// The `role:` guard is upstream's check on the *included* user object rather than on the
-/// pointer. The two carry the same objectId, including when the referenced `_User` row does not
-/// exist, in which case `include` leaves the pointer un-hydrated and upstream reads the objectId
-/// straight off it.
+/// **The user must exist.** Upstream reads the session with `include: 'user'` (`Auth.js:158-172`),
+/// and `replacePointers` turns a pointer whose row it did not find into `undefined`
+/// (`RestQuery.js:1335-1338`), so a deleted user's token fails the `!results[0]['user']` test and
+/// is 209. The `role:` guard then reads the included user's objectId, which is the pointer's.
 pub async fn resolve_session<S: StorageAdapter>(
     storage: &S,
     session_token: &str,
@@ -455,6 +456,9 @@ pub async fn resolve_session<S: StorageAdapter>(
         Some(ParseValue::Pointer { object_id, .. }) => object_id.clone(),
         _ => return Err(invalid_session_token()),
     };
+    if !user_exists(storage, &user_object_id).await? {
+        return Err(invalid_session_token());
+    }
 
     let expires_at = match row.get("expiresAt") {
         Some(ParseValue::Date(d)) => Some(*d),
@@ -491,6 +495,23 @@ pub async fn resolve_session<S: StorageAdapter>(
         expires_at,
         row,
     })
+}
+
+/// Is there a `_User` row with this objectId? The include's lookup, reduced to existence.
+async fn user_exists<S: StorageAdapter>(storage: &S, object_id: &str) -> Result<bool, ParseError> {
+    let query = Query::from_constraints(vec![Constraint::equal(
+        "objectId",
+        ParseValue::String(object_id.to_string()),
+    )]);
+    let options = QueryOptions {
+        limit: Some(1),
+        keys: Some(vec!["objectId".to_string()]),
+        ..QueryOptions::default()
+    };
+    Ok(!storage
+        .find(&default_schema("_User"), &query, &options)
+        .await?
+        .is_empty())
 }
 
 /// Delete one session by its token. Returns whether a row was removed.
@@ -539,6 +560,16 @@ mod tests {
         SessionConfig::default()
     }
 
+    /// Storage holding the `_User` rows the tests' sessions point at. A session whose user does
+    /// not exist resolves to 209, which `a_deleted_users_session_is_invalid` covers.
+    fn with_users() -> FakeStorage {
+        let s = FakeStorage::new();
+        for id in ["u1", "u2", "alice", "bob", "user000001", "role:Admins"] {
+            s.insert_row("_User", vec![("objectId", ParseValue::String(id.into()))]);
+        }
+        s
+    }
+
     #[test]
     fn a_token_is_r_plus_thirty_two_lowercase_hex() {
         let t = new_session_token();
@@ -574,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_row_is_upstreams_columns_in_upstreams_order() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -664,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_row_has_no_acl() {
-        let s = FakeStorage::new();
+        let s = with_users();
         create_session(
             &s,
             &cfg(),
@@ -685,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn creating_a_session_writes_the_session_schema() {
-        let s = FakeStorage::new();
+        let s = with_users();
         create_session(
             &s,
             &cfg(),
@@ -704,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_is_now_plus_session_length_and_is_absent_when_disabled() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -746,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_minted_token_resolves_to_its_user() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -770,7 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_token_is_invalid_session_token() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let e = resolve_session(&s, "r:nope").await.unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidSessionToken);
         assert_eq!(e.message, "Invalid session token");
@@ -778,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_with_no_user_is_invalid_session_token() {
-        let s = FakeStorage::new();
+        let s = with_users();
         s.insert_row(
             "_Session",
             vec![
@@ -795,7 +826,7 @@ mod tests {
     /// observable: a row that is both expired and role-prefixed reports expiry.
     #[tokio::test]
     async fn the_three_failures_are_checked_in_upstreams_order() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let past = ParseDate::parse_iso("2000-01-01T00:00:00.000Z").expect("date");
 
         // Expired and role-prefixed at once: expiry wins.
@@ -858,7 +889,7 @@ mod tests {
     /// a missing expiry mean "expired", they have logged out every such session on the database.
     #[tokio::test]
     async fn upstream_quirk_a_session_with_no_expiry_never_expires() {
-        let s = FakeStorage::new();
+        let s = with_users();
         s.insert_row(
             "_Session",
             vec![
@@ -880,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_destruction_is_per_user_and_per_installation() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = |user: &'static str, install: Option<&'static str>| NewSession {
             user_object_id: user,
             created_with: Some(CreatedWith::login(None)),
@@ -916,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_an_installation_id_nothing_is_destroyed() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = || NewSession {
             user_object_id: "alice",
             created_with: Some(CreatedWith::login(None)),
@@ -932,7 +963,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_removes_one_session_and_revoke_all_removes_the_users() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let mk = |user: &'static str| NewSession {
             user_object_id: user,
             created_with: Some(CreatedWith::login(None)),
@@ -959,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolution_reads_at_most_one_row() {
-        let s = FakeStorage::new();
+        let s = with_users();
         let created = create_session(
             &s,
             &cfg(),
@@ -977,9 +1008,32 @@ mod tests {
             .expect("resolve");
         assert_eq!(
             s.find_count(),
-            1,
-            "session resolution is on every authenticated request; it stays one query"
+            2,
+            "session resolution is on every authenticated request: the session and its user, \
+             which is upstream's `include: 'user'` read, and nothing more"
         );
         assert_eq!(s.last_find_limit(), Some(Some(1)));
+    }
+
+    /// A deleted user's sessions stop working at once, as upstream's include finds no user.
+    #[tokio::test]
+    async fn a_deleted_users_session_is_invalid() {
+        let s = FakeStorage::new();
+        let created = create_session(
+            &s,
+            &cfg(),
+            NewSession {
+                user_object_id: "gone",
+                created_with: Some(CreatedWith::login(None)),
+                installation_id: None,
+            },
+        )
+        .await
+        .expect("create");
+        let e = resolve_session(&s, &created.session_token)
+            .await
+            .expect_err("no such user");
+        assert_eq!(e.code, ErrorCode::InvalidSessionToken);
+        assert_eq!(e.message, "Invalid session token");
     }
 }

@@ -9,10 +9,12 @@
     "update.ops",
     "batch.50",
     "query.protected",
-    "include.wide"
+    "include.wide",
+    "query.dated",
+    "include.array"
   ],
   "calibrated": ["read.get", "create.nested", "update.ops", "query.protected"],
   "families": ["json.decode", "json.encode", "parse-to-bson", "bson-to-parse"],
   "sizes": ["200b", "2kb", "8kb"],
-  "shapes": ["flat", "nested", "pointers"]
+  "shapes": ["flat", "nested", "pointers", "dated"]
 }

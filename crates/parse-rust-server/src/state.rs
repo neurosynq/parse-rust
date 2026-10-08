@@ -35,6 +35,15 @@ impl AppState {
         &self.schemas
     }
 
+    /// A schema snapshot on its own, for a request that learns which classes it needs only after
+    /// its context is built. A batch does: its sub-request paths are validated first.
+    pub async fn schema_snapshot(
+        &self,
+        freshness: Freshness<'_>,
+    ) -> Result<std::sync::Arc<parse_rust_rest::SchemaSnapshot>, ParseError> {
+        crate::request::snapshot(&self.storage, &self.schemas, &self.config, freshness).await
+    }
+
     pub fn config(&self) -> &ServerConfig {
         &self.config
     }

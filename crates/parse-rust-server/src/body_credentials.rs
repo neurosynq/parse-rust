@@ -186,6 +186,24 @@ fn read_body_credentials(
     Ok(())
 }
 
+/// `req.is('multipart/form-data')`, which `express.json` leaves unparsed.
+fn is_multipart(parts: &http::request::Parts) -> bool {
+    parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("multipart/form-data")
+        })
+}
+
+/// A method no route serves, standing in for an override that is not a valid method token.
+fn unroutable_method() -> http::Method {
+    http::Method::from_bytes(b"UNROUTABLE").unwrap_or(http::Method::OPTIONS)
+}
+
 /// Upper bound on a buffered body. Without one, a request could exhaust memory.
 const MAX_BODY: usize = 20 * 1024 * 1024;
 
@@ -204,11 +222,45 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
 
     let bytes = match to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
-        Err(_) => return next.run(Request::from_parts(parts, Body::empty())).await,
+        // `express.json({ limit: maxUploadSize })` refuses the request with body-parser's 413
+        // (`ParseServer.ts:332`), which `handleParseErrors` renders as `{error}` from the error's
+        // own status and message. Passing the request on with an empty body let a write over the
+        // limit reach its route with no body and no sign it had been dropped.
+        Err(_) => {
+            return HttpError {
+                status: http::StatusCode::PAYLOAD_TOO_LARGE,
+                message: "request entity too large".to_string(),
+            }
+            .into_response()
+        }
+    };
+
+    // `express.json` parses every body that is not multipart (`ParseServer.ts:332`), and it runs
+    // after `/health` is mounted, so a health check's body is never read.
+    let parsed = if parts.uri.path().ends_with("/health") || is_multipart(&parts) {
+        None
+    } else if bytes.is_empty() {
+        // body-parser's empty body is `{}`, so a create, a schema create, a signup or an update
+        // sent with no body at all is the empty object rather than a malformed request.
+        Some(Json::Object(serde_json::Map::new()))
+    } else {
+        match serde_json::from_slice::<Json>(&bytes) {
+            Ok(value) => Some(value),
+            // body-parser's 400, rendered by `handleParseErrors` as `{error}` from the error's
+            // own status and message. The message is the parser's and so is not upstream's
+            // V8 text; the status and the envelope are.
+            Err(e) => {
+                return HttpError {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: e.to_string(),
+                }
+                .into_response()
+            }
+        }
     };
 
     // Not a JSON object body: nothing to normalize. Covers every GET.
-    let Ok(Json::Object(mut map)) = serde_json::from_slice::<Json>(&bytes) else {
+    let Some(Json::Object(mut map)) = parsed else {
         return next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await;
@@ -243,8 +295,15 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
     // refuses it as a field name.
     let overridden = if parts.method == http::Method::POST && map.get("_method").is_some_and(truthy)
     {
+        // A name that is not a valid method token still replaces the method upstream, and then
+        // matches no route: Express answers 404. Falling back to the transport `POST` ran the
+        // request as a create instead.
         match map.shift_remove("_method") {
-            Some(Json::String(m)) => m.to_uppercase().parse::<http::Method>().ok(),
+            Some(Json::String(m)) => Some(
+                m.to_uppercase()
+                    .parse::<http::Method>()
+                    .unwrap_or_else(|_| unroutable_method()),
+            ),
             _ => None,
         }
     } else {

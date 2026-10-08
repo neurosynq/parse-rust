@@ -83,7 +83,7 @@ const EXPECTED = {
   'I1 explain': 30,
   'I2 lockout': 18,
   'I3 installation': 16,
-  'I4 limit': 20,
+  'I4 limit': 24,
   'I5-6 user ACL refusals': 24,
   'I7 ACL arrays': 16,
   'I8 permission order': 4,
@@ -92,7 +92,8 @@ const EXPECTED = {
   'I11 ACL operations': 28,
   'I12 read path order': 38,
   'I13 body credentials': 42,
-  'I14 routes and write order': 40,
+  'I14 routes and write order': 88,
+  'I15 read parity': 44,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
@@ -197,7 +198,7 @@ function request(server, { method = 'GET', path: p, from, headers = {}, body, ra
       res.on('end', () => {
         let json = null;
         try { json = JSON.parse(raw); } catch { /* a non-JSON body is a result too */ }
-        resolve({ status: res.statusCode, body: json, raw });
+        resolve({ status: res.statusCode, body: json, raw, headers: res.headers });
       });
     });
     // Named, because a bare ECONNRESET says nothing about which of four servers, which source
@@ -351,6 +352,7 @@ async function main() {
     await gateI12ReadPathOrder(defaults);
     await gateI13BodyCredentials(defaults);
     await gateI14RoutesAndWriteOrder(defaults);
+    await gateI15ReadParity(defaults);
   } finally {
     if (mongo) { await mongo.close(); }
     for (const s of started) {
@@ -931,7 +933,7 @@ async function gateI4Limit(servers) {
       await request(server, { method: 'POST', path: `/classes/${cls}`, from: 'loopback', body: { n } });
     }
     counts[server.kind] = {};
-    for (const limit of ['-1', '-2', '1.5', '0', 'abc', '[[2]]']) {
+    for (const limit of ['-1', '-2', '1.5', '0', 'abc', '[[2]]', '2147483647', '1e12']) {
       const r = await request(server, { path: `/classes/${cls}?limit=${encodeURIComponent(limit)}`, from: 'loopback' });
       counts[server.kind][limit] = r.body?.results?.length;
     }
@@ -951,7 +953,8 @@ async function gateI4Limit(servers) {
     eq(`${server.kind}: and counts`, present.body?.count, 3);
   }
   // `[[2]]` is `Number(String([[2]]))`, which is 2: a nested array joins recursively.
-  for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3], ['[[2]]', 2]]) {
+  // A limit beyond the driver's 32-bit batch size still answers every row.
+  for (const [limit, expected] of [['-1', 1], ['-2', 2], ['1.5', 1], ['0', 0], ['abc', 3], ['[[2]]', 2], ['2147483647', 3], ['1e12', 3]]) {
     for (const server of servers) {
       eq(`${server.kind}: limit=${limit} returns ${expected}`, counts[server.kind][limit], expected);
     }
@@ -1051,8 +1054,8 @@ async function gateI9ObjectIdOperation(servers) {
       method: 'POST', path: '/users', from: 'loopback',
       body: { objectId: { __op: 'Delete' }, username: `i9_${suffixOf(server)}`, password: PASSWORD },
     });
-    // Upstream accepts it and stores the row under an id nobody was told; parse-rust refuses, as
-    // chosen in 0.3.0 section 7 (parse-community/parse-server#10639).
+    // Upstream accepts it and stores the row under an id nobody was told; parse-rust refuses, a
+    // deliberate difference listed in CHANGELOG.md (parse-community/parse-server#10639).
     eq(`${who}: ${isRust(server) ? 'refuses' : 'accepts'} an operation as objectId`,
       r.status, isRust(server) ? 400 : 201);
     if (isRust(server)) { eq(`${who}: as 107`, r.body?.code, 107); }
@@ -1360,6 +1363,20 @@ async function gateI14RoutesAndWriteOrder(servers) {
     eq(`${who}: a lower-case sub-request method does not route`, lower.body?.code, 107);
     eq(`${who}: and is named as sent`, lower.body?.error, `cannot route post /classes/${cls}`);
 
+    // A truthy method that is not a string has no `toUpperCase`: the batch is a bare 500 before
+    // anything runs, so the row survives a `["DELETE"]`.
+    const target = (await call({ method: 'POST', path: `/classes/${cls}`, headers: master(), body: { n: 9 } })).body?.objectId;
+    const arrayMethod = await call({
+      method: 'POST', path: '/batch', headers: master(),
+      body: { requests: [{ method: ['DELETE'], path: `/parse/classes/${cls}/${target}` }] },
+    });
+    eq(`${who}: a non-string method fails the batch`, `${arrayMethod.status} ${arrayMethod.body?.code}`, '500 1');
+    eq(`${who}: and deletes nothing`, (await call({ path: `/classes/${cls}/${target}`, headers: master() })).status, 200);
+
+    // A body over `maxUploadSize` is body-parser's 413.
+    const big = await call({ method: 'POST', path: `/classes/${cls}`, headers: master(), raw: JSON.stringify({ n: 'x'.repeat(21 * 1024 * 1024) }) });
+    eq(`${who}: a body over the upload limit is refused`, `${big.status} ${big.body?.error}`, '413 request entity too large');
+
     // Login over GET, and a body key login never reads.
     const user = await signUp(server, 'i14');
     const username = `i14_${TAG}_${server.kind}`;
@@ -1415,6 +1432,99 @@ async function gateI14RoutesAndWriteOrder(servers) {
     const got = await call({ path: `/classes/${aclCls}/${made.body?.objectId}`, headers: master() });
     check(`${who}: an index principal precedes "*" in the rendered ACL`,
       got.raw.indexOf('"123"') >= 0 && got.raw.indexOf('"123"') < got.raw.indexOf('"*"'), got.raw);
+
+    // An included row is a REST read's result: its timestamps are bare strings, and `keys` naming
+    // only a subkey of the include still returns the pointer's object.
+    const tgt = `I14Tgt_${sfx}`;
+    const hold = `I14Hold_${sfx}`;
+    const t = await call({ method: 'POST', path: `/classes/${tgt}`, headers: master(), body: { name: 'n', other: 'o' } });
+    await call({
+      method: 'POST', path: `/classes/${hold}`, headers: master(),
+      body: { t: { __type: 'Pointer', className: tgt, objectId: t.body?.objectId } },
+    });
+    const inc = (await call({ path: `/classes/${hold}?include=t`, headers: master() })).body?.results?.[0]?.t;
+    eq(`${who}: an included row's createdAt is a string`, typeof inc?.createdAt, 'string');
+    eq(`${who}: and its updatedAt`, typeof inc?.updatedAt, 'string');
+    const sub = (await call({ path: `/classes/${hold}?include=t&keys=t.name`, headers: master() })).body?.results?.[0]?.t;
+    eq(`${who}: keys naming only an include's subkey keeps the include`, `${sub?.name} ${sub?.other}`, 'n undefined');
+
+    // An empty session token header is no token at all.
+    eq(`${who}: an empty session token header is anonymous`,
+      (await call({ path: `/classes/${tgt}`, headers: { 'X-Parse-Session-Token': '' } })).status, 200);
+
+    // `/users/me` looks its token up even for a master request.
+    const meAsMaster = await call({ path: '/users/me', headers: { ...master(), ...as(user.token) } });
+    eq(`${who}: /users/me with the master key and a token answers that user`,
+      `${meAsMaster.status} ${meAsMaster.body?.objectId === user.id}`, '200 true');
+
+    // Deleting someone else's user, anonymously and as another user.
+    const anonDel = await call({ method: 'DELETE', path: `/users/${other.id}` });
+    eq(`${who}: an anonymous user delete`, `${anonDel.status} ${anonDel.body?.code} ${anonDel.body?.error}`,
+      '400 206 Insufficient auth to delete user');
+    const otherDel = await call({ method: 'DELETE', path: `/users/${other.id}`, headers: as(user.token) });
+    eq(`${who}: a non-owner user delete`, `${otherDel.status} ${otherDel.body?.code} ${otherDel.body?.error}`,
+      '400 206 Permission denied');
+
+    // A `userField:` rule still applies when `keys` leaves its pointer field out: the field is read
+    // for the rule and not returned.
+    const pp = `I14Pp_${sfx}`;
+    await call({
+      method: 'POST', path: `/schemas/${pp}`, headers: master(),
+      body: {
+        className: pp,
+        fields: { title: { type: 'String' }, secret: { type: 'String' }, owner: { type: 'Pointer', targetClass: '_User' } },
+        classLevelPermissions: {
+          find: { '*': true }, get: { '*': true }, create: { '*': true }, update: { '*': true },
+          delete: { '*': true }, addField: { '*': true }, count: { '*': true },
+          protectedFields: { '*': ['secret'], 'userField:owner': [] },
+        },
+      },
+    });
+    await call({
+      method: 'POST', path: `/classes/${pp}`, headers: master(),
+      body: { title: 't', secret: 's', owner: { __type: 'Pointer', className: '_User', objectId: user.id } },
+    });
+    const mine = (await call({ path: `/classes/${pp}?keys=title,secret`, headers: as(user.token) })).body?.results?.[0];
+    eq(`${who}: the userField owner sees the field with keys omitting the pointer`, mine?.secret, 's');
+    eq(`${who}: and the pointer field read for the rule is not returned`, mine?.owner, undefined);
+    const theirs = (await call({ path: `/classes/${pp}?keys=title,secret`, headers: as(other.token) })).body?.results?.[0];
+    eq(`${who}: another user still does not`, theirs?.secret, undefined);
+
+    // Routing on the effective method (`allowMethodOverride` runs before every router), the body a
+    // write starts from (body-parser's `{}`), and the create's `Location`.
+    const mc = `I14M_${sfx}`;
+    eq(`${who}: a POST overridden to GET reaches /serverInfo`,
+      (await call({ method: 'POST', path: '/serverInfo', headers: master(), body: { _method: 'GET' } })).status, 200);
+    eq(`${who}: a method no route serves is 404`,
+      (await call({ method: 'PATCH', path: `/classes/${mc}`, body: {} })).status, 404);
+    eq(`${who}: logout overridden to GET is 404`,
+      (await call({ method: 'POST', path: '/logout', body: { _method: 'GET' } })).status, 404);
+    eq(`${who}: an override naming no method is 404`,
+      (await call({ method: 'POST', path: `/classes/${mc}`, body: { _method: 'BO GUS', a: 1 } })).status, 404);
+    const bare = await call({ method: 'POST', path: `/classes/${mc}` });
+    eq(`${who}: a create with no body is an empty create`, bare.status, 201);
+    eq(`${who}: and names its object in Location`,
+      (bare.headers?.location ?? '').endsWith(`/parse/classes/${mc}/${bare.body?.objectId}`), true);
+    const txn = await call({ method: 'POST', path: '/batch', body: { transaction: true, requests: 5 } });
+    eq(`${who}: a malformed transactional batch is a malformed batch`, `${txn.status} ${txn.body?.code}`, '400 107');
+    const dots = await call({
+      method: 'POST', path: '/batch',
+      body: { requests: [{ method: 'GET', path: `/parse/./classes/../classes/${mc}` }] },
+    });
+    eq(`${who}: batch paths are normalized as a posix join`, Array.isArray(dots.body?.[0]?.success?.results), true);
+
+    // Field options: `required` and `defaultValue` (`RestWrite.js:408-436`).
+    const rq = `I14Req_${sfx}`;
+    await call({
+      method: 'POST', path: `/schemas/${rq}`, headers: master(),
+      body: { className: rq, fields: { title: { type: 'String', required: true }, score: { type: 'Number', defaultValue: 5 } } },
+    });
+    eq(`${who}: a missing required field is 142`,
+      J((await call({ method: 'POST', path: `/classes/${rq}`, body: {} })).body), J({ code: 142, error: 'title is required' }));
+    const withDefault = await call({ method: 'POST', path: `/classes/${rq}`, body: { title: 't' } });
+    eq(`${who}: a default is applied and echoed`, withDefault.body?.score, 5);
+    eq(`${who}: an update clearing a required field is 142`,
+      (await call({ method: 'PUT', path: `/classes/${rq}/${withDefault.body?.objectId}`, body: { title: null } })).body?.code, 142);
   }
 }
 
@@ -1451,3 +1561,102 @@ main().catch(e => {
   console.error(e);
   process.exit(1);
 });
+
+// -------------------------------------------------------------------------------------------
+// I15. Where a read's `where`, `keys`, `include` and `order` fail, and how pointers come back
+// -------------------------------------------------------------------------------------------
+
+/*
+ * Upstream reads `where` in stages: the route decodes it, `RestQuery` checks the shape of the
+ * logical operators, and operands are converted only when the database query is built, after
+ * the CLP gate (`ClassesRouter.js:32-37`, `RestQuery.js:942-967`, `DatabaseController.js:1524`).
+ * Dotted `keys` force their parent's include (`RestQuery.js:146-183`), and pointers come back as
+ * the transform writes them (`MongoTransform.js:1211-1233`).
+ */
+async function gateI15ReadParity(servers) {
+  enter('I15 read parity');
+  const e = v => encodeURIComponent(JSON.stringify(v));
+  const error = r => `${r.status} ${r.body?.code} ${r.body?.error ?? r.body?.message}`;
+  const count = r => `${r.status} ${r.body?.results?.length}`;
+  const fields = row => Object.keys(row ?? {}).filter(k => !['objectId', 'createdAt', 'updatedAt'].includes(k)).sort().join(',');
+  for (const server of servers) {
+    const who = server.kind;
+    const sfx = suffixOf(server);
+    const call = opts => request(server, { from: 'loopback', ...opts });
+    const C = `I15_${sfx}`;
+    for (let n = 0; n < 3; n++) {
+      await call({ method: 'POST', path: `/classes/${C}`, headers: master(), body: { n } });
+    }
+    const D = `I15Closed_${sfx}`;
+    await call({ method: 'POST', path: `/schemas/${D}`, headers: master(), body: {
+      classLevelPermissions: { find: {}, get: {}, count: {}, create: {}, update: {}, delete: {}, addField: {} },
+    } });
+
+    // Operand errors come after the CLP gate and never on a `limit=0` read.
+    eq(`${who}: a bad operand on a class the CLP closes is the CLP refusal`,
+      error(await call({ path: `/classes/${D}?where=${e({ n: { $in: 5 } })}` })), '400 119 Permission denied');
+    eq(`${who}: a bad operand with limit=0 answers empty`,
+      `${(await call({ path: `/classes/${C}?limit=0&where=${e({ n: { $in: 5 } })}` })).body?.results?.length}`, '0');
+    eq(`${who}: $in with a non-array is 107`, error(await call({ path: `/classes/${C}?where=${e({ n: { $in: 5 } })}` })),
+      '400 107 bad $in value');
+    eq(`${who}: an unknown operator is 107`, error(await call({ path: `/classes/${C}?where=${e({ n: { $foo: 1 } })}` })),
+      '400 107 bad constraint: $foo');
+    eq(`${who}: $exists reads truthiness`, count(await call({ path: `/classes/${C}?where=${e({ n: { $exists: 1 } })}` })), '200 3');
+
+    // The shapes a `where` that is not an object takes.
+    eq(`${who}: a numeric where is a 500 for a client`, error(await call({ path: `/classes/${C}?where=5` })),
+      '500 1 Internal server error.');
+    eq(`${who}: and every row for master`, count(await call({ path: `/classes/${C}?where=5`, headers: master() })), '200 3');
+    eq(`${who}: a null where is a 500`, error(await call({ path: `/classes/${C}?where=null`, headers: master() })),
+      '500 1 Internal server error.');
+    eq(`${who}: an array where names its indices`, error(await call({ path: `/classes/${C}?where=%5B1%5D` })),
+      '400 105 Invalid key name: 0');
+    eq(`${who}: a where that is a JSON string is parsed again`, error(await call({ path: `/classes/${C}?where=%22s%22` })),
+      '400 107 where parameter is not valid JSON');
+    eq(`${who}: $or that is not an array is a sanitized 102 for a client`,
+      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}` })), '400 102 Permission denied');
+    eq(`${who}: and a 500 for master`,
+      error(await call({ path: `/classes/${C}?where=${e({ $or: 5 })}`, headers: master() })), '500 1 Internal server error.');
+
+    // Order: the internal timestamp names alias the public ones, and an empty entry is a field.
+    eq(`${who}: order=_created_at sorts`, count(await call({ path: `/classes/${C}?order=_created_at` })), '200 3');
+    eq(`${who}: an empty order entry is refused`, error(await call({ path: `/classes/${C}?order=n,` })),
+      '400 105 Invalid field name: .');
+
+    // keys and include are split and never trimmed.
+    eq(`${who}: a key with a leading space names no field`,
+      fields((await call({ path: `/classes/${C}?keys=%20n&limit=1` })).body?.results?.[0]), '');
+
+    // Pointers: a dotted key includes its parent; a null pointer has no key.
+    const A = `I15A_${sfx}`;
+    const author = (await call({ method: 'POST', path: `/classes/${A}`, headers: master(), body: { name: 'x', secret: 's' } })).body?.objectId;
+    const H = `I15H_${sfx}`;
+    const ptr = { __type: 'Pointer', className: A, objectId: author };
+    await call({ method: 'POST', path: `/classes/${H}`, headers: master(), body: { k: 1, author: ptr } });
+    // Created null, a pointer reads back as `null`; updated to null, it reads back with no key.
+    await call({ method: 'POST', path: `/classes/${H}`, headers: master(), body: { k: 2, author: null } });
+    const later = (await call({ method: 'POST', path: `/classes/${H}`, headers: master(), body: { k: 3, author: ptr } })).body?.objectId;
+    await call({ method: 'PUT', path: `/classes/${H}/${later}`, headers: master(), body: { author: null } });
+    const dotted = (await call({ path: `/classes/${H}?keys=author.name&where=${e({ k: 1 })}` })).body?.results?.[0]?.author;
+    eq(`${who}: keys=author.name includes author with only name`,
+      `${dotted?.__type} ${dotted?.name} ${'secret' in (dotted ?? {})}`, 'Object x false');
+    const spaced = (await call({ path: `/classes/${H}?include=%20author&where=${e({ k: 1 })}` })).body?.results?.[0]?.author;
+    eq(`${who}: an include with a leading space includes nothing`, spaced?.__type, 'Pointer');
+    const created = (await call({ path: `/classes/${H}?where=${e({ k: 2 })}` })).body?.results?.[0];
+    eq(`${who}: a pointer created null reads back null`, J(created?.author), 'null');
+    const updated = (await call({ path: `/classes/${H}?where=${e({ k: 3 })}` })).body?.results?.[0];
+    eq(`${who}: a pointer updated to null reads back with no key`, 'author' in (updated ?? {}), false);
+
+    // A `userField:` rule over an array of pointers grants the user it names.
+    const user = await signUp(server, 'i15');
+    const U = `I15U_${sfx}`;
+    const userPtr = { __type: 'Pointer', className: '_User', objectId: user.id };
+    await call({ method: 'POST', path: `/classes/${U}`, headers: master(), body: { owners: [userPtr], secret: 's' } });
+    const clp = await call({ method: 'PUT', path: `/schemas/${U}`, headers: master(), body: {
+      classLevelPermissions: { find: { '*': true }, get: { '*': true }, protectedFields: { '*': ['secret'], 'userField:owners': [] } },
+    } });
+    eq(`${who}: the userField CLP is accepted`, clp.status, 200);
+    const own = (await call({ path: `/classes/${U}`, headers: as(user.token) })).body?.results?.[0];
+    eq(`${who}: an owner listed in an array sees the protected field`, own?.secret, 's');
+  }
+}

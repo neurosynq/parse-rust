@@ -128,8 +128,15 @@ def main():
     # tool works in a checkout that carries the design documents.
     scan_roots = [d for d in ("crates", "tools", "docs") if os.path.isdir(os.path.join(REPO, d))]
     scan_exts = (".rs", ".md", ".js", ".mjs", ".py", ".sh", ".toml", ".yml")
+    # The top-level documents that cite upstream too. The changelog was skipped for a release and
+    # a pin change, and nine of its citations went on pointing at the previous pin's lines.
+    walks = [
+        (REPO, [], [f for f in ("CHANGELOG.md", "CONTRIBUTING.md", "README.md")
+                    if os.path.isfile(os.path.join(REPO, f))])
+    ]
     for top in scan_roots:
-      for root, dirs, files in os.walk(os.path.join(REPO, top)):
+        walks.extend(os.walk(os.path.join(REPO, top)))
+    for root, dirs, files in walks:
         dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "target")]
         for name in files:
             if not name.endswith(scan_exts):

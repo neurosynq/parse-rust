@@ -368,7 +368,8 @@ async fn send(http: &Http, base: &str, req: &Req) -> Resp {
 }
 
 // -------------------------------------------------------------------------------------------
-// Workloads: the seven 0.3.0 pilots (benchmarks.md section 3)
+// Workloads: the seven 0.3.0 pilots, and the two added on 2026-10-07 for date-heavy pages and an
+// include through an array of pointers
 // -------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -480,7 +481,64 @@ fn workloads() -> Vec<Workload> {
                 master: false,
             },
         },
+        // A large page dense in dates: every row carries the two stamped dates and four of its
+        // own. A thousand rows was the most a hosted Parse query returned, and it is still the
+        // page client code reaches for when it pulls a whole class, so it is where per-date cost
+        // adds up.
+        Workload {
+            name: "query.dated",
+            class: Class::Normalized,
+            corpus: None,
+            request: Req {
+                method: "GET",
+                path: format!("/classes/BenchDated?order=n&limit={DATED_ROWS}"),
+                body: None,
+                master: false,
+            },
+        },
+        // An include through an array of pointers rather than a pointer field. Every holder points
+        // at the same four targets, so a server that collects ids across rows issues one target
+        // query.
+        Workload {
+            name: "include.array",
+            class: Class::Normalized,
+            corpus: None,
+            request: Req {
+                method: "GET",
+                path: "/classes/BenchArrayHolder?include=refs&order=n&limit=20".into(),
+                body: None,
+                master: false,
+            },
+        },
     ]
+}
+
+/// Rows in `query.dated`, all read by its one request.
+const DATED_ROWS: usize = 1000;
+
+/// A fixed instant per row and field, so both targets store and return identical dates.
+fn dated_iso(row: usize, field: usize) -> String {
+    let ms = 1_600_000_000_000_i64 + (row as i64) * 86_400_123 + (field as i64) * 3_600_007;
+    let days = ms.div_euclid(86_400_000);
+    let rem = ms.rem_euclid(86_400_000);
+    // Civil date from days since the epoch (Howard Hinnant's algorithm), so the driver needs no
+    // date crate for six fixed values.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600_000,
+        rem / 60_000 % 60,
+        rem / 1000 % 60,
+        rem % 1000
+    )
 }
 
 /// The same data on every target, through the API with the master key and fixed objectIds.
@@ -538,6 +596,32 @@ async fn seed(http: &Http, base: &str) {
             json!({ "objectId": id("holder", n), "n": n, "a": p(0), "b": p(1), "c": p(2), "d": p(3) }),
         ));
     }
+    for n in 0..20 {
+        let p = |t: usize| json!({ "__type": "Pointer", "className": "BenchTarget", "objectId": id("target", t) });
+        must.push(post(
+            "/classes/BenchArrayHolder".into(),
+            json!({ "objectId": id("aholder", n), "n": n, "refs": [p(0), p(1), p(2), p(3)] }),
+        ));
+    }
+    // Through `/batch`, fifty at a time, so a thousand rows do not cost a thousand round trips at
+    // the 10 ms rung.
+    let date = |row: usize, field: usize| json!({ "__type": "Date", "iso": dated_iso(row, field) });
+    for chunk in (0..DATED_ROWS).collect::<Vec<_>>().chunks(50) {
+        let requests: Vec<Value> = chunk
+            .iter()
+            .map(|&n| {
+                json!({
+                    "method": "POST",
+                    "path": "/parse/classes/BenchDated",
+                    "body": {
+                        "objectId": id("dated", n), "n": n,
+                        "d0": date(n, 0), "d1": date(n, 1), "d2": date(n, 2), "d3": date(n, 3),
+                    },
+                })
+            })
+            .collect();
+        must.push(post("/batch".into(), json!({ "requests": requests })));
+    }
     for req in must {
         let r = send(http, base, &req).await;
         if !(200..300).contains(&r.status) {
@@ -545,6 +629,12 @@ async fn seed(http: &Http, base: &str) {
                 "seeding {} answered {}: {}",
                 req.path, r.status, r.body
             ));
+        }
+        // A batch answers 200 whatever its operations did.
+        if let Some(items) = r.body.as_array() {
+            if let Some(bad) = items.iter().find(|i| i.get("error").is_some()) {
+                fail(format!("seeding {}: an operation failed: {bad}", req.path));
+            }
         }
     }
 }
@@ -975,8 +1065,8 @@ async fn main() {
     }
     set_rung(&http, &stack, 0).await;
 
-    // A gate run measures exactly the three rungs the contract names; anything else is a
-    // diagnostic and cannot report clean.
+    // A gate run measures exactly the three rungs in `GATE_RUNGS`; anything else is a diagnostic
+    // and cannot report clean.
     let mut rungs = args.rungs.clone();
     rungs.sort_unstable();
     if rungs != GATE_RUNGS {
@@ -1098,6 +1188,12 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dated_values_are_the_instants_they_name() {
+        assert_eq!(dated_iso(0, 0), "2020-09-13T12:26:40.000Z");
+        assert_eq!(dated_iso(999, 3), "2023-06-09T15:28:42.898Z");
+    }
 
     fn matrix() -> Value {
         serde_json::from_str(include_str!("../../matrix.json")).expect("matrix.json parses")

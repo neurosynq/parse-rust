@@ -64,6 +64,13 @@ pub trait StorageAdapter: Send + Sync {
     /// full `getAllClasses`, and reproducing that shape keeps the caching behavior comparable.
     fn all_schemas(&self) -> impl Future<Output = Result<Vec<ClassSchema>, ParseError>> + Send;
 
+    /// Does `_SCHEMA` hold this class? A read that reaches a class its snapshot lacks asks this to
+    /// tell a class nobody has written from one another server created since.
+    fn class_exists(
+        &self,
+        class_name: &str,
+    ) -> impl Future<Output = Result<bool, ParseError>> + Send;
+
     /// Persist a class schema, creating the class if it does not exist.
     ///
     /// **Must not clobber metadata it was not given.** A field-adding write reaches here with

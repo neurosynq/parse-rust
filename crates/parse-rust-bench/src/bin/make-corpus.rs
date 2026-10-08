@@ -1,6 +1,8 @@
-//! Writes the nine frozen corpora: `corpus/{200b,2kb,8kb}-{flat,nested,pointers}.json`.
+//! Writes the twelve frozen corpora: `corpus/{200b,2kb,8kb}-{flat,nested,pointers,dated}.json`.
 //!
-//! Each file is one Parse object body as a REST client sends it on a create. The corpora are
+//! Each file is one Parse object body as a REST client sends it on a create, except that `dated`
+//! also carries `createdAt` and `updatedAt`, which the server stamps rather than the client sends,
+//! so the transform families exercise the stored row a read decodes. The corpora are
 //! frozen: every microbenchmark record carries the hash of the file it ran on, so a corpus that
 //! changed would silently change every historical number filed under its name. This generator
 //! exists so the files can be reproduced byte for byte, not so they can drift. Regenerating with
@@ -148,6 +150,12 @@ fn generate_one(shape: &str, target: usize, rng: &mut Rng) -> Vec<u8> {
     match shape {
         "flat" => fields.push(("when".into(), rng.date())),
         "nested" => fields.push(("title".into(), json!(rng.text(12)))),
+        // The two server-stamped dates first, as a stored row carries them, so the read direction
+        // exercises the bare-ISO `createdAt`/`updatedAt` path beside the `{__type: Date}` fields.
+        "dated" => {
+            fields.push(("createdAt".into(), rng.date()));
+            fields.push(("updatedAt".into(), rng.date()));
+        }
         _ => {
             fields.push(("title".into(), json!(rng.text(12))));
             refs.push(rng.pointer());
@@ -160,6 +168,7 @@ fn generate_one(shape: &str, target: usize, rng: &mut Rng) -> Vec<u8> {
         match shape {
             "flat" => next_fields.push((format!("f{i:03}"), scalar(rng, i))),
             "nested" => next_fields.push((format!("n{i:03}"), nested_unit(rng))),
+            "dated" => next_fields.push((format!("d{i:03}"), rng.date())),
             _ if i % 2 == 0 => next_fields.push((format!("p{i:03}"), rng.pointer())),
             _ => next_refs.push(rng.pointer()),
         }
