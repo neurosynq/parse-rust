@@ -14,10 +14,11 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
 ## 0.4.0
 
 Dependency majors, the fixes their review found, and a read optimization for protected
-fields. Planned as 0.3.1 and numbered as a minor because it breaks the Rust API: from this release
-every Rust API break costs a minor, so a patch number means `cargo update` is safe, and
-`cargo-semver-checks` in CI holds that. A project that depends on a parse-rust crate directly
-should read Breaking below. **The minimum Rust is now 1.89.**
+fields. It is a minor release because it breaks the Rust API: from this release every Rust API
+break costs a minor, so a patch number means `cargo update` is safe. `cargo-semver-checks` in CI
+catches the kinds of break it can detect; a dependency moving to a new major or a changed return
+type is outside its checks, so the changelog remains the record. A project that depends on a
+parse-rust crate directly should read Breaking below. **The minimum Rust is now 1.89.**
 
 For an SDK talking to the `parse-rust` binary, the wire changes are the routing and batch entries
 under Changed and the first four entries under Fixed, each of which moves parse-rust to
@@ -76,15 +77,22 @@ dependency updates and the protected-field projection change no response.
   anything; `{...}` is an optional group; and `(`, `)`, `[`, `]`, `+` and `!` are refused at boot,
   and `\` is an escape. None of it can be served the same way under axum 0.8, so all of it is
   refused rather than served differently.
+- **An empty environment variable is unset and takes the default**, as upstream's CLI reads one
+  only when it is truthy (`cli/utils/commander.js:64`). An empty `PARSE_SERVER_MOUNT_PATH` now
+  serves `/parse` rather than the root, an empty `PARSE_SERVER_ALLOW_ORIGIN` allows `*` rather
+  than no origin, and an empty `PARSE_SERVER_MASTER_KEY_IPS` keeps the loopback default rather than
+  refusing to start. An empty application id or master key is reported as missing.
+  To block browsers, set `PARSE_SERVER_ALLOW_ORIGIN` to an origin you control rather than to the
+  empty string.
 
 ### Added
 
 - **`parse_rust_server::axum` and `parse_rust_mongo::bson` re-export the versions those crates are
   built with**, so an embedder names the same `Router`, `Document` and `Bson` types the crates use
   instead of depending on a version that might not match.
-- **`cargo-semver-checks` runs in CI against the last release on crates.io.** A Rust API break now
-  costs a minor version, and a patch that breaks an embedder fails CI rather than their
-  `cargo update`.
+- **`cargo-semver-checks` runs in CI against the last release on crates.io**, so a patch carrying a
+  break it can detect, such as a new field on an exhaustively constructible struct or a changed
+  parameter list, fails CI rather than an embedder's `cargo update`.
 
 ### Changed
 
@@ -160,11 +168,6 @@ dependency updates and the protected-field projection change no response.
   then killed the process mid-request, because a container's first process has no default action
   for the signal. `serve_with_shutdown` offers the same to an embedder. Present in 0.3.0.
 - **An unparsable `PORT` is refused** rather than replaced by 27800. Present in 0.3.0.
-- **An empty environment variable is unset and takes the default**, as upstream's CLI reads one
-  only when it is truthy (`cli/utils/commander.js:64`). An empty `PARSE_SERVER_MOUNT_PATH` now
-  serves `/parse` rather than the root, an empty `PARSE_SERVER_ALLOW_ORIGIN` allows `*` rather
-  than no origin, and an empty `PARSE_SERVER_MASTER_KEY_IPS` keeps the loopback default rather than
-  refusing to start. An empty application id or master key is reported as missing.
 - **An unreachable database is reported as that.** Startup failed with `1: Database error` after
   the driver's 30 s server-selection timeout, naming neither the host nor the cause. It now pings
   the database first and fails with `cannot reach MongoDB:` and the driver's account of each address

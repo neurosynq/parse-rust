@@ -75,9 +75,8 @@ pub async fn handle(
         checked.push((request, path));
     }
     // UPSTREAM-QUIRK: `batch.js:90-92`. Upstream recovers its mount by stripping `/batch` off
-    // `req.originalUrl`, and throws a bare string when the URL does not end with it. Express routes
-    // `/batch/` and `/batch?x=1` to the handler all the same, so both are a bare 500 with nothing
-    // run, after the shape checks above. Running them instead would perform writes upstream never
+    // `req.originalUrl`, and throws a bare string when the URL does not end with it, so a request
+    // URL such as `/batch?x=1` is a bare 500 with nothing run, after the shape checks above. Running them instead would perform writes upstream never
     // does. A fragment never reaches a server, so `/batch#f` arrives as `/batch` at both.
     let Some(url_prefix) = original_url.strip_suffix(BATCH_PATH) else {
         return Err(ParseError::internal(
@@ -103,8 +102,8 @@ pub async fn handle(
             }
             _ => "GET".to_string(),
         };
-        // Compared exactly, as upstream compares it. `routable_path` has already dropped a
-        // trailing slash, so a sub-request to `/parse/batch/` is refused here as a nested batch.
+        // `routable` is normalized, so every spelling that routes to `/batch` is refused here as a
+        // nested batch.
         if normalized == "POST" && routable == BATCH_PATH {
             return Err(ParseError::invalid_json(
                 "nested batch requests are not allowed",
@@ -315,8 +314,7 @@ fn routable_path(path: &str, prefix: &str) -> Result<String, ParseError> {
     };
     // `path.posix.join('/', x)`: a leading slash is guaranteed, and the join normalizes, so empty
     // and `.` segments go and `..` removes the segment before it, never climbing above the root.
-    // **One known difference:** Node's join keeps a trailing slash, `/classes/X/`, and this drops
-    // it, `/classes/X`. Not reproduced yet.
+    // A trailing slash is dropped with the empty segments.
     let mut segments: Vec<&str> = Vec::new();
     for segment in rest.split('/') {
         match segment {

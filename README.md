@@ -33,7 +33,7 @@ and `comment`), a benchmark harness, and a one-command demo. Everything else is 
 behind it.
 
 0.4.0 moves the dependencies to their current majors, including `axum` 0.8 and `bson` 3, which
-changes the Rust API for an embedder despite the patch number; `CHANGELOG.md` says how to migrate.
+changes the Rust API for an embedder, hence a minor release; `CHANGELOG.md` says how to migrate.
 It also stops reading protected fields from the database when every row would lose them anyway,
 and brings path matching and `/batch` routing closer to parse-server's: trailing slashes, an extra
 leading slash and a batch's routing prefix now behave as there, while matching stays
@@ -107,7 +107,7 @@ not on the code existing, which is why the first item is the instrument rather t
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
 
-0.1.0, 0.2.0, 0.2.1 and 0.3.0 are done; `CHANGELOG.md` says what each one actually landed.
+0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.4.0 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
@@ -234,13 +234,14 @@ any one and every non-master request must present a matching key.
 The master key is accepted only when the connection's peer address matches
 `PARSE_SERVER_MASTER_KEY_IPS`. Forwarding headers do not change that address. A container or a
 deployment behind a load balancer therefore has to list the address or CIDR range the server
-actually sees, not the original client's address. The environment value is not whitespace-trimmed,
-and an empty entry in the list is a startup error rather than "allow none", matching upstream.
+actually sees, not the original client's address. The environment value is not whitespace-trimmed.
+An empty variable keeps the loopback default, and an empty entry inside the list, as in `a,,b`, is a
+startup error rather than "allow none", matching upstream.
 
-An empty variable is unset and takes the default, as upstream's CLI reads it. An unparsable value is a
-startup failure rather than a fallback to the default. Several of these
-are security defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly
-produce sessions that never expire.
+An empty variable is unset and takes the default, as upstream's CLI reads it. An unparsable value
+is a startup failure rather than a fallback to the default. Several of these are security
+defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly produce sessions
+that never expire.
 
 ```
 curl -s http://127.0.0.1:27800/parse/health
