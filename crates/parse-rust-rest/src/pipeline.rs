@@ -750,13 +750,13 @@ fn find_core<'a, S: StorageAdapter>(
                 }
             }
         }
-        let exclude_keys = projected_away(class_name, keys.as_ref(), protected.as_ref());
+        let omit_fields = projected_away(&schema, keys.as_ref(), protected.as_ref());
         let query_options = QueryOptions {
             limit: options.limit,
             skip: options.skip,
             order,
             keys,
-            exclude_keys,
+            omit_fields,
             case_insensitive: false,
             hint: options.hint.clone(),
             comment: options.comment.clone(),
@@ -892,7 +892,7 @@ pub async fn explain<S: StorageAdapter>(
         skip: options.skip,
         order,
         keys: projection(&schema, &options),
-        exclude_keys: None,
+        omit_fields: None,
         case_insensitive: false,
         hint: options.hint,
         comment: options.comment,
@@ -912,48 +912,49 @@ pub async fn explain<S: StorageAdapter>(
     Ok(document)
 }
 
-/// `keys` and `excludeKeys` folded into one positive projection.
-///
-/// `handleExcludeKeys` (`RestQuery.js:1039-1054`) subtracts from `keys` when there is one, and
-/// otherwise from the schema's field list, which is why this needs the schema.
 /// Protected fields the database need not return at all, since every row would lose them anyway.
 ///
 /// A performance measure, not the protection: [`filter_sensitive_data`] still strips the same
 /// fields from every row, which is what keeps a backend that ignores the option correct. Reading a
 /// large protected field only to discard it was most of the cost of a read that protects one.
+/// Upstream declines the projection outright (`DatabaseController.js:1498-1500`); this is
+/// parse-rust's own, kept to the cases where it cannot change a response.
 ///
 /// Only where the stripped set is the same for every row of the read. Not with explicit `keys`,
 /// whose projection already decides what is read. Not on `_User`, where the owner of a row can be
 /// exempt from its own protection. Not when any `userField:` rule exists, because such a rule
-/// unprotects a field on the rows that point at the caller, which only the row can say. The four
-/// keys the row handling relies on are read regardless and stripped afterwards as before.
+/// unprotects a field on the rows that point at the caller, which only the row can say.
+///
+/// **Only fields the schema declares, and never the four keys the row handling relies on.**
+/// Protected names are not validated when they arrive by `PARSE_SERVER_PROTECTED_FIELDS` or a
+/// hand-edited `_SCHEMA`, upstream included, so the set can hold an internal column, a dotted path
+/// or a `$` name. Projected, those emptied the permission columns, dropped `_id`, removed a nested
+/// field the strip would have kept, or made MongoDB refuse the read. A declared field is a plain
+/// top-level column, so projecting it away removes exactly what the strip removes.
 fn projected_away(
-    class_name: &str,
+    schema: &ClassSchema,
     keys: Option<&Vec<String>>,
     protected: Option<&crate::clp::ProtectedFieldPlan>,
 ) -> Option<Vec<String>> {
     const ALWAYS_FETCHED: [&str; 4] = ["objectId", "createdAt", "updatedAt", "ACL"];
     let plan = protected?;
-    if keys.is_some() || class_name == USER_CLASS || !plan.user_field_rules.is_empty() {
-        return None;
-    }
-    // Only plain top-level names. A dotted entry is a path, and `profile` beside `profile.secret`
-    // is a projection MongoDB refuses as a path collision, which turned every read into an error;
-    // a `$` name is an operator to it. Any such entry is left to the strip after the query, and
-    // so is the rest of the set, since a partial projection would be reasoned about separately.
-    let plain = |f: &String| !f.is_empty() && !f.contains('.') && !f.starts_with('$');
-    if !plan.strip.iter().all(plain) {
+    if keys.is_some() || schema.class_name == USER_CLASS || !plan.user_field_rules.is_empty() {
         return None;
     }
     let mut fields: Vec<String> = Vec::new();
     for f in &plan.strip {
-        if !ALWAYS_FETCHED.contains(&f.as_str()) && !fields.contains(f) {
+        if !ALWAYS_FETCHED.contains(&f.as_str()) && schema.field(f).is_some() && !fields.contains(f)
+        {
             fields.push(f.clone());
         }
     }
     (!fields.is_empty()).then_some(fields)
 }
 
+/// `keys` and `excludeKeys` folded into one positive projection.
+///
+/// `handleExcludeKeys` (`RestQuery.js:1039-1054`) subtracts from `keys` when there is one, and
+/// otherwise from the schema's field list, which is why this needs the schema.
 fn projection(schema: &ClassSchema, options: &FindOptions) -> Option<Vec<String>> {
     // The four keys a projection can never drop (`AlwaysSelectedKeys`, `RestQuery.js:9`).
     const ALWAYS: [&str; 4] = ["objectId", "createdAt", "updatedAt", "ACL"];
@@ -4028,11 +4029,18 @@ mod projection_exclusion_tests {
         }
     }
 
+    fn post() -> ClassSchema {
+        ClassSchema::new("Post")
+            .with_field("secret", FieldType::String)
+            .with_field("notes", FieldType::String)
+            .with_field("address", FieldType::Object)
+    }
+
     #[test]
     fn a_fixed_protected_set_is_projected_away() {
         let p = plan(&["secret", "notes"], false);
         assert_eq!(
-            projected_away("Post", None, Some(&p)),
+            projected_away(&post(), None, Some(&p)),
             Some(vec!["secret".to_string(), "notes".to_string()])
         );
     }
@@ -4042,55 +4050,56 @@ mod projection_exclusion_tests {
     fn the_projection_is_skipped_where_the_set_is_not_fixed() {
         let p = plan(&["secret"], false);
         let keys = vec!["title".to_string()];
-        assert_eq!(projected_away("Post", Some(&keys), Some(&p)), None, "keys");
-        assert_eq!(projected_away("_User", None, Some(&p)), None, "_User");
+        assert_eq!(projected_away(&post(), Some(&keys), Some(&p)), None, "keys");
+        let user = ClassSchema::new("_User").with_field("secret", FieldType::String);
+        assert_eq!(projected_away(&user, None, Some(&p)), None, "_User");
         assert_eq!(
-            projected_away("Post", None, Some(&plan(&["secret"], true))),
+            projected_away(&post(), None, Some(&plan(&["secret"], true))),
             None,
             "userField rule"
         );
         // Master and maintenance have no plan at all.
-        assert_eq!(projected_away("Post", None, None), None, "no plan");
+        assert_eq!(projected_away(&post(), None, None), None, "no plan");
         assert_eq!(
-            projected_away("Post", None, Some(&plan(&[], false))),
+            projected_away(&post(), None, Some(&plan(&[], false))),
             None,
             "empty"
         );
     }
 
-    /// A dotted or `$` entry is a path to MongoDB, and `profile` with `profile.secret` collides,
-    /// so a set containing one is never projected.
+    /// Only declared fields, never the always-read keys, and never a name the schema does not
+    /// declare: an internal column, a path, an operator.
     #[test]
-    fn a_set_with_a_path_is_not_projected() {
-        for strip in [
-            &["profile", "profile.secret"][..],
-            &["a.b"][..],
-            &["$x", "y"][..],
-        ] {
-            assert_eq!(
-                projected_away("Post", None, Some(&plan(strip, false))),
-                None,
-                "{strip:?}"
-            );
-        }
-        assert_eq!(
-            projected_away("Post", None, Some(&plan(&["a", "a"], false))),
-            Some(vec!["a".to_string()])
-        );
-    }
-
-    /// The keys the row handling relies on are read even when protected.
-    #[test]
-    fn the_always_fetched_keys_are_never_projected_away() {
+    fn only_declared_fields_outside_the_always_read_set_are_projected() {
         let p = plan(
-            &["objectId", "createdAt", "updatedAt", "ACL", "secret"],
+            &[
+                "objectId",
+                "createdAt",
+                "updatedAt",
+                "ACL",
+                "_rperm",
+                "_wperm",
+                "_id",
+                "address.street",
+                "$x",
+                "missing",
+                "address",
+                "secret",
+                "secret",
+            ],
             false,
         );
         assert_eq!(
-            projected_away("Post", None, Some(&p)),
-            Some(vec!["secret".to_string()])
+            projected_away(&post(), None, Some(&p)),
+            Some(vec!["address".to_string(), "secret".to_string()])
         );
-        let only = plan(&["createdAt", "ACL"], false);
-        assert_eq!(projected_away("Post", None, Some(&only)), None);
+        assert_eq!(
+            projected_away(
+                &post(),
+                None,
+                Some(&plan(&["address.street", "_rperm"], false))
+            ),
+            None
+        );
     }
 }

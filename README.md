@@ -381,7 +381,7 @@ acceptance gates are:
   patched suite must pass against parse-server.
 - **Gate H** checks that `reconfigureServer` refuses, by name, any option parse-rust cannot honour,
   so a spec cannot pass by having its configuration silently ignored.
-- **Gate J** benchmarks seven workloads against parse-server at three injected database latencies,
+- **Gate J** benchmarks ten workloads against parse-server at three injected database latencies,
   after checking both servers give the same answer, and microbenchmarks the JSON and BSON
   transforms. It publishes distributions only, with no faster or slower verdict yet.
 - **Gate K** brings the demo up twice from a fresh clone.

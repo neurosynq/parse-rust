@@ -31,10 +31,34 @@ async fn a_trailing_slash_is_optional() {
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
 async fn a_double_slash_after_the_mount_is_routed() {
     let server = common::boot().await;
-    for path in ["//health", "//serverInfo", "//classes/Double"] {
-        let r = common::get(&server.host, path, &As::master()).await;
-        assert_eq!(r.status, 200, "{path}: {}", r.raw);
-    }
+    let made = common::post(
+        &server.host,
+        "/classes/Double",
+        &As::master(),
+        &json!({"n": 1}),
+    )
+    .await;
+    assert_eq!(made.status, 201, "{}", made.raw);
+    let health = common::get(&server.host, "//health", &As::master()).await;
+    assert_eq!(
+        (health.status, health.body.clone()),
+        (200, json!({"status": "ok"}))
+    );
+    let info = common::get(&server.host, "//serverInfo", &As::master()).await;
+    assert_eq!(info.status, 200, "{}", info.raw);
+    assert!(
+        info.body.get("parseServerVersion").is_some(),
+        "{}",
+        info.raw
+    );
+    let rows = common::get(&server.host, "//classes/Double", &As::master()).await;
+    assert_eq!(
+        (rows.status, rows.results().len()),
+        (200, 1),
+        "{}",
+        rows.raw
+    );
+    assert_eq!(rows.results()[0]["n"], json!(1));
 }
 
 /// A `:param` matches one or more characters, so an empty segment matches no route.
@@ -118,4 +142,103 @@ async fn serve_refuses_a_mount_path_that_is_route_syntax() {
         };
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{mount}: {e}");
     }
+}
+
+/// A server on its own mount, for the cases the shared harness, which always mounts `/parse`,
+/// cannot reach.
+async fn boot_at(mount: &str) -> String {
+    let database = format!("parse_rust_it_mount_{}_{}", std::process::id(), mount.len());
+    let config = parse_rust_server::ServerConfig::new(common::APP_ID, common::MASTER_KEY)
+        .rest_api_key(common::REST_KEY)
+        .mount_path(mount);
+    let storage = parse_rust_mongo::MongoAdapter::connect(&common::mongo_uri(), &database)
+        .await
+        .expect("MongoDB must be reachable at PARSE_RUST_TEST_MONGO");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let (bound, server) =
+        parse_rust_server::serve(parse_rust_server::AppState::new(config, storage), addr)
+            .await
+            .expect("bind failed");
+    tokio::spawn(server);
+    bound.to_string()
+}
+
+/// One request to an exact path, with a body of the caller's choosing. Returns status and body.
+async fn raw(host: &str, method: &str, path: &str, body: &[u8]) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nX-Parse-Application-Id: {}\r\n\
+         X-Parse-Master-Key: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        common::APP_ID,
+        common::MASTER_KEY,
+        body.len()
+    );
+    let mut socket = tokio::net::TcpStream::connect(host).await.expect("connect");
+    socket.write_all(head.as_bytes()).await.expect("write");
+    socket.write_all(body).await.expect("write");
+    let mut text = String::new();
+    socket.read_to_string(&mut text).await.expect("read");
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in: {text}"));
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .and_then(|b| serde_json::from_str(b).ok())
+        .unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// At the root mount: `//health` is the health route, exempt from the body checks; `//classes`
+/// routes; and a batch through `//batch` takes its prefix from that URL, `/`, so a sub-request
+/// path without its leading slash is refused, as upstream refuses it.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn the_root_mount_follows_the_same_rules() {
+    let host = boot_at("/").await;
+    assert_eq!(raw(&host, "POST", "//health", b"{not json").await.0, 200);
+    assert_eq!(
+        raw(&host, "POST", "/classes/Root", br#"{"n":1}"#).await.0,
+        201
+    );
+    let (status, body) = raw(&host, "GET", "//classes/Root", b"").await;
+    assert_eq!(
+        (status, body["results"].as_array().map(Vec::len)),
+        (200, Some(1))
+    );
+    let batch = br#"{"requests":[{"method":"POST","path":"classes/Root","body":{"n":2}}]}"#;
+    let (status, body) = raw(&host, "POST", "//batch", batch).await;
+    assert_eq!(
+        (status, body),
+        (
+            400,
+            json!({"code": 107, "error": "cannot route batch path classes/Root"})
+        )
+    );
+    let (_, body) = raw(&host, "GET", "/classes/Root", b"").await;
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+}
+
+/// A mount that itself contains `//` is matched literally; the path rules apply below it.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_mount_containing_a_double_slash_is_served() {
+    let host = boot_at("/api//v1").await;
+    let (status, body) = raw(&host, "GET", "/api//v1/health", b"").await;
+    assert_eq!((status, body), (200, json!({"status": "ok"})));
+    assert_eq!(
+        raw(&host, "POST", "/api//v1/classes/Mounted", br#"{"n":1}"#)
+            .await
+            .0,
+        201
+    );
+    let (status, body) = raw(&host, "GET", "/api//v1/classes/Mounted/", b"").await;
+    assert_eq!(
+        (status, body["results"].as_array().map(Vec::len)),
+        (200, Some(1))
+    );
+    assert_eq!(raw(&host, "GET", "/api/v1/health", b"").await.0, 404);
 }

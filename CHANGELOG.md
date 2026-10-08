@@ -13,15 +13,17 @@ the API this project promises to keep stable is Parse Server's, not its own Rust
 
 ## 0.3.1
 
-Dependency majors, and the fixes two reviews of them found.
+Dependency majors, the fixes four reviews of them found, and a read optimization for protected
+fields.
 
 **This release breaks the Rust API despite its patch number.** Cargo treats 0.3.1 as compatible with
 0.3.0, so `cargo update` takes an embedder onto it. A project that depends on any parse-rust crate
 directly, not only one that embeds `parse-rust-server`, should read the section below before
 updating, or pin `=0.3.0` until it can. **The minimum Rust is now 1.89.**
 
-For an SDK talking to the `parse-rust` binary, the wire changes are the ones under Changed and
-Fixed. Each moves parse-rust toward parse-server's answer.
+For an SDK talking to the `parse-rust` binary, the wire changes are the routing and batch entries
+under Changed and everything under Fixed, each of which moves parse-rust to parse-server's answer.
+The dependency updates and the protected-field projection change no response.
 
 ### BREAKING
 
@@ -31,10 +33,19 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   depend on `axum = "0.8"`; write path parameters in your own routes as `{name}` rather than
   `:name`, since a `:name` segment panics when the router is built; and remove `#[async_trait]`
   from your own extractor impls.
+- **`router()` carries its own fallback.** An unrouted path is answered inside it, and at a root
+  mount the API is the router's fallback service. So nest it with `nest` or `nest_service`, never
+  `merge` it into a router that has a fallback of its own, which axum refuses by panicking; and
+  never call `.fallback()` on it, which at a root mount replaces the whole API.
 - **The request body reaches handlers differently.** `body_credentials::extract` passes a write's
-  JSON object body on as a `ParsedBody` request extension with an empty body, rather than as
-  serialized bytes, and the handlers take a `JsonBody` extractor where they took
-  `Option<Json<_>>`. A layer that reads the body after `extract` must read the extension.
+  JSON object body on as a `ParsedBody` request extension and the request's body as empty, rather
+  than as serialized bytes. The handlers take a `JsonBody` extractor where they took
+  `Option<Json<_>>`. A layer or handler of your own that reads the body after `extract`, an axum
+  `Json` extractor included, sees an empty body and must read the extension instead.
+- **The batch route reads the request's original URL.** `routes::batch::handle` takes it as
+  `original_url` in place of the mount path, and `routes::http::batch` reads it from the
+  `OriginalUrl` extension the router's path layer inserts, falling back to axum's `OriginalUri`
+  when that layer is absent.
 - **`bson` 2 to 3, in `parse-rust-mongo`'s public API.** The transform functions take and return
   bson 3 `Document` and `Bson`. To migrate: depend on `bson = "3"` and follow bson's own migration
   notes. The changes this codebase met were a regex's `pattern` and `options` becoming `CString`,
@@ -51,15 +62,17 @@ Fixed. Each moves parse-rust toward parse-server's answer.
 - **`parse-rust-core`: `ParseErrorInfo` has a new field, `at_query`**, so a struct literal of it
   needs `..Default::default()`. `ParseError::before_query()` no longer marks an error that carries
   `at_query`: such an error is raised by the database call upstream, wherever parse-rust finds it.
-- **`parse-rust-storage`: `QueryOptions` has a new field, `exclude_keys`**, so a struct literal of
+- **`parse-rust-storage`: `QueryOptions` has a new field, `omit_fields`**, so a struct literal of
   it needs `..Default::default()`. An adapter may ignore it; see Changed.
-- **A mount path is checked.** It must start with `/` and must not contain `{`, `}`, `*`, `?`, `#`
-  or a segment starting with `:`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve` returns
-  an `InvalidInput` error, and `router()` given such a path serves nothing, every request a 404,
-  and writes the refusal to standard error. `ServerConfig::check_mount_path` is the check, for an
-  embedder that builds the router itself. Upstream accepts these paths: Express mounts `/:app` as a
-  parameter that matches any first segment, and `/{app}` literally. Under axum 0.8 neither can be
-  served the same way, so they are refused rather than served differently.
+- **A mount path is checked.** It must start with `/` and must not contain `{`, `}`, `*`, `:`, `(`,
+  `)`, `[`, `]`, `+`, `!`, `?` or `#`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
+  returns an `InvalidInput` error, and `router()` given such a path serves nothing, every request a
+  404, and writes the refusal to standard error. `ServerConfig::check_mount_path` is the check, for
+  an embedder that builds the router itself. Upstream's Express 5 router reads those characters as
+  syntax too, differently: `:name` anywhere in a segment is a parameter, so `/:app` matches any first
+  segment and `/a:b` matches `/a` followed by anything; `{...}` is an optional group; and `(`, `)`,
+  `[`, `]`, `+` and `!` are refused at boot. None of it can be served the same way under axum 0.8,
+  so all of it is refused rather than served differently.
 
 ### Changed
 
@@ -73,29 +86,33 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   same way on both sides.
 - **Paths below the mount match as parse-server's do.** One trailing slash is optional, so
   `/classes/Foo/` is `/classes/Foo`. One extra leading slash is ignored, as upstream's
-  `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes, and `/parse//health` is
-  the health route, exempt from the body checks. An empty segment that
-  remains matches no route, so `/classes//abc` is a 404 rather than a read of a class with an empty
-  name.
-- **A `/batch` whose URL does not end with `/batch` is a bare 500 and runs nothing**, as upstream's
-  is, because upstream recovers its mount from that suffix. The prefix it leaves must also start
-  every sub-request's path, so `/batch/?x=/batch` refuses its sub-requests with 107 before any
-  runs. `/batch/` and `/batch?x=1` were a 404
-  in 0.3.0, and reached the handler during this release's development.
+  `allowDoubleForwardSlash` ignores it, so `/parse//classes/Foo` routes, and `/parse//health` is the
+  health route, exempt from the body checks. An empty segment that remains matches no route, so
+  `/classes//abc` is a 404 rather than a read of a class with an empty name. The rules apply below
+  the mount only, so a mount that itself contains `//` is matched literally.
+- **A batch takes its routing prefix from its URL, as upstream's does.** Upstream strips `/batch`
+  off the request's original URL and requires every sub-request path to start with what remains.
+  So a URL that does not end with `/batch`, such as `/batch/` or `/batch?x=1`, is a bare 500 with
+  nothing run; `/batch/?x=/batch` leaves a prefix no sub-request path starts with and refuses each
+  with 107 before any runs; and `//batch` at a root mount leaves `/`, which a sub-request path must
+  start with. In 0.3.0 the prefix was the configured mount: `/batch?x=1` ran its sub-requests and
+  `/batch/` was a 404.
 - **An unrouted `HEAD` answers its 404 with `content-length: 0`**, as every other method does.
 - **Protected fields are left out of the database read when every row would lose them.** A read
   whose protected set is the same for every row now asks the database not to return those fields,
-  instead of reading them and stripping them afterwards. They are still stripped afterwards, so an
-  adapter that ignores the new `exclude_keys` option stays correct. The projection is skipped
-  wherever the set depends on the row or the caller: explicit `keys`, any `userField:` rule on the
-  class, `_User`, and the master and maintenance keys. It is also skipped when any protected entry
-  is not a plain top-level name, since MongoDB reads `profile.secret` as a path and refuses it
-  beside `profile`. `objectId`, `createdAt`, `updatedAt` and
-  `ACL` are always read. Responses are unchanged; only what is read from the database differs.
-  Measured on one machine against MongoDB 7.0.25, reading a whole class as a client with a 2 KB
-  protected field: 1,000 rows went from 11.9 ms to 4.9 ms at the median, and 10,000 rows from about
-  115 ms to about 45 ms. With a 25-byte protected field the difference is within noise. Gate J has a
-  new workload for it, `query.protected.large`.
+  instead of reading them and stripping them afterwards. Upstream declines this projection
+  (`DatabaseController.js:1498-1500`); it is parse-rust's own, kept to the cases where it cannot
+  change a response. The fields are still stripped afterwards, so an adapter that ignores the new
+  `omit_fields` option stays correct. It is skipped wherever the set depends on the row or the
+  caller: explicit `keys`, any `userField:` rule on the class, `_User`, and the master and
+  maintenance keys. And only fields the schema declares are projected away, never `objectId`,
+  `createdAt`, `updatedAt` or `ACL`: a protected name set through `PARSE_SERVER_PROTECTED_FIELDS` or
+  a hand-edited `_SCHEMA` is not validated, upstream included, and projecting an internal column, a
+  dotted path or a `$` name changed responses or made MongoDB refuse the read. Measured on one
+  machine against MongoDB 7.0.25, a client reading a whole class with a 2 KB protected field: at
+  1,000 rows the median went from 11.9 ms to 4.9 ms, and at 10,000 rows from about 115 ms to about
+  45 ms, in a before-and-after run of the two builds. With a 25-byte protected field the difference
+  is within noise. Gate J has a new workload for it, `query.protected.large`, at 1,000 rows.
 
 ### Fixed
 
@@ -103,15 +120,21 @@ Fixed. Each moves parse-rust toward parse-server's answer.
   regexes, which upstream decides by testing the regex's JavaScript rendering for `/^\Q`, anything,
   then `\E/` (`MongoTransform.js:143-169`); a lone value must be one. So a lone `^ba` is now refused
   with 107, and an ordinary regex beside a plain value is accepted. The refusal's message renders
-  each value as JavaScript joins it, a regex as `/source/` and a nested array as its elements. A
-  regex atom JavaScript cannot compile, such as `[`, is upstream's bare 500, ahead of that check,
-  because upstream compiles each atom with `new RegExp` while it builds the query; parse-rust
-  checks the pattern against JavaScript's grammar, tested against Node. This
-  was listed as a known parity gap at 0.2.0.
+  each value as JavaScript joins it: a regex as `/source/`, with V8's escaping, and a nested array
+  as its elements, a regex inside it as `[object Object]`. A regex atom JavaScript cannot compile,
+  such as `[`, is upstream's bare 500, ahead of that check, because upstream compiles each atom with
+  `new RegExp` while it builds the query; parse-rust checks the pattern against JavaScript's
+  grammar, tested against Node. This was listed as a known parity gap at 0.2.0.
+- **An object tagged as a Pointer, Date or Bytes is never read as a regex**, whatever else it
+  carries, because upstream's interior atom transform tests for those first
+  (`MongoTransform.js:566-582`). One carrying `$regex` was compiled as a regex, so a query could
+  return rows upstream does not. Present in 0.3.0.
 - **A body under the 20 MB limit is no longer refused for growing after it was parsed.** The parsed
   body was serialized again on its way to the route, which can lengthen it (`1e5` becomes
   `100000.0`), and a body that crossed the limit that way was refused as `body must be a JSON
   object`. It is now parsed once.
+- **`explain` builds the query before the text index**, as an ordinary find does and as upstream
+  does, so a malformed query is refused before any index is created. Present in 0.3.0.
 
 ## 0.3.0
 

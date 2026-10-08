@@ -397,10 +397,13 @@ impl ServerConfig {
 
     /// Refuse a mount path the router cannot serve as a literal prefix.
     ///
-    /// The path becomes a route prefix, and axum reads `{name}` and `{*name}` in one as
-    /// parameters: `/{app}` would match any first segment rather than the text `{app}`. A segment
-    /// opening with `:` is the older parameter syntax, which axum refuses by panicking. An empty
-    /// path and `/` both mean the root.
+    /// The path becomes a route prefix, and both routers read syntax in it, differently. axum 0.8
+    /// reads `{name}` and `{*name}` as parameters and panics on a segment opening with `:`.
+    /// Upstream's Express 5 router reads `:name` anywhere in a segment as a parameter, so `/a:b`
+    /// matches `/a` followed by anything, reads `{...}` as an optional group, and refuses `(`, `)`,
+    /// `[`, `]`, `+` and `!` at boot. So every one of those characters is refused here: none of them
+    /// can be served the way upstream serves it, and a mount that silently means something else
+    /// is worse than one refused at start. An empty path and `/` both mean the root.
     pub fn check_mount_path(&self) -> Result<(), String> {
         let path = self.mount_path.as_str();
         if path.is_empty() {
@@ -410,16 +413,14 @@ impl ServerConfig {
         if !path.starts_with('/') {
             return refuse("it must start with `/`");
         }
-        if path.contains(['{', '}', '*']) {
-            return refuse("`{`, `}` and `*` are route syntax, not literal text");
-        }
         // A request path never carries either: `?` opens the query and `#` the fragment, so a
         // mount containing one could match nothing.
         if path.contains(['?', '#']) {
             return refuse("`?` and `#` cannot occur in a request path");
         }
-        if path.split('/').any(|segment| segment.starts_with(':')) {
-            return refuse("a segment starting with `:` is route syntax, not literal text");
+        const SYNTAX: [char; 10] = ['{', '}', '*', ':', '(', ')', '[', ']', '+', '!'];
+        if let Some(c) = path.chars().find(|c| SYNTAX.contains(c)) {
+            return refuse(&format!("`{c}` is route syntax, not literal text"));
         }
         Ok(())
     }
@@ -442,7 +443,15 @@ mod tests {
     #[test]
     fn a_mount_path_must_be_a_literal_prefix() {
         let check = |p: &str| ServerConfig::new("a", "m").mount_path(p).check_mount_path();
-        for ok in ["", "/", "/parse", "/parse/", "/api/v1", "/api//v1", "/a:b"] {
+        for ok in [
+            "",
+            "/",
+            "/parse",
+            "/parse/",
+            "/api/v1",
+            "/api//v1",
+            "/a-b_c.d~e",
+        ] {
             assert!(check(ok).is_ok(), "{ok}");
         }
         for bad in [
@@ -455,6 +464,11 @@ mod tests {
             "/a}",
             "/parse?x",
             "/parse#x",
+            "/a:b",
+            "/a(b)",
+            "/a[b]",
+            "/a+",
+            "/a!",
         ] {
             assert!(check(bad).is_err(), "{bad}");
         }

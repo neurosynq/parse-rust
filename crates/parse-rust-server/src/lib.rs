@@ -124,6 +124,12 @@ pub fn router(state: AppState) -> Router {
     // The 0.2.0 surface, and nothing else: anything not registered here is a 404. Every route
     // that a client can reach through a `_method` override also accepts `POST`, because the
     // JavaScript SDK transports everything that way.
+    //
+    // Known differences from Express's routing, each in the divergence register, none reproduced
+    // yet: Express matches paths case-insensitively, so `/Classes/Foo` is a read upstream and a 404
+    // here; it serves a `HEAD`, including one asked for by `_method`, through the `GET` route; and
+    // it resolves an invalid session token before routing, so an unrouted path with a bad token
+    // is 209 upstream and 404 here.
     let api = Router::new()
         .route("/serverInfo", any(routes::http::server_info))
         // `/health` is credential-free upstream and is the endpoint every bring-up script polls.
@@ -218,6 +224,41 @@ async fn not_found() -> Response {
         .into_response()
 }
 
+/// Where a request path lands below the mount, by the rules [`express_path`] applies.
+pub(crate) enum BelowMount<'a> {
+    /// Not below the mount at all.
+    Outside,
+    /// Below it, but matching no route: an empty segment remains.
+    NoRoute,
+    /// The path after the mount, normalized: `""` or starting with `/`.
+    At(&'a str),
+}
+
+/// The one normalization, shared by routing and by the body layer's `/health` test, so the two
+/// cannot disagree about which route a path is.
+pub(crate) fn below_mount<'a>(path: &'a str, mount: &str) -> BelowMount<'a> {
+    let prefix = mount.trim_end_matches('/');
+    let Some(rest) = path
+        .strip_prefix(prefix)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    else {
+        return BelowMount::Outside;
+    };
+    let rest = rest
+        .strip_prefix('/')
+        .filter(|r| r.starts_with('/'))
+        .unwrap_or(rest);
+    let rest = match rest.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed,
+        _ => rest,
+    };
+    if rest.contains("//") {
+        BelowMount::NoRoute
+    } else {
+        BelowMount::At(rest)
+    }
+}
+
 /// The request's path and query as the client sent them, before [`express_path`] rewrote them:
 /// Express's `req.originalUrl`, which the batch route reads.
 #[derive(Debug, Clone)]
@@ -244,23 +285,11 @@ async fn express_path(
 
     let prefix = mount.trim_end_matches('/');
     let path = request.uri().path();
-    let Some(rest) = path
-        .strip_prefix(prefix)
-        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-    else {
-        return next.run(request).await;
+    let rest = match below_mount(path, &mount) {
+        BelowMount::Outside => return next.run(request).await,
+        BelowMount::NoRoute => return not_found().await,
+        BelowMount::At(rest) => rest,
     };
-    let rest = rest
-        .strip_prefix('/')
-        .filter(|r| r.starts_with('/'))
-        .unwrap_or(rest);
-    let rest = match rest.strip_suffix('/') {
-        Some(trimmed) if !trimmed.is_empty() => trimmed,
-        _ => rest,
-    };
-    if rest.contains("//") {
-        return not_found().await;
-    }
     let rewritten_path = format!("{prefix}{rest}");
     if rewritten_path != path {
         let rewritten = match request.uri().query() {

@@ -636,20 +636,25 @@ pub async fn batch(
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
     original_url: Option<axum::Extension<crate::OriginalUrl>>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     if method != http::Method::POST {
         return not_found(&method, "/batch");
     }
+    // The URL before `express_path` rewrote it. An embedder that routes this handler without that
+    // layer has no extension, and then the URI axum saw before nesting is the same thing.
     let original_url = original_url
         .map(|axum::Extension(crate::OriginalUrl(url))| url)
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            uri.path_and_query()
+                .map_or_else(|| uri.path().to_string(), |pq| pq.as_str().to_string())
+        });
     // The session first, as upstream's middleware resolves it before the batch handler runs. The
     // classes the sub-requests name are loaded by `handle` once the batch has been validated, so a
     // batch refused for its size or shape costs no schema lookup.
     detached(async move {
-        let mount_path = state.config().mount_path.clone();
         let mut rc = match state.request_context(&authority, Freshness::Cached).await {
             Ok(rc) => rc,
             Err(e) => return ParseErrorResponse(e).into_response(),
@@ -658,7 +663,6 @@ pub async fn batch(
             &state,
             &mut rc,
             &authority,
-            &mount_path,
             &original_url,
             body.as_ref(),
         )

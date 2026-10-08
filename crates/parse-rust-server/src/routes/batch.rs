@@ -27,15 +27,16 @@ const BATCH_PATH: &str = "/batch";
 
 /// Run a batch.
 ///
-/// `mount_path` is the configured mount, which is what upstream derives by removing the trailing
-/// `/batch` from `req.originalUrl` (`batch.js:27-28`). Taking it from config rather than
-/// reconstructing it is the same rule that applies to every other generated path: the mount is a
-/// builder input, never inferred from the request.
+/// `original_url` is the request's path and query as the client sent them, Express's
+/// `req.originalUrl`. Upstream's prefix for every sub-request path is that URL minus the trailing
+/// `/batch` (`batch.js:23-35`), not the configured mount, and the two differ exactly where it
+/// matters: `//batch` leaves `/parse/`, and `/batch/?x=/batch` leaves `/parse/batch/?x=`. So the
+/// prefix is derived as upstream derives it. Upstream's `serverURL`/`publicServerURL` override is
+/// not implemented, because parse-rust has neither option.
 pub async fn handle(
     state: &AppState,
     rc: &mut RequestContext,
     authority: &Authority,
-    mount_path: &str,
     original_url: &str,
     body: Option<&Json>,
 ) -> Result<Json, ParseError> {
@@ -77,7 +78,7 @@ pub async fn handle(
     // `req.originalUrl`, and throws a bare string when the URL does not end with it. Express routes
     // `/batch/` and `/batch?x=1` to the handler all the same, so both are a bare 500 with nothing
     // run, after the shape checks above. Running them instead would perform writes upstream never
-    // does.
+    // does. A fragment never reaches a server, so `/batch#f` arrives as `/batch` at both.
     let Some(url_prefix) = original_url.strip_suffix(BATCH_PATH) else {
         return Err(ParseError::internal(
             "internal routing problem - expected url to end with batch",
@@ -87,16 +88,7 @@ pub async fn handle(
     // routed or any method normalized.
     let mut parsed = Vec::with_capacity(checked.len());
     for (request, path) in checked {
-        // Upstream's prefix is the URL minus `/batch` (`batch.js:23-35`), which is the mount for
-        // every ordinary URL. Where the two differ, a sub-request must also start with the URL's
-        // own prefix: `/parse/batch/?x=/batch` leaves `/parse/batch/?x=`, which no sub-request path
-        // starts with, so upstream refuses each one before any runs.
-        if !path.starts_with(url_prefix) {
-            return Err(ParseError::invalid_json(format!(
-                "cannot route batch path {path}"
-            )));
-        }
-        let routable = routable_path(path, mount_path)?;
+        let routable = routable_path(path, url_prefix)?;
         // `(restRequest.method || 'GET').toUpperCase()`: the nested-batch check normalizes the
         // method. Routing, below, does not. A truthy method that is not a string has no
         // `toUpperCase`, so upstream's pre-flight throws a `TypeError` before any sub-request runs
@@ -111,6 +103,9 @@ pub async fn handle(
             }
             _ => "GET".to_string(),
         };
+        // Compared exactly, as upstream compares it, so `/parse/batch/` passes this check there and
+        // crashes in the router, a 500. Here the sub-request router refuses it instead. A known,
+        // recorded difference; the refusal is the safer of the two.
         if normalized == "POST" && routable == BATCH_PATH {
             return Err(ParseError::invalid_json(
                 "nested batch requests are not allowed",
@@ -311,13 +306,9 @@ async fn run_one(
 ///
 /// A path outside the prefix is `INVALID_JSON` `cannot route batch path <path>`. The result is
 /// joined onto `/`, so `/parse` alone becomes `/` rather than the empty string.
-fn routable_path(path: &str, mount_path: &str) -> Result<String, ParseError> {
-    let prefix = mount_path.trim_end_matches('/');
-    let rest = if prefix.is_empty() {
-        Some(path)
-    } else {
-        path.strip_prefix(prefix)
-    };
+fn routable_path(path: &str, prefix: &str) -> Result<String, ParseError> {
+    // A string prefix, compared exactly: `requestPath.slice(0, apiPrefix.length) != apiPrefix`.
+    let rest = path.strip_prefix(prefix);
     let Some(rest) = rest else {
         return Err(ParseError::invalid_json(format!(
             "cannot route batch path {path}"
@@ -347,7 +338,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_prefix_is_the_configured_mount_and_nothing_else() {
+    fn the_prefix_is_compared_exactly() {
         assert_eq!(
             routable_path("/parse/classes/Post", "/parse").expect("routes"),
             "/classes/Post"
@@ -357,6 +348,19 @@ mod tests {
             routable_path("/classes/Post", "/").expect("routes"),
             "/classes/Post"
         );
+        // A root mount's ordinary URL, `/batch`, leaves the empty prefix, which every path starts
+        // with; `//batch` there leaves `/`, which a path without its leading slash does not.
+        assert_eq!(
+            routable_path("classes/Post", "").expect("routes"),
+            "/classes/Post"
+        );
+        assert!(routable_path("classes/Post", "/").is_err());
+        // `/parse//batch` leaves `/parse/`.
+        assert_eq!(
+            routable_path("/parse/classes/Post", "/parse/").expect("routes"),
+            "/classes/Post"
+        );
+        assert!(routable_path("/parse/classes/Post", "/parse/batch/?x=").is_err());
     }
 
     /// `path.posix.join` normalizes, so dot segments resolve before routing.

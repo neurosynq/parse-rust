@@ -986,11 +986,11 @@ async fn field_options_are_reserved_with_the_type_and_addressed_per_field() {
     drop_db(&db).await;
 }
 
-/// `exclude_keys` is an exclusion projection: the database never returns those fields, a pointer
+/// `omit_fields` is an exclusion projection: the database never returns those fields, a pointer
 /// included under its storage name, and everything else still arrives.
 #[tokio::test]
 #[ignore = "requires MongoDB on 27017; run via tools/test.sh"]
-async fn exclude_keys_are_never_read() {
+async fn omitted_fields_are_never_read() {
     let (a, db) = adapter("excludekeys").await;
     let schema = post_schema();
     a.create(
@@ -1012,7 +1012,7 @@ async fn exclude_keys_are_never_read() {
     .expect("create");
 
     let opts = QueryOptions {
-        exclude_keys: Some(vec!["views".into(), "author".into()]),
+        omit_fields: Some(vec!["views".into(), "author".into()]),
         ..Default::default()
     };
     let found = a.find(&schema, &Query::new(), &opts).await.expect("find");
@@ -1025,10 +1025,10 @@ async fn exclude_keys_are_never_read() {
         "{row:?}"
     );
 
-    // `keys` decides the projection on its own; `exclude_keys` is ignored beside it.
+    // `keys` decides the projection on its own; `omit_fields` is ignored beside it.
     let opts = QueryOptions {
         keys: Some(vec!["views".into()]),
-        exclude_keys: Some(vec!["views".into()]),
+        omit_fields: Some(vec!["views".into()]),
         ..Default::default()
     };
     let found = a.find(&schema, &Query::new(), &opts).await.expect("find");

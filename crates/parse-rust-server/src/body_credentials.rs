@@ -221,26 +221,15 @@ pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct ParsedBody(pub Json);
 
-/// The health endpoint: the mount plus `/health`, with or without a trailing slash. Express's
-/// `api.use('/health', ...)` also matches any path below it, `/health/foo`, which this does not;
-/// only the exact path reaches the health route here, so only it skips the body checks. A suffix
-/// test also matched `/classes/health`.
+/// The health endpoint: the mount plus `/health`, as routing normalizes the path, so a trailing
+/// slash or one extra leading slash is still the health route. Express's `api.use('/health', ...)`
+/// also matches any path below it, `/health/foo`, which this does not; that is recorded in the
+/// divergence register. A suffix test also matched `/classes/health`.
 fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
-    let mount = state.config().mount_path.trim_end_matches('/');
-    parts
-        .uri
-        .path()
-        .strip_prefix(mount)
-        // One extra leading slash is ignored, as `allowDoubleForwardSlash` ignores it before
-        // routing, so `//health` is the health route too.
-        .map(|rest| {
-            if rest.starts_with("//") {
-                &rest[1..]
-            } else {
-                rest
-            }
-        })
-        .is_some_and(|rest| rest == "/health" || rest == "/health/")
+    matches!(
+        crate::below_mount(parts.uri.path(), &state.config().mount_path),
+        crate::BelowMount::At("/health")
+    )
 }
 
 /// `PARSE_RUST_TRACE`, read once rather than from the environment on every request.
@@ -357,7 +346,8 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
     let overridden = if parts.method == http::Method::POST && map.get("_method").is_some_and(truthy)
     {
         // A name that is not a valid method token still replaces the method upstream, and then
-        // matches no route: Express answers 404. Falling back to the transport `POST` ran the
+        // matches no route: Express answers 404. Known difference, in the divergence register:
+        // `_method: "HEAD"` is served by the `GET` route upstream and is a 404 here. Falling back to the transport `POST` ran the
         // request as a create instead.
         match map.shift_remove("_method") {
             Some(Json::String(m)) => Some(

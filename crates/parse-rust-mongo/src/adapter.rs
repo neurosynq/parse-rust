@@ -402,11 +402,11 @@ fn sort_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
 
 /// The projection for a read, or `None` for every field.
 ///
-/// Without `keys`, `exclude_keys` becomes an exclusion projection: those fields are never read
+/// Without `keys`, `omit_fields` becomes an exclusion projection: those fields are never read
 /// from the database. The read path strips them from every row afterwards regardless.
 fn projection_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
     let Some(keys) = options.keys.as_ref() else {
-        let exclude = options.exclude_keys.as_ref().filter(|e| !e.is_empty())?;
+        let exclude = options.omit_fields.as_ref().filter(|e| !e.is_empty())?;
         let mut projection = Document::new();
         for k in exclude {
             projection.insert(storage_key(schema, k), 0);
@@ -1247,9 +1247,18 @@ impl StorageAdapter for MongoAdapter {
         // The same find the driver would run, as a command, inside `explain`. Upstream asks the
         // Node driver's cursor for `.explain(verbosity)` (`MongoCollection.js:176`), which sends
         // exactly this, through the same `MongoCollection.find` an ordinary query takes: so the
-        // text index is created first and a missing geo index is built and retried, here as there.
+        // query is built first, synchronously, then the text index is created, and a missing geo
+        // index is built and retried, here as there. An error the driver raises only when it sends
+        // the query waits for the index, as in `find`.
+        let filter = match transform_where(schema, query) {
+            Ok(filter) => filter,
+            Err(e) if e.info.at_query => {
+                self.create_text_indexes_if_needed(schema, query).await?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         self.create_text_indexes_if_needed(schema, query).await?;
-        let filter = transform_where(schema, query)?;
         let mut find = doc! {
             "find": schema.class_name.as_str(),
             "filter": filter.clone(),

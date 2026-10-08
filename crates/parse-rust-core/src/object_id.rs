@@ -37,7 +37,7 @@ pub const DEFAULT_OBJECT_ID_SIZE: usize = 10;
 /// `rand`'s thread-local generator panics when a periodic reseed from the operating system fails,
 /// and this runs on request paths.
 ///
-/// A zero size is refused, as upstream's `randomString` refuses it (`cryptoUtils.js:23-25`).
+/// A zero size is refused, as upstream's `randomString` refuses it (`cryptoUtils.js:22-24`).
 pub fn random_string(size: usize) -> Result<String, ParseError> {
     if size == 0 {
         return Err(ParseError::internal("Zero-length randomString is useless."));

@@ -25,6 +25,23 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # `rust-version` is a promise to `cargo install` users, so it is built at, not assumed. uuid 1.27
+  # is what raised it to 1.89; a dependency that needs more fails here first.
+  msrv:
+    name: builds on the declared rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install the declared toolchain
+        run: |
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$MSRV" --profile minimal
+          echo "MSRV=$MSRV" >> "$GITHUB_ENV"
+
+      - name: build
+        run: cargo +"$MSRV" build --workspace --locked
+
   rust:
     name: rust (MongoDB ${{ matrix.mongodb }})
     runs-on: ubuntu-latest
@@ -81,6 +98,11 @@ jobs:
 
       - name: js_number differential (needs node only)
         run: cargo test -p parse-rust-core --test js_number_differential -- --ignored
+
+      # The JavaScript regex grammar check and the `RegExp.prototype.source` rendering, each
+      # judged by node over generated patterns.
+      - name: js regex differentials (needs node only)
+        run: cargo test -p parse-rust-mongo --lib -- --ignored random_patterns_match_node regex_source_matches_node
 
       # Boots parse-rust on an ephemeral port and replays a spec file's assertions over HTTP.
       # Every assertion in these runners holds against real parse-server too, so a failure here

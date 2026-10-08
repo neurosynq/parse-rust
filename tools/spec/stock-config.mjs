@@ -92,7 +92,7 @@ const EXPECTED = {
   'I9 objectId operation': 3,
   'I10 user update authorization': 24,
   'I11 ACL operations': 28,
-  'I12 read path order': 48,
+  'I12 read path order': 54,
   'I13 body credentials': 42,
   'I14 routes and write order': 114,
   'I15 read parity': 62,
@@ -1221,6 +1221,14 @@ async function gateI12ReadPathOrder(servers) {
     // `new RegExp` compiles each atom while the query is built, before the consistency check.
     ['an invalid regex in $all is a SyntaxError', { path: `/classes/$C?where=${e({ tags: { $all: [{ $regex: '[' }] } })}` },
       r => `${r.status} ${J(r.body)}`, `500 ${J({ code: 1, message: 'Internal server error.' })}`],
+    // A Pointer, Date or Bytes object is transformed as one before `$regex` is looked at
+    // (`MongoTransform.js:566-582`), so carrying `$regex` does not make it a regex.
+    ['a pointer carrying $regex is not a regex', { path: `/classes/$C?where=${e({ text: { $all: [
+      { __type: 'Pointer', className: 'X', objectId: 'y', $regex: '.' }] } })}` }, r => `${r.status} ${J(r.body)}`, '200 {"results":[]}'],
+    ['a date carrying $regex is not a regex', { path: `/classes/$C?where=${e({ text: { $all: [
+      { __type: 'Date', iso: '2020-01-01T00:00:00.000Z', $regex: '.' }] } })}` }, r => `${r.status} ${J(r.body)}`, '200 {"results":[]}'],
+    ['a malformed pointer carrying $regex is not a regex', { path: `/classes/$C?where=${e({ text: { $all: [
+      { __type: 'Pointer', $regex: '.' }] } })}` }, r => `${r.status} ${J(r.body)}`, '200 {"results":[]}'],
     ['a lone plain regex in $all is refused', { path: `/classes/$C?where=${e({ tags: { $all: [{ $regex: '^ba' }] } })}` },
       error, '400 107 All $all values must be of regex type or none: /^ba/'],
     ['a NUL in a starts-with $all regex is the database refusal', { path: `/classes/$C?where=${e({

@@ -339,6 +339,15 @@ fn is_starts_with_regex(pattern: &str) -> bool {
 /// beside other keys is still a regex and the other keys are dropped. A non-string `$regex` is
 /// coerced rather than refused, which is what `new RegExp(String(v))` does; see the arms below.
 fn interior_regex(map: &parse_rust_core::ParseMap) -> Option<String> {
+    // `transformInteriorAtom` asks about a Pointer, a Date and Bytes before it asks about `$regex`
+    // (`MongoTransform.js:566-582`), so an object tagged as one of those is never a regex, whatever
+    // else it carries. Compiling one as a regex matched rows upstream does not return.
+    if matches!(
+        map.get("__type"),
+        Some(ParseValue::String(t)) if t == "Pointer" || t == "Date" || t == "Bytes"
+    ) {
+        return None;
+    }
     // **`new RegExp(atom.$regex)` coerces**, so the value need not be a string
     // (`MongoTransform.js:581`): `new RegExp(7)` is `/7/`. Matching only `String` here left every
     // other shape to fall through to the generic path and, for a number, to a 500. Upstream serves
@@ -413,9 +422,14 @@ fn raw_typed_value(value: &ParseValue) -> Result<Bson, ParseError> {
 /// with commas, and any other object joins as `[object Object]`.
 fn js_join_element(value: &ParseValue) -> String {
     match value {
+        // A nested array is not mapped through `transformInteriorAtom`, so a regex atom inside one
+        // is still a plain object there and joins as `[object Object]`.
         ParseValue::Array(items) => items
             .iter()
-            .map(js_join_element)
+            .map(|item| match item {
+                ParseValue::Object(_) => "[object Object]".to_string(),
+                other => js_join_element(other),
+            })
             .collect::<Vec<_>>()
             .join(","),
         ParseValue::String(s) => s.clone(),
@@ -443,13 +457,24 @@ fn js_regex_source(pattern: &str) -> String {
     let mut escaped = false;
     let mut in_class = false;
     for c in pattern.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            '/' if !escaped && !in_class => out.push_str("\\/"),
-            _ => out.push(c),
+        // A line terminator is spelled as its escape. After a backslash, that backslash is
+        // already written and becomes the escape's own, as V8 renders `\<LF>` as `\n`.
+        let terminator = match c {
+            '\n' => Some("n"),
+            '\r' => Some("r"),
+            '\u{2028}' => Some("u2028"),
+            '\u{2029}' => Some("u2029"),
+            _ => None,
+        };
+        match terminator {
+            Some(name) => {
+                if !escaped {
+                    out.push('\\');
+                }
+                out.push_str(name);
+            }
+            None if c == '/' && !escaped && !in_class => out.push_str("\\/"),
+            None => out.push(c),
         }
         if !escaped {
             match c {
@@ -3034,6 +3059,64 @@ mod eq_operator_tests {
         assert!(
             matches!(queried, Bson::RegularExpression(_)),
             "a query atom still becomes a regex: {queried:?}"
+        );
+    }
+
+    /// `RegExp.prototype.source` against Node, over generated patterns Node accepts.
+    ///
+    /// `#[ignore]`d because it shells out to node; `tools/test.sh` runs it.
+    #[test]
+    #[ignore = "requires node; run via tools/test.sh"]
+    fn regex_source_matches_node_on_generated_patterns() {
+        const ALPHABET: &[&str] = &[
+            "a", "/", "\\", "[", "]", "^", "\\Q", "\\E", "\n", "\r", "\u{2028}", "\u{2029}", "(",
+            ")", "?", "b", "-", "|", "*",
+        ];
+        let mut seed: u64 = 0x50ce;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        let patterns: Vec<String> = (0..20_000)
+            .map(|_| {
+                (0..1 + next(10))
+                    .map(|_| ALPHABET[next(ALPHABET.len())])
+                    .collect::<String>()
+            })
+            .filter(|p| crate::js_regex::is_valid(p))
+            .collect();
+        let input = serde_json::to_string(&patterns).expect("serialize");
+        let script = "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{\
+            console.log(JSON.stringify(JSON.parse(s).map(p=>{const r=new RegExp(p);\
+            return [r.source,/\\/\\^\\\\Q.*\\\\E\\//.test(r.toString())]})))})";
+        let mut child = std::process::Command::new("node")
+            .env_remove("NODE_OPTIONS")
+            .args(["-e", script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("node must be on PATH; this test is #[ignore]d by default");
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin.write_all(input.as_bytes()).expect("write");
+        }
+        let out = child.wait_with_output().expect("node ran");
+        let node: Vec<(String, bool)> = serde_json::from_slice(&out.stdout).expect("node output");
+        let wrong: Vec<_> = patterns
+            .iter()
+            .zip(node)
+            .filter(|(p, (source, starts))| {
+                js_regex_source(p) != *source || is_starts_with_regex(p) != *starts
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "{} disagreements, first: {:?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(10)]
         );
     }
 
