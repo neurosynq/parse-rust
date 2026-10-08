@@ -635,12 +635,16 @@ pub async fn batch(
     authority: Authority,
     method: Option<axum::Extension<MethodOverride>>,
     transport: http::Method,
+    original_url: Option<axum::Extension<crate::OriginalUrl>>,
     JsonBody(body): JsonBody,
 ) -> Response {
     let method = effective_method(transport, method);
     if method != http::Method::POST {
         return not_found(&method, "/batch");
     }
+    let original_url = original_url
+        .map(|axum::Extension(crate::OriginalUrl(url))| url)
+        .unwrap_or_default();
     // The session first, as upstream's middleware resolves it before the batch handler runs. The
     // classes the sub-requests name are loaded by `handle` once the batch has been validated, so a
     // batch refused for its size or shape costs no schema lookup.
@@ -650,9 +654,15 @@ pub async fn batch(
             Ok(rc) => rc,
             Err(e) => return ParseErrorResponse(e).into_response(),
         };
-        let body = body;
-        match crate::routes::batch::handle(&state, &mut rc, &authority, &mount_path, body.as_ref())
-            .await
+        match crate::routes::batch::handle(
+            &state,
+            &mut rc,
+            &authority,
+            &mount_path,
+            &original_url,
+            body.as_ref(),
+        )
+        .await
         {
             Ok(results) => Json(results).into_response(),
             Err(e) => ParseErrorResponse(e).into_response(),

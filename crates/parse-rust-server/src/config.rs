@@ -413,6 +413,11 @@ impl ServerConfig {
         if path.contains(['{', '}', '*']) {
             return refuse("`{`, `}` and `*` are route syntax, not literal text");
         }
+        // A request path never carries either: `?` opens the query and `#` the fragment, so a
+        // mount containing one could match nothing.
+        if path.contains(['?', '#']) {
+            return refuse("`?` and `#` cannot occur in a request path");
+        }
         if path.split('/').any(|segment| segment.starts_with(':')) {
             return refuse("a segment starting with `:` is route syntax, not literal text");
         }
@@ -437,7 +442,7 @@ mod tests {
     #[test]
     fn a_mount_path_must_be_a_literal_prefix() {
         let check = |p: &str| ServerConfig::new("a", "m").mount_path(p).check_mount_path();
-        for ok in ["", "/", "/parse", "/parse/", "/api/v1", "/a:b"] {
+        for ok in ["", "/", "/parse", "/parse/", "/api/v1", "/api//v1", "/a:b"] {
             assert!(check(ok).is_ok(), "{ok}");
         }
         for bad in [
@@ -448,6 +453,8 @@ mod tests {
             "/{*rest}",
             "/a*",
             "/a}",
+            "/parse?x",
+            "/parse#x",
         ] {
             assert!(check(bad).is_err(), "{bad}");
         }

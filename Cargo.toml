@@ -15,10 +15,10 @@ members = [
 [workspace.package]
 version = "0.3.1"
 edition = "2021"
-# Raised from 1.75 to match what the dependency graph actually requires: mongodb 3.8 and its
-# transitive dependencies do not build on anything older. A declared floor nobody can build at is
-# worse than no floor.
-rust-version = "1.88"
+# Raised from 1.75 to match what the dependency graph actually requires, first for mongodb 3.8 and
+# its transitive dependencies and then, at 1.89, for `uuid` 1.27. A declared floor nobody can build
+# at is worse than no floor.
+rust-version = "1.89"
 license = "Apache-2.0"
 # Each crate directory carries `LICENSE` and `NOTICE` as symlinks to the ones at the workspace
 # root, because `cargo package` copies only files inside the package directory and a published

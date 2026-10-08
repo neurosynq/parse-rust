@@ -33,10 +33,15 @@ pub const DEFAULT_OBJECT_ID_SIZE: usize = 10;
 /// below 256 is 248, so bytes 248..=255 are rejected and redrawn. Expected redraws are about
 /// 3.2%, which is not worth a smarter scheme.
 ///
-/// Drawn from the operating system's generator directly, as upstream's `crypto.randomBytes` is,
-/// and fallible rather than panicking. `rand`'s thread-local generator panics when a periodic
-/// reseed from the operating system fails, and this runs on request paths.
+/// Drawn from the operating system's generator directly, and fallible rather than panicking.
+/// `rand`'s thread-local generator panics when a periodic reseed from the operating system fails,
+/// and this runs on request paths.
+///
+/// A zero size is refused, as upstream's `randomString` refuses it (`cryptoUtils.js:23-25`).
 pub fn random_string(size: usize) -> Result<String, ParseError> {
+    if size == 0 {
+        return Err(ParseError::internal("Zero-length randomString is useless."));
+    }
     let mut rng = SysRng;
     let mut out = String::with_capacity(size);
     let mut buf = [0u8; 64];

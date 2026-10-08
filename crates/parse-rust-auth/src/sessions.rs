@@ -50,10 +50,10 @@ const SESSION_CLASS: &str = "_Session";
 
 /// Fill from a cryptographically secure generator.
 ///
-/// The `CryptoRng` bound is the point. A session token is a bearer credential, so a generator
+/// The `TryCryptoRng` bound is the point. A session token is a bearer credential, so a generator
 /// swapped for a faster non-cryptographic one has to fail to compile rather than pass the tests.
 /// Note that `random_string` in `parse-rust-core` is not usable here even though it draws from
-/// the same generator: its alphabet is the 62-character `objectId` set, and a session token's
+/// the same source: its alphabet is the 62-character `objectId` set, and a session token's
 /// character set is observable to a client.
 fn fill_secure<R: TryCryptoRng>(rng: &mut R, buf: &mut [u8]) -> Result<(), ParseError>
 where
@@ -69,8 +69,9 @@ where
 /// `'r:' + cryptoUtils.newToken()`, where `newToken` is `randomHexString(32)`
 /// (`RestWrite.js:1203`, `cryptoUtils.js:41`).
 ///
-/// Drawn from the operating system's generator directly, as `crypto.randomBytes` is upstream, and
-/// fallible: `rand`'s thread-local generator panics when a periodic reseed fails.
+/// Drawn from the operating system's generator directly, and fallible: `rand`'s thread-local
+/// generator panics when a periodic reseed fails. Upstream's `crypto.randomBytes` reads a
+/// userspace generator that the operating system seeds; either is a cryptographic source.
 pub fn new_session_token() -> Result<String, ParseError> {
     let mut bytes = [0u8; TOKEN_BYTES];
     fill_secure(&mut SysRng, &mut bytes)?;

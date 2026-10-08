@@ -312,11 +312,17 @@ fn unchanged_atom_to_bson(value: &ParseValue) -> Result<Bson, ParseError> {
     })
 }
 
-/// `isStartsWithRegex` (`MongoTransform.js:143-150`): the regex's `toString()` contains
-/// `/^\Q`, anything, then `\E/`. A `RegExp`'s source escapes every `/` and line terminator, so the
-/// only bare slashes are the delimiters and that is a pattern opening `^\Q` and closing `\E`.
+/// `isStartsWithRegex` (`MongoTransform.js:143-150`): `/\/\^\\Q.*\\E\//` tested, unanchored,
+/// against the `RegExp`'s `toString()`, which is `/`, its source, `/`. So the question is whether
+/// a `/^\Q` occurs with a `\E/` somewhere after it. The source escapes every line terminator, so
+/// `.` spans the rest, but **not** a `/` inside a character class, so `/^\Q` can open mid-pattern:
+/// `a[/^\Qx\E/]` is a starts-with regex by this test.
 fn is_starts_with_regex(pattern: &str) -> bool {
-    pattern.len() >= 5 && pattern.starts_with("^\\Q") && pattern.ends_with("\\E")
+    let rendered = format!("/{}/", js_regex_source(pattern));
+    match (rendered.find("/^\\Q"), rendered.rfind("\\E/")) {
+        (Some(open), Some(close)) => close >= open + 4,
+        _ => false,
+    }
 }
 
 /// The `$regex` pattern of an interior `{"$regex": "..."}` atom, if that is what this object is.
@@ -395,10 +401,15 @@ fn raw_typed_value(value: &ParseValue) -> Result<Bson, ParseError> {
 /// One element of an array as JavaScript's `Array.prototype.join` renders it.
 ///
 /// Only used to build the `$all` mixed-regex message, whose upstream form is string concatenation
-/// of the array. `null` and `undefined` join as the empty string; an object joins as
-/// `[object Object]`; a regex atom is still the `{"$regex": ...}` object at this point.
+/// of the array. `null` and `undefined` join as the empty string, an array joins its own elements
+/// with commas, and any other object joins as `[object Object]`.
 fn js_join_element(value: &ParseValue) -> String {
     match value {
+        ParseValue::Array(items) => items
+            .iter()
+            .map(js_join_element)
+            .collect::<Vec<_>>()
+            .join(","),
         ParseValue::String(s) => s.clone(),
         ParseValue::Number(n) => parse_rust_core::js_number::to_ecma_string(*n),
         ParseValue::Bool(b) => b.to_string(),
@@ -1106,10 +1117,35 @@ fn lower_branches(
     branches: &[Query],
     count: bool,
 ) -> Result<Vec<Bson>, ParseError> {
-    branches
-        .iter()
-        .map(|q| transform_where_as(schema, q, count).map(Bson::Document))
-        .collect()
+    collect_deferring(
+        branches
+            .iter()
+            .map(|q| transform_where_as(schema, q, count).map(Bson::Document)),
+    )
+}
+
+/// Collect results, returning the first error at once unless it is one upstream raises only when
+/// the query is sent ([`ParseErrorInfo::at_query`](parse_rust_core::ParseErrorInfo)). That one is
+/// held until the rest are built, because upstream builds them all before sending anything: a
+/// later sibling's validation error is what it answers with.
+fn collect_deferring<T>(
+    results: impl Iterator<Item = Result<T, ParseError>>,
+) -> Result<Vec<T>, ParseError> {
+    let mut out = Vec::new();
+    let mut deferred = None;
+    for result in results {
+        match result {
+            Ok(v) => out.push(v),
+            Err(e) if e.info.at_query => {
+                deferred.get_or_insert(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    match deferred {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// `$text` (`MongoTransform.js:777-811`), with upstream's messages.
@@ -1639,18 +1675,10 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
     // `$in` and `$nin` flatten one level (`MongoTransform.js:721-735`): an element that is itself
     // an array contributes its own elements rather than nesting. Nothing else flattens.
     let flatten_each = |items: &Vec<ParseValue>| -> Result<Vec<Bson>, ParseError> {
-        let mut out = Vec::with_capacity(items.len());
-        for item in items {
-            match item {
-                ParseValue::Array(inner) => {
-                    for nested in inner {
-                        out.push(value(nested)?);
-                    }
-                }
-                other => out.push(value(other)?),
-            }
-        }
-        Ok(out)
+        collect_deferring(items.iter().flat_map(|item| match item {
+            ParseValue::Array(inner) => inner.iter().map(value).collect::<Vec<_>>(),
+            other => vec![value(other)],
+        }))
     };
 
     Ok(match &constraint.comparison {
@@ -2984,6 +3012,31 @@ mod eq_operator_tests {
             matches!(queried, Bson::RegularExpression(_)),
             "a query atom still becomes a regex: {queried:?}"
         );
+    }
+
+    /// `RegExp.prototype.source` and the starts-with test, against values measured in Node.
+    #[test]
+    fn regex_source_and_starts_with_match_v8() {
+        for (pattern, source, starts_with) in [
+            ("[/]", "[/]", false),
+            ("\\/", "\\/", false),
+            ("a/b", "a\\/b", false),
+            ("[\\]/]", "[\\]/]", false),
+            ("^\\Qa/\\E", "^\\Qa\\/\\E", true),
+            ("^\\Qa\\E", "^\\Qa\\E", true),
+            ("x^\\Qa\\E/", "x^\\Qa\\E\\/", false),
+            ("\\Q", "\\Q", false),
+            ("a\nb", "a\\nb", false),
+            ("", "(?:)", false),
+            ("^\\Qa[/]\\E", "^\\Qa[/]\\E", true),
+            ("^\\Qa\\/\\E", "^\\Qa\\/\\E", true),
+            ("[[/]", "[[/]", false),
+            ("^\\Qa\\E\\/x", "^\\Qa\\E\\/x", false),
+            ("a[/^\\Qx\\E/]", "a[/^\\Qx\\E/]", true),
+        ] {
+            assert_eq!(js_regex_source(pattern), source, "{pattern:?}");
+            assert_eq!(is_starts_with_regex(pattern), starts_with, "{pattern:?}");
+        }
     }
 
     /// Upstream's all-or-none rule (`MongoTransform.js:143-169`, `:746-751`), which is about

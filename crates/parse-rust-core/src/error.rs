@@ -217,6 +217,7 @@ impl ParseError {
     #[must_use]
     pub fn at_query(mut self) -> Self {
         self.info.at_query = true;
+        self.info.before_query = false;
         self
     }
 

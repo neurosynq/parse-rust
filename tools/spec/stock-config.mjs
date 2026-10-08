@@ -92,9 +92,9 @@ const EXPECTED = {
   'I9 objectId operation': 3,
   'I10 user update authorization': 24,
   'I11 ACL operations': 28,
-  'I12 read path order': 42,
+  'I12 read path order': 46,
   'I13 body credentials': 42,
-  'I14 routes and write order': 102,
+  'I14 routes and write order': 114,
   'I15 read parity': 62,
 };
 
@@ -1223,6 +1223,14 @@ async function gateI12ReadPathOrder(servers) {
     ['a NUL in a starts-with $all regex is the database refusal', { path: `/classes/$C?where=${e({
       tags: { $all: [{ $regex: '^\\Qa\u0000b\\E' }] } })}` }, r => `${r.status} ${J(r.body)}`,
       `500 ${J({ code: 1, error: 'An internal server error occurred' })}`],
+    // The NUL is refused only when the driver sends the query, so everything built first answers
+    // before it: the text index and a later `$or` branch.
+    ['a text index on a missing field beats a NUL', { cls: 'I12t', path: `/classes/$C?where=${e({
+      zz: { $text: { $search: { $term: 'x' } } }, tags: { $all: [{ $regex: '^\\Qa\u0000b\\E' }] } })}` }, error,
+      '400 102 Field zz does not exist, cannot add index.'],
+    ['a later $or branch beats a NUL', { path: `/classes/$C?where=${e({ $or: [
+      { tags: { $all: [{ $regex: '^\\Qa\u0000b\\E' }] } }, { tags: { $all: [{ $regex: '^ba' }] } }] })}` }, error,
+      '400 107 All $all values must be of regex type or none: /^ba/'],
     // Operands as JavaScript reads them: a member of `null` is a `TypeError` and a bare 500, and
     // arithmetic and `isNaN` coerce (`MongoTransform.js:777-955`).
     ['$text: null is a TypeError', { cls: 'I12g', path: `/classes/$C?where=${e({ s: { $text: null } })}` },
@@ -1345,6 +1353,24 @@ async function gateI14RoutesAndWriteOrder(servers) {
     const who = server.kind;
     const sfx = suffixOf(server);
     const call = opts => request(server, { from: 'loopback', ...opts });
+
+    // Paths below the mount. Express routes are non-strict, `allowDoubleForwardSlash` strips one
+    // leading `/` (`middlewares.js:863-866`), and an empty `:param` matches nothing.
+    const sig = r => `${r.status} ${r.body?.code ?? ''}`;
+    eq(`${who}: a trailing slash is optional`, sig(await call({ path: `/classes/I14Route_${sfx}/`, headers: master() })), '200 ');
+    eq(`${who}: a double slash after the mount routes`, sig(await call({ path: '//serverInfo', headers: master() })), '200 ');
+    eq(`${who}: an empty class name matches no route`, (await call({ path: '/classes//abc', headers: master() })).status, 404);
+    // UPSTREAM-QUIRK: the batch recovers its mount from a URL that must end with `/batch`
+    // (`batch.js:90-92`), so `/batch/` and `/batch?x=1` are a bare 500 with nothing run.
+    const quirk = `I14Quirk_${sfx}`;
+    for (const path of ['/batch/', '/batch?x=1']) {
+      const r = await call({
+        method: 'POST', path, headers: master(),
+        body: { requests: [{ method: 'POST', path: `/parse/classes/${quirk}`, body: { n: 1 } }] },
+      });
+      eq(`${who}: ${path} is a bare 500`, `${r.status} ${J(r.body)}`, `500 ${J({ code: 1, message: 'Internal server error.' })}`);
+    }
+    eq(`${who}: and runs nothing`, (await call({ path: `/classes/${quirk}`, headers: master() })).body?.results?.length, 0);
 
     // An unroutable sub-request fails the whole batch; the one before it ran, the one after did not.
     const cls = `I14Batch_${sfx}`;

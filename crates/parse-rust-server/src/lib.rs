@@ -197,7 +197,7 @@ pub fn router(state: AppState) -> Router {
     // Innermost of the outer layers, so the timing covers the request's own work only.
     #[cfg(feature = "bench-instrumentation")]
     let app = app.layer(axum::middleware::from_fn(bench::instrument));
-    app.layer(axum::middleware::from_fn(express_path))
+    app.layer(axum::middleware::from_fn_with_state(mount, express_path))
         .layer(axum::middleware::from_fn_with_state(
             cors_state.clone(),
             body_credentials::extract,
@@ -218,27 +218,54 @@ async fn not_found() -> Response {
         .into_response()
 }
 
-/// Match paths as Express does, which axum does not by default.
+/// The request's path and query as the client sent them, before [`express_path`] rewrote them:
+/// Express's `req.originalUrl`, which the batch route reads.
+#[derive(Debug, Clone)]
+pub struct OriginalUrl(pub String);
+
+/// Match paths below the mount as Express does, which axum does not by default.
 ///
-/// Express routes are non-strict, so one trailing slash is optional and `/classes/Foo/` is
-/// `/classes/Foo`. And a `:param` matches one or more characters, so an empty segment matches no
-/// route: `/classes//abc` is a 404 there, where axum would hand a route an empty class name.
+/// Three rules, applied to the part after the mount only, so a mount that itself contains `//`
+/// is matched literally. `allowDoubleForwardSlash` strips one leading `/` (`middlewares.js:
+/// 863-866`), so `/parse//classes/X` is `/parse/classes/X`. Express routes are non-strict, so one
+/// trailing slash is optional. And a `:param` matches one or more characters, so an empty segment
+/// that remains matches no route: `/classes//abc` is a 404 there, where axum would hand a route an
+/// empty class name.
 async fn express_path(
+    axum::extract::State(mount): axum::extract::State<String>,
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let original = request.uri().path_and_query().map_or_else(
+        || request.uri().path().to_string(),
+        |pq| pq.as_str().to_string(),
+    );
+    request.extensions_mut().insert(OriginalUrl(original));
+
+    let prefix = mount.trim_end_matches('/');
     let path = request.uri().path();
-    let trimmed = match path.strip_suffix('/') {
-        Some(rest) if !rest.is_empty() => rest,
-        _ => path,
+    let Some(rest) = path
+        .strip_prefix(prefix)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    else {
+        return next.run(request).await;
     };
-    if trimmed.contains("//") {
+    let rest = rest
+        .strip_prefix('/')
+        .filter(|r| r.starts_with('/'))
+        .unwrap_or(rest);
+    let rest = match rest.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed,
+        _ => rest,
+    };
+    if rest.contains("//") {
         return not_found().await;
     }
-    if trimmed.len() != path.len() {
+    let rewritten_path = format!("{prefix}{rest}");
+    if rewritten_path != path {
         let rewritten = match request.uri().query() {
-            Some(query) => format!("{trimmed}?{query}"),
-            None => trimmed.to_string(),
+            Some(query) => format!("{rewritten_path}?{query}"),
+            None => rewritten_path,
         };
         let mut parts = request.uri().clone().into_parts();
         match rewritten.parse() {

@@ -1174,9 +1174,20 @@ impl StorageAdapter for MongoAdapter {
             return Ok(Vec::new());
         }
         // Built before anything is awaited, as upstream's synchronous `transformWhere` is
-        // (`MongoStorageAdapter.js:728-729`), so an invalid point is raised before the read path's
+        // (`MongoStorageAdapter.js:730`), so an invalid point is raised before the read path's
         // sanitizing `.catch` exists. See `ParseErrorInfo::before_query`.
-        let filter = transform_where(schema, query).map_err(ParseError::before_query)?;
+        //
+        // An error upstream's driver raises when it sends the query (`ParseErrorInfo::at_query`)
+        // comes after the text index is built, so the index is built first here too: its own
+        // refusal, a missing field, is what answers, and a successful build is left in place.
+        let filter = match transform_where(schema, query) {
+            Ok(filter) => filter,
+            Err(e) if e.info.at_query => {
+                self.create_text_indexes_if_needed(schema, query).await?;
+                return Err(e);
+            }
+            Err(e) => return Err(e.before_query()),
+        };
         self.create_text_indexes_if_needed(schema, query).await?;
         // The database refuses a negative skip when the cursor runs, after the query is built and
         // the text index exists. The driver's builder cannot carry one, so it is refused here, at

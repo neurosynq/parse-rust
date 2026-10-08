@@ -152,10 +152,19 @@ async fn the_prefix_question_is_answered_rather_than_assumed() {
 async fn edge_passwords_agree_in_both_directions() {
     let long = "p".repeat(80);
     let long_tail = format!("{}{}", &long[..72], "different tail");
+    // At and either side of the 72-byte limit, and a two-byte character straddling it: `é` and `è`
+    // share their first byte, which is byte 72, and differ in the second, which is byte 73.
+    let p71 = "p".repeat(71);
+    let p72 = "p".repeat(72);
+    let (p71x, p72x) = (format!("{p71}x"), format!("{p72}x"));
+    let (straddle, straddle_probe) = (format!("{p71}é"), format!("{p71}è"));
     let cases = [
         (long.as_str(), long_tail.as_str()),
         ("a\0b", "a\0c"),
         ("a\0b", "a"),
+        (p71.as_str(), p71x.as_str()),
+        (p72.as_str(), p72x.as_str()),
+        (straddle.as_str(), straddle_probe.as_str()),
     ];
     for (name, _) in MODULES {
         for (password, probe) in cases {

@@ -221,8 +221,10 @@ pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct ParsedBody(pub Json);
 
-/// The health endpoint exactly: the mount plus `/health`, with or without a trailing slash, as
-/// Express's `api.use('/health', ...)` matches it. A suffix test also matched `/classes/health`.
+/// The health endpoint: the mount plus `/health`, with or without a trailing slash. Express's
+/// `api.use('/health', ...)` also matches any path below it, `/health/foo`, which this does not;
+/// only the exact path reaches the health route here, so only it skips the body checks. A suffix
+/// test also matched `/classes/health`.
 fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
     let mount = state.config().mount_path.trim_end_matches('/');
     parts

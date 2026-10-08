@@ -36,6 +36,7 @@ pub async fn handle(
     rc: &mut RequestContext,
     authority: &Authority,
     mount_path: &str,
+    original_url: &str,
     body: Option<&Json>,
 ) -> Result<Json, ParseError> {
     let Some(Json::Object(body)) = body else {
@@ -71,6 +72,16 @@ pub async fn handle(
             ));
         };
         checked.push((request, path));
+    }
+    // UPSTREAM-QUIRK: `batch.js:90-92`. Upstream recovers its mount by stripping `/batch` off
+    // `req.originalUrl`, and throws a bare string when the URL does not end with it. Express routes
+    // `/batch/` and `/batch?x=1` to the handler all the same, so both are a bare 500 with nothing
+    // run, after the shape checks above. Running them instead would perform writes upstream never
+    // does.
+    if !original_url.ends_with(BATCH_PATH) {
+        return Err(ParseError::internal(
+            "internal routing problem - expected url to end with batch",
+        ));
     }
     // A second pass, as upstream's is a second loop: every path is a string before any is
     // routed or any method normalized.
