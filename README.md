@@ -25,12 +25,12 @@ limited to loopback unless `masterKeyIps` says otherwise, CLP-declared default A
 create, and falsy or object-shaped `_User` ACLs no longer leave the row public or remove its
 owner's access.
 
-0.3.0, implemented and not yet released, is the conformance milestone. parse-rust is now measured
-against parse-server's own test suite rather than only against tests this project wrote for itself:
-upstream's spec files run block by block against a parse-rust process, with a server-less control
-run and parse-server itself as the reference. It adds the read surface those files need first (geo
-queries, `$text`, `explain`, `hint` and `comment`), a benchmark harness, and a one-command demo.
-Everything else is ahead of that, not behind it.
+0.3.0 is the conformance milestone. parse-rust is now measured against parse-server's own test suite
+rather than only against tests this project wrote for itself: upstream's spec files run block by
+block against a parse-rust process, with a server-less control run and parse-server itself as the
+reference. It adds the read surface those files need first (geo queries, `$text`, `explain`, `hint`
+and `comment`), a benchmark harness, and a one-command demo. Everything else is ahead of that, not
+behind it.
 
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
@@ -100,8 +100,7 @@ not on the code existing, which is why the first item is the instrument rather t
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
 
-0.1.0, 0.2.0 and 0.2.1 are done, and 0.3.0 is implemented; `CHANGELOG.md` says what each one
-actually landed.
+0.1.0, 0.2.0, 0.2.1 and 0.3.0 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
