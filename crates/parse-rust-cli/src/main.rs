@@ -146,7 +146,7 @@ async fn run() -> std::io::Result<()> {
     //
     // **`maintenanceKeyIps` deliberately has no variable here, and upstream does define one.**
     // The pin declares both `PARSE_SERVER_MAINTENANCE_KEY` and `PARSE_SERVER_MAINTENANCE_KEY_IPS`
-    // (`Options/Definitions.js:387`, `:386`), so this is a parse-rust CLI limitation rather than a
+    // (`Options/Definitions.js:387`, `:392`), so this is a parse-rust CLI limitation rather than a
     // gap on upstream's side, and an earlier version of this comment claimed the opposite.
     //
     // The key itself is not exposed by this binary, so its allowlist is not either: a variable

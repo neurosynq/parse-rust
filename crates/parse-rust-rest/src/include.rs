@@ -27,14 +27,25 @@ pub type PointersByClass = IndexMap<String, Vec<String>>;
 
 /// Collect every pointer at `path`, walking through arrays.
 pub fn collect_pointers(results: &[ParseMap], path: &[String]) -> PointersByClass {
-    let mut out: PointersByClass = IndexMap::new();
+    let mut seen: IndexMap<String, indexmap::IndexSet<String>> = IndexMap::new();
+    let Some((head, rest)) = path.split_first() else {
+        return PointersByClass::new();
+    };
     for row in results {
-        collect_from_value(&ParseValue::Object(row.clone()), path, &mut out);
+        if let Some(next) = row.get(head) {
+            collect_from_value(next, rest, &mut seen);
+        }
     }
-    out
+    seen.into_iter()
+        .map(|(class, ids)| (class, ids.into_iter().collect()))
+        .collect()
 }
 
-fn collect_from_value(value: &ParseValue, path: &[String], out: &mut PointersByClass) {
+fn collect_from_value(
+    value: &ParseValue,
+    path: &[String],
+    out: &mut IndexMap<String, indexmap::IndexSet<String>>,
+) {
     // An array is walked before the path is consumed, at every depth, which is how a path
     // reaches into an array of pointers and into an array of expanded objects alike
     // (`RestQuery.js:1296-1298`).
@@ -47,10 +58,9 @@ fn collect_from_value(value: &ParseValue, path: &[String], out: &mut PointersByC
     match (path.split_first(), value) {
         (None, _) => {
             if let Some((class_name, object_id)) = pointer_parts(value) {
-                let ids = out.entry(class_name.to_string()).or_default();
-                if !ids.iter().any(|id| id == object_id) {
-                    ids.push(object_id.to_string());
-                }
+                out.entry(class_name.to_string())
+                    .or_default()
+                    .insert(object_id.to_string());
             }
         }
         (Some((head, rest)), ParseValue::Object(map)) => {
@@ -95,17 +105,96 @@ fn is_plain_pointer(map: &ParseMap) -> bool {
 /// as a pointer: inside an array the element disappears, and at a scalar key the key becomes
 /// absent. That is how a pointer to a row the caller cannot read stops being evidence that the
 /// row exists.
-pub fn graft(results: &mut [ParseMap], path: &[String], fetched: &IndexMap<String, ParseMap>) {
+pub fn graft(
+    results: &mut [ParseMap],
+    path: &[String],
+    fetched: &IndexMap<String, ParseMap>,
+    budget: &mut GraftBudget,
+) -> Result<(), parse_rust_core::ParseError> {
+    let sizes: IndexMap<&str, usize> = fetched
+        .iter()
+        .map(|(id, row)| (id.as_str(), ParseValue::object_json_len(row)))
+        .collect();
+    let mut grafting = Grafting {
+        fetched,
+        sizes: &sizes,
+        budget,
+    };
     for row in results.iter_mut() {
-        graft_into_map(row, path, fetched);
+        if grafting.budget.exceeded {
+            break;
+        }
+        graft_into_map(row, path, &mut grafting);
+    }
+    if grafting.budget.exceeded {
+        // Upstream serializes the whole response at once, and one past what a JavaScript string
+        // can hold is a thrown error and the generic 500. Every pointer occurrence here is a copy
+        // of its row, so without a bound one request could ask for more memory than the process
+        // has, and failing an allocation ends the process rather than the request.
+        return Err(parse_rust_core::ParseError::internal(
+            "included rows exceed the response budget".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// How much one request's includes may graft, in bytes of JSON, across every path.
+pub struct GraftBudget {
+    remaining: usize,
+    exceeded: bool,
+}
+
+impl GraftBudget {
+    /// 128 MiB of included JSON per request.
+    pub const DEFAULT: usize = 128 * 1024 * 1024;
+
+    pub fn new(bytes: usize) -> Self {
+        Self {
+            remaining: bytes,
+            exceeded: false,
+        }
+    }
+
+    /// Spend `bytes`, or record that the budget is gone.
+    fn spend(&mut self, bytes: usize) -> bool {
+        match self.remaining.checked_sub(bytes) {
+            Some(left) if !self.exceeded => {
+                self.remaining = left;
+                true
+            }
+            _ => {
+                self.exceeded = true;
+                false
+            }
+        }
     }
 }
 
-fn graft_into_map(map: &mut ParseMap, path: &[String], fetched: &IndexMap<String, ParseMap>) {
+struct Grafting<'a> {
+    fetched: &'a IndexMap<String, ParseMap>,
+    sizes: &'a IndexMap<&'a str, usize>,
+    budget: &'a mut GraftBudget,
+}
+
+impl Grafting<'_> {
+    /// The fetched row for `id`, copied if the budget allows. `Some(None)` is a pointer that
+    /// resolves to nothing; `None` is the budget running out.
+    fn row(&mut self, id: &str) -> Option<Option<ParseValue>> {
+        let Some(row) = self.fetched.get(id) else {
+            return Some(None);
+        };
+        let size = self.sizes.get(id).copied().unwrap_or_default();
+        self.budget
+            .spend(size)
+            .then(|| Some(ParseValue::Object(row.clone())))
+    }
+}
+
+fn graft_into_map(map: &mut ParseMap, path: &[String], grafting: &mut Grafting<'_>) {
     let Some((head, rest)) = path.split_first() else {
         return;
     };
-    replace_in_place(map, head, |current| graft_value(current, rest, fetched));
+    replace_in_place(map, head, |current| graft_value(current, rest, grafting));
 }
 
 /// Replace one key's value where it stands, or remove the key if the replacement is `None`.
@@ -135,33 +224,33 @@ fn replace_in_place(
 fn graft_value(
     value: ParseValue,
     path: &[String],
-    fetched: &IndexMap<String, ParseMap>,
+    grafting: &mut Grafting<'_>,
 ) -> Option<ParseValue> {
     // Arrays first, at every depth, mirroring `findPointers`. An element that does not resolve is
     // dropped from the array rather than left behind as a pointer.
     if let ParseValue::Array(items) = value {
-        return Some(ParseValue::Array(
-            items
-                .into_iter()
-                .filter_map(|item| graft_value(item, path, fetched))
-                .collect(),
-        ));
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            if grafting.budget.exceeded {
+                break;
+            }
+            if let Some(v) = graft_value(item, path, grafting) {
+                out.push(v);
+            }
+        }
+        return Some(ParseValue::Array(out));
     }
     match (path.split_first(), value) {
-        (None, ParseValue::Pointer { object_id, .. }) => fetched
-            .get(&object_id)
-            .map(|row| ParseValue::Object(row.clone())),
+        (None, ParseValue::Pointer { object_id, .. }) => grafting.row(&object_id).flatten(),
         // `replace[object.objectId]`: a plain pointer resolves by its id alone, and one whose id
         // matches nothing, or that has none, becomes `undefined` and is dropped.
         (None, ParseValue::Object(map)) if is_plain_pointer(&map) => match map.get("objectId") {
-            Some(ParseValue::String(id)) => {
-                fetched.get(id).map(|row| ParseValue::Object(row.clone()))
-            }
+            Some(ParseValue::String(id)) => grafting.row(id).flatten(),
             _ => None,
         },
         (None, other) => Some(other),
         (Some((head, rest)), ParseValue::Object(mut map)) => {
-            replace_in_place(&mut map, head, |inner| graft_value(inner, rest, fetched));
+            replace_in_place(&mut map, head, |inner| graft_value(inner, rest, grafting));
             Some(ParseValue::Object(map))
         }
         (Some(_), other) => Some(other),
@@ -355,7 +444,13 @@ mod tests {
             "t1".to_string(),
             row(vec![("objectId", ParseValue::String("t1".into()))]),
         );
-        graft(&mut results, &path, &fetched);
+        graft(
+            &mut results,
+            &path,
+            &fetched,
+            &mut GraftBudget::new(GraftBudget::DEFAULT),
+        )
+        .expect("within budget");
         let Some(ParseValue::Array(items)) = results[0].get("refs") else {
             panic!("refs is still an array");
         };
@@ -365,6 +460,28 @@ mod tests {
             matches!(&items[0], ParseValue::Object(m) if matches!(m.get("objectId"), Some(ParseValue::String(id)) if id == "t1"))
         );
         assert!(matches!(&items[1], ParseValue::String(s) if s == "not a pointer"));
+    }
+
+    /// Every occurrence is a copy of its row, so the total is bounded, and running out is an error
+    /// rather than an allocation the process cannot survive.
+    #[test]
+    fn grafting_past_the_budget_is_refused() {
+        let pointers: Vec<ParseValue> = (0..10).map(|_| plain_pointer("Target", "t1")).collect();
+        let mut results = vec![row(vec![("refs", ParseValue::Array(pointers))])];
+        let mut fetched = IndexMap::new();
+        fetched.insert(
+            "t1".to_string(),
+            row(vec![("blob", ParseValue::String("x".repeat(1000)))]),
+        );
+        let path = ["refs".to_string()];
+        let mut small = GraftBudget::new(5_000);
+        assert!(graft(&mut results, &path, &fetched, &mut small).is_err());
+        let mut results = vec![row(vec![(
+            "refs",
+            ParseValue::Array(vec![plain_pointer("Target", "t1")]),
+        )])];
+        let mut ample = GraftBudget::new(GraftBudget::DEFAULT);
+        assert!(graft(&mut results, &path, &fetched, &mut ample).is_ok());
     }
 
     #[test]
@@ -394,7 +511,13 @@ mod tests {
             "u1".to_string(),
             row(vec![("objectId", ParseValue::String("u1".into()))]),
         );
-        graft(&mut results, &["author".to_string()], &fetched);
+        graft(
+            &mut results,
+            &["author".to_string()],
+            &fetched,
+            &mut GraftBudget::new(GraftBudget::DEFAULT),
+        )
+        .expect("within budget");
         assert!(matches!(
             results[0].get("author"),
             Some(ParseValue::Object(_))
@@ -416,7 +539,13 @@ mod tests {
             "u1".to_string(),
             row(vec![("objectId", ParseValue::String("u1".into()))]),
         );
-        graft(&mut results, &["editors".to_string()], &fetched);
+        graft(
+            &mut results,
+            &["editors".to_string()],
+            &fetched,
+            &mut GraftBudget::new(GraftBudget::DEFAULT),
+        )
+        .expect("within budget");
         match results[0].get("editors") {
             Some(ParseValue::Array(items)) => assert_eq!(items.len(), 1),
             other => panic!("expected an array, got {other:?}"),

@@ -80,6 +80,17 @@ whose name a client could use.
 
 ### Changed
 
+- **A request's work runs to completion when its client disconnects**, as Express keeps running a
+  request after its socket closes. A disconnect used to cancel it at its next step, part way through
+  a write or a batch.
+- **An empty `X-Parse-Session-Token` header is no session**, as upstream treats a falsy token,
+  rather than 209.
+- **`GET /users/me` with the master key and a session token** returns that token's user, as
+  upstream's `handleMe` resolves the token itself.
+- **A non-privileged `DELETE` of a `_User` row** answers 206 `Insufficient auth to delete user` for
+  an anonymous caller and 206 `Permission denied` for another user, as upstream does, where it
+  answered 119.
+- **A session token whose user no longer exists is refused** with 209 `Invalid session token`.
 - **`keys` naming a dotted path includes its parent**, as upstream forces the include, so
   `keys=author.name` returns `author` with only `name`.
 - **A `where` is checked where upstream checks it.** A bad operand is refused after the CLP gate
@@ -197,7 +208,10 @@ whose name a client could use.
 ### Deliberate differences
 
 - Protected fields are enforced across more of the read path.
-- A client delete is accepted only on a class whose name a client could use.
+- A client delete or read is accepted only on a class whose name a client could use.
+- The rows an `include` grafts into one response are capped at 128 MiB of JSON; past it the read
+  answers the generic 500, which parse-server answers only when its response no longer fits in a
+  JavaScript string.
 - A create sending `null` for a field that is both `required` and has a `defaultValue` is 142
   `<field> is required`. parse-server answers a 500 there.
 - The on-demand geo index is built only for a field declared as a GeoPoint. A geo query on any
@@ -280,7 +294,7 @@ No new routes and no new vocabulary. There is one source-compatibility break for
     throws on the first master-key request; here it stops the server and names the entry.
   - **No `PARSE_SERVER_MAINTENANCE_KEY_IPS`, and that is a parse-rust CLI limitation rather than a
     gap upstream.** The pin defines both `PARSE_SERVER_MAINTENANCE_KEY` and
-    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:387`, `:386`). This binary exposes
+    `PARSE_SERVER_MAINTENANCE_KEY_IPS` (`Options/Definitions.js:387`, `:392`). This binary exposes
     neither, because master and maintenance are still one scope internally, so shipping the key
     through the CLI would advertise an authority the server only partly distinguishes. Both are
     reachable through `ServerConfig`.
@@ -520,7 +534,7 @@ route list in them is exhaustive. Treat any Parse Server endpoint not named ther
   upstream's, plus the legacy `_expiresAt` spelling.
 - **`emailVerified` was accepted on signup.** Upstream refuses it on any `_User` write through
   `checkRestrictedFields`, which sits in the chain both create and update run
-  (`RestWrite.js:119`, `:716-728`), so the create half was an omission rather than a decision: a
+  (`RestWrite.js:119`, `:779-791`), so the create half was an omission rather than a decision: a
   client could mark its own address verified at signup. Both paths now refuse it. `authData` is
   refused alongside it, which is a deliberate difference rather than restored parity, and is
   recorded as one below: upstream accepts `authData` on signup and validates it through the auth

@@ -1424,3 +1424,99 @@ async fn a_client_cannot_delete_from_an_internal_collection() {
     let still = common::get(host, "/schemas/Kept", &common::As::master()).await;
     assert_eq!(still.status, 200, "the class must survive: {}", still.raw);
 }
+
+/// With client class creation on, a client still reads only classes whose names a client could use.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_client_cannot_read_an_internal_collection() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let made = common::post(
+        host,
+        "/schemas/Kept",
+        &common::As::master(),
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(made.status, 200, "{}", made.raw);
+    for path in [
+        "/classes/_SCHEMA",
+        "/classes/_SCHEMA/Kept",
+        "/classes/_SCHEMA?count=1&limit=1",
+    ] {
+        let r = common::get(host, path, &common::As::anonymous()).await;
+        assert_eq!(r.code(), Some(119), "{path}: {}", r.raw);
+        assert!(!r.raw.contains("Kept"), "{path}: {}", r.raw);
+    }
+}
+
+/// A create answers 201 with `Location` naming the new object, as `RestWrite.location` builds it.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_create_answers_with_its_location() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let r = common::post(
+        host,
+        "/classes/Loc",
+        &common::As::anonymous(),
+        &serde_json::json!({"a": 1}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.raw);
+    let id = r.body["objectId"].as_str().expect("objectId");
+    let want = format!("location: http://{host}/parse/classes/Loc/{id}");
+    assert!(
+        r.raw
+            .to_ascii_lowercase()
+            .contains(&want.to_ascii_lowercase()),
+        "expected `{want}` in: {}",
+        &r.raw[..r.raw.find("\r\n\r\n").unwrap_or(r.raw.len())]
+    );
+}
+
+/// A create echoes what its operations produced, which has no size of its own; a large echo comes
+/// back whole rather than as an empty 201 after the write succeeded.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_large_create_response_is_returned_whole() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let objects: Vec<String> = (0..2000).map(|i| format!("{i:0>60}")).collect();
+    let r = common::post(
+        host,
+        "/classes/Big",
+        &common::As::anonymous(),
+        &serde_json::json!({"tags": {"__op": "Add", "objects": objects}}),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", &r.raw[..r.raw.len().min(300)]);
+    assert!(r.raw.len() > 64 * 1024, "the echo is over 64 KB");
+    assert_eq!(
+        r.body["tags"].as_array().map(Vec::len),
+        Some(2000),
+        "the echoed array must arrive whole"
+    );
+}
+
+/// `/classes/health` is an ordinary class route: only the mount's own `/health` skips body parsing,
+/// so the SDK's `POST` with `_method: "GET"` here is a find.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_class_named_health_is_an_ordinary_route() {
+    let server = common::boot().await;
+    let host = &server.host;
+    let r = common::post(
+        host,
+        "/classes/health",
+        &common::As::anonymous(),
+        &serde_json::json!({"_method": "GET"}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.raw);
+    assert!(
+        r.body["results"].is_array(),
+        "a find, not a create: {}",
+        r.raw
+    );
+}

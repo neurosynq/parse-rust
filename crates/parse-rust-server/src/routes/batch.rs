@@ -241,7 +241,7 @@ async fn run_one(
         path: path.to_string(),
         params,
         // An absent sub-request body reaches upstream's handlers as `undefined`, and a write reads
-        // that as no fields (`batch.js:167`), so it is the empty object here.
+        // that as no fields (`batch.js:166`), so it is the empty object here.
         body: match body {
             Some(b) => Some(b.clone()),
             None if !matches!(method_of_incoming, http::Method::GET | http::Method::DELETE) => {

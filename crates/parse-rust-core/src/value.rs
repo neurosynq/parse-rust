@@ -92,6 +92,22 @@ impl ParseValue {
         s
     }
 
+    /// The length of an object's JSON, without copying the object into a [`ParseValue`].
+    pub fn object_json_len(map: &ParseMap) -> usize {
+        let mut out = String::new();
+        out.push('{');
+        for (i, (k, v)) in map.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            write_json_string(k, &mut out);
+            out.push(':');
+            v.write_json(&mut out);
+        }
+        out.push('}');
+        out.len()
+    }
+
     fn write_json(&self, out: &mut String) {
         match self {
             ParseValue::Null => out.push_str("null"),

@@ -497,6 +497,34 @@ pub async fn resolve_session<S: StorageAdapter>(
     })
 }
 
+/// The user a session token names, with no expiry check and no check that the user exists.
+///
+/// `handleMe`'s own lookup (`UsersRouter.js:195-213`): it reads the `_Session` row with the master
+/// key and takes `user.objectId`, then re-fetches the user, which is where a missing user fails.
+/// An expired session is not refused there, so a master caller asking `/users/me` with an expired
+/// token gets that token's user.
+pub async fn session_user<S: StorageAdapter>(
+    storage: &S,
+    session_token: &str,
+) -> Result<Option<String>, ParseError> {
+    let query = Query::from_constraints(vec![Constraint::equal(
+        "sessionToken",
+        ParseValue::String(session_token.to_string()),
+    )]);
+    let options = QueryOptions {
+        limit: Some(1),
+        ..QueryOptions::default()
+    };
+    let rows = storage.find(&session_schema(), &query, &options).await?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|row| match row.get("user") {
+            Some(ParseValue::Pointer { object_id, .. }) => Some(object_id.clone()),
+            _ => None,
+        }))
+}
+
 /// Is there a `_User` row with this objectId? The include's lookup, reduced to existence.
 async fn user_exists<S: StorageAdapter>(storage: &S, object_id: &str) -> Result<bool, ParseError> {
     let query = Query::from_constraints(vec![Constraint::equal(

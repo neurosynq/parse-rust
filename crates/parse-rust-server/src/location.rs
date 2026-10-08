@@ -18,9 +18,6 @@ use axum::response::Response;
 use crate::body_credentials::MethodOverride;
 use crate::routes::dispatch::{route_of, Route};
 
-/// A create's response is an objectId and a timestamp; this is generous.
-const MAX_CREATE_BODY: usize = 64 * 1024;
-
 pub async fn stamp(State(mount): State<String>, request: Request, next: Next) -> Response {
     let method = request
         .extensions()
@@ -54,7 +51,10 @@ pub async fn stamp(State(mount): State<String>, request: Request, next: Next) ->
         return response;
     }
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = to_bytes(body, MAX_CREATE_BODY).await else {
+    // Unbounded: this is the server's own response, already built, and a create echoes back
+    // whatever its operations and defaults produced, which has no size of its own. A limit here
+    // turned a large echo into an empty 201 after the write had succeeded.
+    let Ok(bytes) = to_bytes(body, usize::MAX).await else {
         return Response::from_parts(parts, Body::empty());
     };
     let object_id = serde_json::from_slice::<serde_json::Value>(&bytes)

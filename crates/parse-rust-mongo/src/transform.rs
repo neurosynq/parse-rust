@@ -1583,7 +1583,7 @@ fn comparison_to_bson(schema: &ClassSchema, constraint: &Constraint) -> Result<B
         // of the two arms below.** Upstream reaches shorthand equality only after
         // `transformConstraint` declines, and for `[]` or `{}` it does not decline: its key loop
         // simply does not run and it returns the empty answer document it started with
-        // (`MongoTransform.js:672-676`, `:960`). So `{"tags": []}` and `{"meta": {}}` both lower to
+        // (`MongoTransform.js:672-676`, `:961`). So `{"tags": []}` and `{"meta": {}}` both lower to
         // `{field: {}}`, which is an **equality against an empty document**: it matches a row whose
         // field holds `{}` and nothing else. Not an absent constraint. An earlier version of this
         // note called it "matches every row", which is what an empty *constraint document* would

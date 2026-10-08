@@ -212,11 +212,13 @@ pub async fn create_core(
         // usernames and malformed email addresses that `POST /users` refuses. The dashboard
         // creates users through this route. There is no self to exclude on a create, which is
         // what the empty objectId means here.
-        crate::routes::users::validate_user_identity(state, rc, &body, "").await?;
         crate::routes::users::prepare_user_write(&mut body, true).await?;
     }
     let ctx = rc.ctx(state.storage());
-    let res = parse_rust_rest::create(&ctx, class_name, body)
+    // The identity validation runs inside the create, after defaults; see `identity_check`.
+    let check = (class_name == crate::routes::users::USER_CLASS)
+        .then(|| crate::routes::users::identity_check(state, rc));
+    let res = parse_rust_rest::create_checked(&ctx, class_name, body, check)
         .await
         // Same relabelling the update path does, and `_User` only: a collision on the unique index
         // is 202 or 203 to a client, not a bare 137.
@@ -424,7 +426,7 @@ pub async fn delete_core(
 /// `protectedFieldsSaveResponseExempt` decides whether a protected field survives that fold. It
 /// defaults to `true` (`Options/Definitions.js:513-518`), which is the pass-through case; set to
 /// `false` the echo is stripped the same way a query result is.
-fn merge_echo(out: &mut Json, echoed: ParseMap, rc: &RequestContext, class_name: &str) {
+pub(crate) fn merge_echo(out: &mut Json, echoed: ParseMap, rc: &RequestContext, class_name: &str) {
     if echoed.is_empty() {
         return;
     }

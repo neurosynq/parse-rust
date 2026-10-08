@@ -126,11 +126,9 @@ fn not_found(method: &http::Method, path: &str) -> Response {
     .into_response()
 }
 
-/// The method a request is really asking for.
-///
-/// An override that names a method axum would have routed differently is honoured; anything
-/// unparsable falls back to the transport method, which then fails to match a route arm and
-/// reports that rather than silently doing something else.
+/// The method a request is really asking for: the `_method` override when the body layer set one,
+/// otherwise the transport method. An override that does not parse as a method was already turned
+/// into one no route serves, so it answers 404 rather than falling back to the transport method.
 fn effective_method(
     transport: http::Method,
     override_: Option<axum::Extension<MethodOverride>>,

@@ -1,7 +1,7 @@
 //! One schema snapshot per request.
 //!
 //! Upstream threads a `validSchemaController` down through every controller entry point
-//! (`DatabaseController.js:554`, `:843`, `:906`, `:1407`) so that one request cannot evaluate half
+//! (`DatabaseController.js:554`, `:844`, `:907`, `:1408`) so that one request cannot evaluate half
 //! its work under one schema and half under another. A batch that saw two schemas mid-flight would
 //! decide what a caller may write and what a caller may see under two different rule sets, and the
 //! second half would carry no error.

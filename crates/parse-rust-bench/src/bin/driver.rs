@@ -4,7 +4,7 @@
 //! driver [--samples N] [--warmup N] [--rungs 0,1,10] [--out FILE] [--historical]
 //! ```
 //!
-//! **Order is the honesty rule** (the benchmark design's):
+//! **Order is the honesty rule**:
 //!
 //! 1. Preflight. The upstream checkout is at the revision `PIN` records with no tracked change, the
 //!    benchmark stack is up under its own prefix, and toxiproxy answers.
@@ -1114,12 +1114,19 @@ async fn main() {
         // warmup. parse-rust read `_SCHEMA` on every request until 0.3.0's schema cache, and a
         // change that brings that read back fails here. A server change that alters a count must
         // change it here too.
-        const CALIBRATION: [(&str, u64, u64); 4] = [
+        //
+        // Of the two workloads added later, `include.array` qualifies: the holder query, then one
+        // query for the single target class, one after the other. `query.dated` does not, though
+        // it is one command on each server: its thousand-row reply adds transfer time the
+        // tolerance was not set for, measured from 13.5 to 16.1 ms at the 10 ms rung across runs,
+        // which straddles the bound and would make the gate flaky rather than strict.
+        const CALIBRATION: [(&str, u64, u64); 5] = [
             // (workload, node commands, rust commands)
             ("read.get", 1, 1),
             ("create.nested", 1, 1),
             ("update.ops", 1, 1),
             ("query.protected", 1, 1),
+            ("include.array", 2, 2),
         ];
         for (workload, node_ops, rust_ops) in CALIBRATION {
             let declared = if target.name == "node" {

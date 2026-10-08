@@ -580,10 +580,10 @@ async fn the_excluded_session_routes_are_404() {
             "POST" => post(host, path, &As::user(&token), &json!({})).await,
             _ => put(host, path, &As::user(&token), &json!({})).await,
         };
-        assert!(
-            r.status == 404 || r.status == 405,
-            "{method} {path} must not be served, got {}: {}",
-            r.status,
+        // 404 only: every API path takes every method now, and an unserved one is Express's 404.
+        assert_eq!(
+            r.status, 404,
+            "{method} {path} must not be served: {}",
             r.raw
         );
     }

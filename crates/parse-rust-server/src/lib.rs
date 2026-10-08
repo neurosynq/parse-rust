@@ -150,6 +150,11 @@ pub fn router(state: AppState) -> Router {
         .route("/schemas/:className", any(routes::http::schemas_class))
         .route("/purge/:className", any(routes::http::purge))
         .route("/batch", any(routes::http::batch))
+        // axum's `Json` extractor has its own 2 MB default, under the 20 MB `maxUploadSize` the body
+        // layer enforces, so a body between the two was refused as not JSON.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            body_credentials::MAX_BODY,
+        ))
         .with_state(state);
 
     // The normalization layer wraps the *whole* router rather than the routes inside it, because

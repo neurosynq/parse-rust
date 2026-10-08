@@ -63,10 +63,10 @@ subsystem out of the second list below and into the first, and `CHANGELOG.md` re
 
 LiveQuery, Cloud Code and triggers, files, push, aggregate, GraphQL, `$inQuery`, `$notInQuery`,
 `$select`, `$dontSelect`, password reset, email verification, auth adapters, MFA, password
-policy, rate limiting, idempotency, and PostgreSQL. An ordinary client's create and delete of a
-`_User` through `/classes/_User` or `/users/:objectId` are refused, so `signUp`, `logIn` and
-`user.save()` on an existing user all work, while creating a user outside `POST /users`, or a client
-deleting one, does not.
+policy, rate limiting, idempotency, and PostgreSQL. An ordinary client cannot create a `_User`
+through `POST /classes/_User`, or delete one through `/classes/_User/:objectId` or
+`/users/:objectId`, so `signUp`, `logIn` and `user.save()` on an existing user all work, while
+creating a user outside `POST /users`, or a client deleting one, does not.
 
 Three of those absences are not inert, and matter before you try anything against real data:
 

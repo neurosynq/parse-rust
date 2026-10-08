@@ -187,6 +187,15 @@ fn read_body_credentials(
 }
 
 /// `req.is('multipart/form-data')`, which `express.json` leaves unparsed.
+/// body-parser's strict-mode message: V8's `JSON.parse` error for the body with its first character
+/// named (body-parser's `createStrictSyntaxError`). V8 quotes a long source only in part; this
+/// quotes it whole, so the message matches for short bodies only.
+fn strict_violation(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let first = text.trim_start().chars().next().unwrap_or(' ');
+    format!("Unexpected token '{first}', \"{text}\" is not valid JSON")
+}
+
 fn is_multipart(parts: &http::request::Parts) -> bool {
     parts
         .headers
@@ -205,7 +214,18 @@ fn unroutable_method() -> http::Method {
 }
 
 /// Upper bound on a buffered body. Without one, a request could exhaust memory.
-const MAX_BODY: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
+
+/// The health endpoint exactly: the mount plus `/health`, with or without a trailing slash, as
+/// Express's `api.use('/health', ...)` matches it. A suffix test also matched `/classes/health`.
+fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
+    let mount = state.config().mount_path.trim_end_matches('/');
+    parts
+        .uri
+        .path()
+        .strip_prefix(mount)
+        .is_some_and(|rest| rest == "/health" || rest == "/health/")
+}
 
 pub async fn extract(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let (mut parts, body) = request.into_parts();
@@ -214,7 +234,7 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
     // (`middlewares.js:76-86`), so a malformed one is refused whoever sent it. `/health` is mounted
     // ahead of that middleware upstream and is not checked.
     if let Some(value) = parts.headers.get(headers::CLOUD_CONTEXT) {
-        let health = parts.uri.path().ends_with("/health");
+        let health = is_health(&parts, &state);
         if !health && !value.to_str().is_ok_and(is_context_object) {
             return malformed_context();
         }
@@ -237,7 +257,7 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
 
     // `express.json` parses every body that is not multipart (`ParseServer.ts:332`), and it runs
     // after `/health` is mounted, so a health check's body is never read.
-    let parsed = if parts.uri.path().ends_with("/health") || is_multipart(&parts) {
+    let parsed = if is_health(&parts, &state) || is_multipart(&parts) {
         None
     } else if bytes.is_empty() {
         // body-parser's empty body is `{}`, so a create, a schema create, a signup or an update
@@ -245,7 +265,16 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
         Some(Json::Object(serde_json::Map::new()))
     } else {
         match serde_json::from_slice::<Json>(&bytes) {
-            Ok(value) => Some(value),
+            // body-parser's strict mode, the default, takes only an object or an array at the top
+            // level and answers anything else with its 400, before the route sees it.
+            Ok(value @ (Json::Object(_) | Json::Array(_))) => Some(value),
+            Ok(_) => {
+                return HttpError {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: strict_violation(&bytes),
+                }
+                .into_response()
+            }
             // body-parser's 400, rendered by `handleParseErrors` as `{error}` from the error's
             // own status and message. The message is the parser's and so is not upstream's
             // V8 text; the status and the envelope are.
@@ -261,6 +290,16 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
 
     // Not a JSON object body: nothing to normalize. Covers every GET.
     let Some(Json::Object(mut map)) = parsed else {
+        // A multipart body is never parsed upstream, so a write reaches its route with no fields
+        // and stores an empty object, measured at the pin as a 201. Handing the route `{}` does
+        // the same; the raw multipart bytes would fail the route's JSON extraction instead.
+        if is_multipart(&parts) && !is_health(&parts, &state) {
+            parts.headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+            return next.run(Request::from_parts(parts, Body::from("{}"))).await;
+        }
         return next
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await;

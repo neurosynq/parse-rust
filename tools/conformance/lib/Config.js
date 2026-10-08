@@ -1,7 +1,7 @@
 'use strict';
 // `../lib/Config` for the vendored specs. Everything throws except the one shim 0.3.0 permits:
 // `Config.get(appId).database.loadSchema()`, whose `addClassIfNotExists` and `updateClass` become
-// `POST` and `PUT /schemas/:className` with the master key (Gate G condition 2). Those two are
+// `POST` and `PUT /schemas/:className` with the master key (Gate G). Those two are
 // setup calls in the specs that use them, declaring a class and its CLP before asserting over
 // HTTP, and the schema API is the same operation upstream's controller performs.
 //

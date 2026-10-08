@@ -174,10 +174,16 @@ impl SchemaCache {
         if entry.epoch != storage.schema_epoch() {
             return None;
         }
+        let fresh_enough = loaded_since.is_some_and(|since| entry.loaded_at >= since);
+        // A load that began after this request arrived is as fresh as one it would run itself,
+        // whatever the TTL says. Without this, a TTL of zero or less, which expires every entry at
+        // once, made each request waiting on the lock reload again in turn.
+        if fresh_enough {
+            return Some(Arc::clone(&entry.snapshot));
+        }
         if self.ttl.is_some_and(|ttl| entry.loaded_at.elapsed() > ttl) {
             return None;
         }
-        let fresh_enough = loaded_since.is_some_and(|since| entry.loaded_at >= since);
         let covered = freshness
             .classes()
             .all(|class| entry.snapshot.contains(class));

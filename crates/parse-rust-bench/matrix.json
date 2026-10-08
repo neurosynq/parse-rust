@@ -13,7 +13,7 @@
     "query.dated",
     "include.array"
   ],
-  "calibrated": ["read.get", "create.nested", "update.ops", "query.protected"],
+  "calibrated": ["read.get", "create.nested", "update.ops", "query.protected", "include.array"],
   "families": ["json.decode", "json.encode", "parse-to-bson", "bson-to-parse"],
   "sizes": ["200b", "2kb", "8kb"],
   "shapes": ["flat", "nested", "pointers", "dated"]

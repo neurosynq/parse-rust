@@ -66,6 +66,22 @@ pub enum Route {
 }
 
 impl Route {
+    /// The route a method actually reaches. Upstream registers `/users/me` and `/sessions/me` for
+    /// `GET` only (`UsersRouter.js:838`, `SessionsRouter.js:113`), so any other method falls through
+    /// to `/:objectId` with the objectId `me`, and a `DELETE /sessions/me` is a delete of a session
+    /// that does not exist.
+    pub fn for_method(&self, method: &http::Method) -> Route {
+        match self {
+            Route::UsersMe if method != http::Method::GET => Route::UserObject {
+                object_id: "me".to_string(),
+            },
+            Route::SessionsMe if method != http::Method::GET => Route::SessionObject {
+                object_id: "me".to_string(),
+            },
+            other => other.clone(),
+        }
+    }
+
     /// What this route needs from the schema cache.
     ///
     /// The class a route names is the one upstream would fetch with `getOneSchema`, whose miss
@@ -224,15 +240,17 @@ pub async fn dispatch(
     } = incoming;
     let path = path.as_str();
 
-    // The body every write path needs. A route that reaches here with no body is a malformed
-    // request, not an empty write: `Option<Json>` is `None` for an unparsable or oversized body
-    // as well as an absent one, so treating it as `{}` would turn a rejection into a write.
+    // The body every write path needs. The body middleware has already turned an absent body and
+    // a multipart one into `{}`, answered an unparsable one with 400, a top-level scalar with 400
+    // and an oversized one with 413, so a write reaching here with no body is one whose request
+    // carried something the JSON extractor still refused, and that stays a refusal.
     let body = || -> Result<&Json, RouteError> {
         body.as_ref().ok_or_else(|| {
             RouteError::Parse(ParseError::invalid_json("body must be a JSON object"))
         })
     };
 
+    let route = &route.for_method(method);
     let response = match (route, method) {
         (Route::Health, &M::GET | &M::POST) => RouteResponse::ok(crate::routes::health::body()),
 
@@ -400,6 +418,7 @@ const ROLE_CLASS: &str = "_Role";
 /// cannot reach it, and `/batch` is refused before routing as a nested batch.
 pub fn serves(route: &Route, method: &http::Method) -> bool {
     use http::Method as M;
+    let route = &route.for_method(method);
     let (get, post, put, delete) = (
         method == M::GET,
         method == M::POST,

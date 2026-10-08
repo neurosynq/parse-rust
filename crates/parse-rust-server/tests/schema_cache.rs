@@ -357,7 +357,7 @@ async fn an_include_into_a_class_the_snapshot_predates_applies_its_clp() {
     assert_eq!(anonymous_find(host, "Post").await, None);
     create_closed_class_elsewhere(&server.database, "Vault").await;
 
-    // The include runs as a `get` on `Vault` (`RestQuery.js:1255-1259`), whose CLP denies it, so
+    // The include runs as a `get` on `Vault` (`RestQuery.js:1250-1259`), whose CLP denies it, so
     // the whole read is 119, as upstream answers. Under the stale snapshot it grafted the row.
     let r = get(host, "/classes/Post?include=v", &As::anonymous()).await;
     assert_eq!(r.code(), Some(119), "{}", r.raw);

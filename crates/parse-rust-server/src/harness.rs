@@ -102,7 +102,7 @@ fn refused() -> Response {
 }
 
 /// The options this process is running with, in upstream's names, for the harness to compare
-/// against what it asked a reconfigure for (0.3.0 Gate H condition 2). An option missing here is
+/// against what it asked a reconfigure for (Gate H). An option missing here is
 /// one the harness cannot verify, so it refuses to map it.
 fn resolved(config: &crate::config::ServerConfig) -> serde_json::Value {
     json!({

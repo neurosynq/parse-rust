@@ -40,8 +40,8 @@ pub use guard::{
     to_response_body,
 };
 pub use pipeline::{
-    authorize_update, count, create, delete, explain, find, get, update, update_gate,
-    CreateResponse, Ctx, FindOptions, UpdateResponse,
+    authorize_update, count, create, create_checked, delete, explain, find, get, update,
+    update_gate, BeforeInsert, CreateResponse, Ctx, FindOptions, UpdateResponse,
 };
 pub use query_parse::{
     parse_client_where, parse_include, parse_where, DeferredWhere, ParsedClause, ParsedWhere,

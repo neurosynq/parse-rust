@@ -388,7 +388,7 @@ fn sdk_acl_entries_accepted(acl: &ParseValue) -> Result<(), ParseError> {
 ///
 /// **On `ClassesRouter`, not on `UsersRouter`**, which is the detail that matters for where this
 /// is called from. `UsersRouter extends ClassesRouter` and does not override `handleCreate`
-/// (`UsersRouter.js:23`, `:824-826`), so one guard covers `POST /users` and `POST /classes/_User`
+/// (`UsersRouter.js:23`, `:835-837`), so one guard covers `POST /users` and `POST /classes/_User`
 /// alike. parse-rust had it on the signup route only, which left the class route uncovered for
 /// the master key.
 pub(crate) fn reject_role_prefixed_object_id(
@@ -543,14 +543,16 @@ pub async fn signup_core(
     // The objectId is not known yet, so the `$ne` exclusion is given a value no row can hold. On a
     // create there is no self to exclude, which is the same thing upstream's `this.objectId()`
     // returning undefined achieves.
-    validate_user_identity(state, rc, &body, "").await?;
-
+    //
+    // Run by the pipeline once the schema's defaults and required fields are applied, as
+    // `transformUser` follows `setRequiredFieldsIfNeeded`, so a defaulted email is validated too.
     prepare_user_write(&mut body, true).await?;
 
     let ctx = rc.ctx(state.storage());
-    let created = parse_rust_rest::create(&ctx, USER_CLASS, body)
-        .await
-        .map_err(map_duplicate)?;
+    let created =
+        parse_rust_rest::create_checked(&ctx, USER_CLASS, body, Some(identity_check(state, rc)))
+            .await
+            .map_err(map_duplicate)?;
 
     let session = create_session(
         state.storage(),
@@ -563,11 +565,27 @@ pub async fn signup_core(
     )
     .await?;
 
-    Ok(json!({
+    // Server-set fields, defaults among them, join the response before the token, as upstream's
+    // `_updateResponseWithData` runs in `runDatabaseOperation` and the token is added after.
+    let mut out = json!({
         "objectId": created.object_id,
         "createdAt": created.created_at.to_iso(),
-        "sessionToken": session.session_token,
-    }))
+    });
+    crate::routes::classes::merge_echo(&mut out, created.echoed, rc, USER_CLASS);
+    if let Json::Object(map) = &mut out {
+        map.insert("sessionToken".into(), Json::String(session.session_token));
+    }
+    Ok(out)
+}
+
+/// The `_User` identity validation, as a [`parse_rust_rest::BeforeInsert`] for a create.
+pub(crate) fn identity_check<'a>(
+    state: &'a AppState,
+    rc: &'a RequestContext,
+) -> parse_rust_rest::BeforeInsert<'a> {
+    Box::new(move |body| {
+        Box::pin(async move { validate_user_identity(state, rc, &body, "").await })
+    })
 }
 
 /// Turn a duplicate-key error into the code the SDK expects (`RestWrite.js:1836-1855`).
@@ -940,10 +958,9 @@ pub async fn me_core(state: &AppState, rc: &RequestContext) -> Result<Json, Pars
     let user_id = match rc.user_id.as_deref() {
         Some(id) => id,
         None => {
-            resolved = parse_rust_auth::resolve_session(state.storage(), token)
-                .await
-                .map_err(|_| invalid())?
-                .user_object_id;
+            resolved = parse_rust_auth::sessions::session_user(state.storage(), token)
+                .await?
+                .ok_or_else(invalid)?;
             resolved.as_str()
         }
     };

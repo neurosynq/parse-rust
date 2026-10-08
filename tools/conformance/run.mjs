@@ -7,7 +7,7 @@
  * parse-server. `--classify` runs against the pinned parse-server only and rewrites
  * `inventory.json`; that is a deliberate act with a diff to review, never a side effect of a run.
  *
- * **How each run proves its subject**, per the contract:
+ * **How each run proves its subject**:
  *   - Every request carries `X-Parse-Conformance-Block`. parse-rust counts them server-side
  *     (`/_control/stats`), and a `server-dependent` block that passed with no body-phase request
  *     of its own on parse-rust fails the gate; a `client-only` block that sent one fails too.
@@ -46,7 +46,7 @@ const opt = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] 
 const target = opt('--target') || 'all';
 const classify = args.includes('--classify');
 const inventory = fs.existsSync(INVENTORY) ? JSON.parse(fs.readFileSync(INVENTORY, 'utf8')) : null;
-// Gate H condition 4's acceptance files. Not conformance rows, so not in the inventory.
+// The control plane's acceptance files, which Gate H runs. Not conformance rows, so not in the inventory.
 const CONTROL_FILES = ['index.spec.js', 'PasswordPolicy.spec.js'];
 const defaultFiles = args.includes('--control-plane')
   ? CONTROL_FILES.join(',')
@@ -67,10 +67,10 @@ const FLOORS = {
   'ParseRelation.spec.js': 19,
   'PointerPermissions.spec.js': 90,
   'ParseQuery.spec.js': 223,
-  // Not in the contract's target set; added once `$text` landed, at its executable count.
+  // Not in the original target set; added once `$text` landed, at its executable count.
   'ParseQuery.FullTextSearch.spec.js': 11,
 };
-// Gate G condition 1. A floor counts executed blocks, so it cannot say a file is green; this does.
+// Gate G. A floor counts executed blocks, so it cannot say a file is green; this does.
 const MUST_BE_GREEN = ['ParseGeoPoint.spec.js'];
 const WORK = path.join(REPO, 'target/conformance', TAG);
 
@@ -200,7 +200,7 @@ function waitForLine(child, pattern, what) {
 
 /**
  * Upstream option names parse-rust honors, and the environment variable each becomes. **A key not
- * here is refused by name** (Gate H condition 1): silently ignoring it would turn a red block
+ * here is refused by name** (Gate H): silently ignoring it would turn a red block
  * green without parse-rust doing anything.
  */
 const MAPPED = {
@@ -452,7 +452,7 @@ async function startDead(dbUri) {
 
 /**
  * The supervisor `reconfigureServer` talks to, for the life of one suite run. Every refusal is
- * recorded against the block that asked, which is what Gate H condition 4 judges.
+ * recorded against the block that asked, which is what Gate H judges.
  */
 function supervisor(server) {
   const refusals = [];
@@ -617,17 +617,17 @@ function judgeRust(results, stats, server) {
     }
     rows.push(row);
   }
-  // The contract, checked against the editable inventory: every committed file is in it and in this
-  // run, and no inventory floor is below the contract's. Deleting a file's entry or lowering its
+  // The committed floors (`FLOORS`), checked against the editable inventory: every committed file
+  // is in it and in this run, and no inventory floor is below its committed one. Deleting a file's entry or lowering its
   // floor in `inventory.json` would otherwise shrink the gate without anyone reviewing it.
   for (const [file, floor] of Object.entries(FLOORS)) {
-    if (!inventory.files[file]) { problem(`[contract] ${file} is committed with floor ${floor} and missing from inventory.json`); continue; }
-    if (!opt('--files') && !files.includes(file)) { problem(`[contract] ${file} is committed and was not in this run`); }
+    if (!inventory.files[file]) { problem(`[floors] ${file} is committed with floor ${floor} and missing from inventory.json`); continue; }
+    if (!opt('--files') && !files.includes(file)) { problem(`[floors] ${file} is committed and was not in this run`); }
     if (inventory.files[file].floor < floor) {
-      problem(`[contract] ${file}: inventory floor ${inventory.files[file].floor} is below the contract's ${floor}`);
+      problem(`[floors] ${file}: inventory floor ${inventory.files[file].floor} is below the committed ${floor}`);
     }
   }
-  // Gate G condition 1: these files are green(mongo), every committed block executed and passed.
+  // Gate G: these files are green(mongo), every committed block executed and passed.
   for (const file of MUST_BE_GREEN.filter(f => files.includes(f))) {
     const mine = rows.filter(x => x.file === file);
     const bad = mine.filter(x => x.outcome !== 'pass');
@@ -787,7 +787,7 @@ function writeInventory(results, hashes) {
 }
 
 /**
- * Gate H condition 4: the control plane's acceptance files, which reconfigure in nearly every
+ * Gate H: the control plane's acceptance files, which reconfigure in nearly every
  * block. Not conformance rows. On parse-rust, every reconfigure carrying an option it cannot map
  * must be refused naming the option, and **no block whose reconfigure was refused may pass**,
  * because a pass there would mean the refusal was swallowed and the block measured nothing.
@@ -869,7 +869,7 @@ async function main() {
       for (const p of problems) { console.error(`  - ${p}`); }
       process.exit(1);
     }
-    console.log('gate H condition 4: clean');
+    console.log('gate H: clean');
     return;
   }
   if (classify) {
@@ -915,7 +915,7 @@ async function main() {
     process.exit(1);
   }
   if (!report.complete) {
-    // Conditions 4 and 5 need the dead-server and oracle runs, and the contract needs every file.
+    // The gate needs the dead-server control, the oracle run and every committed file.
     // A partial run is a diagnostic.
     console.log(`gate F: partial run (--target ${target}${opt('--files') ? ', --files' : ''}), no problems in what ran; not a gate result`);
     return;

@@ -1,5 +1,5 @@
 /*
- * The oracle: parse-server built at the pin, booted out of process, for Gate F condition 5 and for
+ * The oracle: parse-server built at the pin, booted out of process, for Gate F's oracle run and for
  * classifying blocks.
  *
  * **Out of process, and with `directAccess: false`**, so the vendored suite reaches it over a

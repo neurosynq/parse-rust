@@ -295,8 +295,6 @@ run_gate_c_both_detailed() { node tools/spec/authorization.mjs "$1" test test "-
 run_gate_c_rust_detailed() { node tools/spec/authorization.mjs "$1" test test --detailed; }
 run_gate_d() { node tools/spec/shared-auth-state.mjs "$1" "$2"; }
 
-# Gate E is the one gate `with_server` cannot host. It varies server configuration across four
-# servers and it needs a second source address, so it boots its own and takes only a database.
 # Gate F of 0.3.0: upstream's own spec files against parse-rust, the dead-server control and the
 # pinned parse-server. Builds the harness binary into its own target directory, because the
 # `test-harness` feature must never reach the `target/debug/parse-rust` the other gates use.
@@ -312,6 +310,9 @@ run_gate_h() {
   PARSE_SERVER_ROOT="$PS_ROOT" node tools/conformance/run.mjs --control-plane
 }
 
+# Gate E is the one gate `with_server` cannot host. It varies server configuration across four
+# servers and it needs a second source address, so it boots its own and takes only a database.
+# Gate I runs in the same script for the same reason.
 run_gate_e() {
   cargo build --workspace --quiet || return 1
   if [[ ! -x ./target/debug/parse-rust ]]; then
@@ -395,7 +396,7 @@ else
     skip "gate C: upstream half"    "no parse-server at $PS_ROOT; parse-rust half ran above"
     skip "gate D: shared auth state" "no parse-server at $PS_ROOT; the gate boots one"
     skip "gates E and I: stock configuration" "no parse-server at $PS_ROOT; the gate boots one"
-    skip "gate F: upstream spec suite" "no parse-server at $PS_ROOT; condition 5 runs against it"
+    skip "gate F: upstream spec suite" "no parse-server at $PS_ROOT; its oracle run needs it"
     skip "gate H: reconfigure control plane" "no parse-server at $PS_ROOT; the supervisor is checked against it"
   fi
 fi

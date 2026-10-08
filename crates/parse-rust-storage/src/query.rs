@@ -135,8 +135,9 @@ impl Comparison {
             // a silently dropped constraint broadens the result, which is an authorization failure.
             "$inQuery" | "$notInQuery" | "$select" | "$dontSelect" | "$containedBy"
             // Parsed before this is reached; named here so a path that bypasses that parse still
-            // refuses rather than reporting an operator upstream knows as unknown.
-            | "$nearSphere" | "$near" | "$geoWithin" | "$within" | "$geoIntersects" | "$text" => {
+            // refuses rather than reporting an operator upstream knows as unknown. `$near` is not
+            // among them: upstream has no case for it, so it is the unknown-operator 107 below.
+            | "$nearSphere" | "$geoWithin" | "$within" | "$geoIntersects" | "$text" => {
                 return Err(ParseError::invalid_query(format!(
                     "unsupported query operator: {op}"
                 )))

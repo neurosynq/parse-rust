@@ -143,7 +143,7 @@ impl Default for FindOptions {
 pub struct CreateResponse {
     pub object_id: String,
     pub created_at: ParseDate,
-    /// Empty unless the body carried an `Add`, `AddUnique`, `Remove` or `Increment`.
+    /// The results of `Add`, `AddUnique`, `Remove` and `Increment`, and any defaults applied.
     pub echoed: ParseMap,
 }
 
@@ -466,19 +466,25 @@ fn deny_malformed_logical(
     }
 }
 
-/// [`deny_protected_fields`] for a field a read reaches through an index rather than by name.
-///
-/// Held to the same rule, with the same refusals. Only a caller with something protected pays for
-/// listing the class's indexes.
 /// A field of an index that only the server reads: an `_`-prefixed column such as a token or the
 /// password hash, or `authData`, which the adapter stores under `_auth_data_*`.
+///
+/// `_rperm` and `_wperm` are not among them: they are the ACL, which every row a caller can read
+/// already shows it.
 fn internal_index_field(fields: &[String]) -> Option<&str> {
     fields
         .iter()
-        .find(|field| field.starts_with('_') || field.as_str() == "authData")
+        .find(|field| {
+            (field.starts_with('_') && !matches!(field.as_str(), "_rperm" | "_wperm"))
+                || field.as_str() == "authData"
+        })
         .map(String::as_str)
 }
 
+/// [`deny_protected_fields`] for a field a read reaches through an index rather than by name.
+///
+/// Held to the same rule, with the same refusals. Only a caller with something protected pays for
+/// listing the class's indexes. A deliberate difference: upstream accepts any `hint`.
 async fn deny_protected_index_fields<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
@@ -552,6 +558,7 @@ fn plan_read<'a, S: StorageAdapter>(
     method: ReadMethod,
 ) -> BoxFut<'a, Result<ReadPlan, ParseError>> {
     Box::pin(async move {
+        refuse_unnamed_class(ctx, class_name, "find")?;
         let clp = ctx.snapshot.clp(class_name);
         let acl_group = ctx.scope.acl_group();
         let master = ctx.scope.is_master();
@@ -1210,6 +1217,7 @@ async fn expand_includes<S: StorageAdapter>(
     // `auth.isMaster`, which the maintenance key does not set (`middlewares.js:439`).
     let master = ctx.scope.is_master() && !ctx.is_maintenance;
 
+    let mut budget = include::GraftBudget::new(include::GraftBudget::DEFAULT);
     let mut remaining = options.include.as_slice();
     while let Some(first) = remaining.first() {
         let depth = first.len();
@@ -1250,11 +1258,29 @@ async fn expand_includes<S: StorageAdapter>(
         }
         for ((path, rows), has) in level.iter().zip(&fetched).zip(has_pointers) {
             if has {
-                include::graft(results, path, rows);
+                include::graft(results, path, rows, &mut budget)?;
             }
         }
     }
     Ok(())
+}
+
+/// A client reads and deletes only in a class whose name a client could use.
+fn refuse_unnamed_class<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
+    operation: &str,
+) -> Result<(), ParseError> {
+    if ctx.scope.is_master() || parse_rust_schema::class_name_is_valid(class_name) {
+        return Ok(());
+    }
+    Err(ParseError::permission_denied(
+        ErrorCode::OperationForbidden,
+        format!(
+            "Clients aren't allowed to perform the {operation} operation on the {class_name} collection."
+        ),
+        ctx.options.error_detail,
+    ))
 }
 
 /// Refuse to read `class_name` under a snapshot that lacks it while `_SCHEMA` has it.
@@ -1339,7 +1365,24 @@ async fn include_read<S: StorageAdapter>(
 pub async fn create<S: StorageAdapter>(
     ctx: &Ctx<'_, S>,
     class_name: &str,
+    body: WriteBody,
+) -> Result<CreateResponse, ParseError> {
+    create_checked(ctx, class_name, body, None).await
+}
+
+/// A check run on a create's body once its defaults and required fields are applied, before
+/// anything else about the object is checked or stored. A `_User` create's identity validation is
+/// one: upstream's `transformUser` follows `setRequiredFieldsIfNeeded` (`RestWrite.js:139-144`), so
+/// it sees the defaulted body, and a missing required field is reported before a taken username.
+pub type BeforeInsert<'a> =
+    Box<dyn FnOnce(WriteBody) -> BoxFut<'a, Result<(), ParseError>> + Send + 'a>;
+
+/// [`create`], with a [`BeforeInsert`] check.
+pub async fn create_checked<S: StorageAdapter>(
+    ctx: &Ctx<'_, S>,
+    class_name: &str,
     mut body: WriteBody,
+    before_insert: Option<BeforeInsert<'_>>,
 ) -> Result<CreateResponse, ParseError> {
     let class_exists = ctx.snapshot.contains(class_name);
     let mut schema = ctx.snapshot.resolve_for_write(class_name);
@@ -1517,13 +1560,17 @@ pub async fn create<S: StorageAdapter>(
     let defaulted = apply_field_options(&schema, &mut body, true)?;
     // Upstream appends defaults to the body after its own default fields, and the Mongo transform
     // then moves `createdAt` and `updatedAt` to the end of the stored document
-    // (`MongoTransform.js:483-487`), so a defaulted field is stored, and read back, ahead of them.
+    // (`MongoTransform.js:481-488`), so a defaulted field is stored, and read back, ahead of them.
     if !defaulted.is_empty() {
         for key in ["objectId", "createdAt", "updatedAt"] {
             if let Some(value) = body.shift_remove(key) {
                 body.insert(key.to_string(), value);
             }
         }
+    }
+
+    if let Some(check) = before_insert {
+        check(body.clone()).await?;
     }
 
     // **An `ACL` carrying an operation is lowered as upstream lowers it, before relation ops are
@@ -1611,8 +1658,12 @@ fn apply_field_options(
             .filter(|v| !matches!(v, ParseValue::Null));
         match default {
             Some(value) if create && replaceable => {
+                // Stored in `_SCHEMA` as the JSON a client would send, so it is decoded the way a
+                // client's value is: a Pointer or Date default becomes that type rather than a
+                // plain object.
+                let value = parse_rust_core::classify(value.to_serde_json())?;
                 body.insert(field.clone(), FieldWrite::Value(value.clone()));
-                defaulted.push((field, value.clone()));
+                defaulted.push((field, value));
             }
             _ if matches!(option.get("required"), Some(ParseValue::Bool(true))) => {
                 return Err(ParseError::new(
@@ -1911,16 +1962,7 @@ pub async fn delete<S: StorageAdapter>(
     let acl_group = ctx.scope.acl_group();
     let master = ctx.scope.is_master();
 
-    // A client deletes only from a class whose name a client could use.
-    if !master && !parse_rust_schema::class_name_is_valid(class_name) {
-        return Err(ParseError::permission_denied(
-            ErrorCode::OperationForbidden,
-            format!(
-                "Clients aren't allowed to perform the delete operation on the {class_name} collection."
-            ),
-            ctx.options.error_detail,
-        ));
-    }
+    refuse_unnamed_class(ctx, class_name, "delete")?;
 
     if !master {
         validate_permission(
@@ -2668,6 +2710,7 @@ mod tests {
             internal_index_field(&fields(&["objectId", "createdAt"])),
             None
         );
+        assert_eq!(internal_index_field(&fields(&["_rperm", "_wperm"])), None);
     }
 
     #[tokio::test]

@@ -65,7 +65,16 @@ impl AccountLockout {
 /// Keyed by username alone, so two apps in one process that share a username serialize each other's
 /// logins. That costs time and decides nothing.
 pub async fn serialize_attempts(username: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    static GATES: Mutex<Option<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+    // Keyed by a hash of the identifier, not the identifier: a login names whatever it likes, and a
+    // map holding each one held as much memory as the requests sent. Two identifiers sharing a hash
+    // only share a queue, which costs time and decides nothing.
+    static HASHER: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    static GATES: Mutex<Option<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+    let key = {
+        use std::hash::BuildHasher;
+        HASHER.get_or_init(Default::default).hash_one(username)
+    };
     let gate = {
         // A poisoned map only means another thread panicked while holding it; the map itself is
         // still a valid cache of weak handles, so recover it rather than refuse every login.
@@ -78,11 +87,11 @@ pub async fn serialize_attempts(username: &str) -> tokio::sync::OwnedMutexGuard<
         if gates.len() > 1024 {
             gates.retain(|_, weak| weak.strong_count() > 0);
         }
-        match gates.get(username).and_then(Weak::upgrade) {
+        match gates.get(&key).and_then(Weak::upgrade) {
             Some(gate) => gate,
             None => {
                 let gate = Arc::new(tokio::sync::Mutex::new(()));
-                gates.insert(username.to_string(), Arc::downgrade(&gate));
+                gates.insert(key, Arc::downgrade(&gate));
                 gate
             }
         }

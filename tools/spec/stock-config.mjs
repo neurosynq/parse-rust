@@ -57,7 +57,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const PS_ROOT = path.resolve(REPO, process.env.PARSE_SERVER_ROOT || '../parse-server');
 const { ParseServer } = require(`${PS_ROOT}/lib/index.js`);
 // The driver upstream itself depends on, so the two servers and this runner agree on one version.
-// Several Gate I conditions are about what is stored, which no response shows.
+// Several Gate I checks are about what is stored, which no response shows.
 const { MongoClient } = require(`${PS_ROOT}/node_modules/mongodb`);
 
 const [, , MONGO_URI, APP_ID = 'test', MASTER_KEY = 'test'] = process.argv;
@@ -92,12 +92,12 @@ const EXPECTED = {
   'I11 ACL operations': 28,
   'I12 read path order': 38,
   'I13 body credentials': 42,
-  'I14 routes and write order': 88,
+  'I14 routes and write order': 94,
   'I15 read parity': 44,
 };
 
 const TAG = `${process.pid}x${Date.now().toString(36)}`;
-// Gate I condition 2. A short duration, so the run does not have to wait out a real lock.
+// Gate I's lockout section. A short duration, so the run does not have to wait out a real lock.
 const LOCKOUT = { duration: 5, threshold: 2 };
 let mongo = null;
 const PASSWORD = 'correct horse battery staple';
@@ -169,7 +169,7 @@ async function chooseSecondPeer() {
  * earlier draft used one destination for both and every loopback request died with ECONNRESET.
  */
 function request(server, { method = 'GET', path: p, from, headers = {}, body, raw, appId }) {
-  // `raw` is a body string sent exactly as written. Gate I condition 8 needs one, because an object
+  // `raw` is a body string sent exactly as written. One Gate I check needs one, because an object
   // literal reorders integer-like keys before `JSON.stringify` sees them.
   const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
   const all = {
@@ -503,7 +503,7 @@ async function declaredDefaultAcl(servers) {
     eq(`${who}: and answers an empty ACL rather than omitting the key`, J(orphan.body?.ACL), J({}));
 
     // 7. A is not locked out. This is the half an empty ACL, or one storing the literal string
-    //    `currentUser`, would fail while still passing condition 8.
+    //    `currentUser`, would fail while still passing that check.
     const mine = await findAll(server, Private, a.token);
     eq(`${who}: A can read its own object`, mine.length, 1);
     const mineUpdated = await request(server, {
@@ -667,7 +667,7 @@ async function userIdentity(servers) {
       ['array', [1, 2]],
       ['tagged-Date', { __type: 'Date', iso: '2020-01-01T00:00:00.000Z' }],
       // **A truthy scalar is deliberately not here.** Upstream answers 500 to that update and
-      // parse-rust 400, a chosen difference that Gate I condition 6 asserts per server.
+      // parse-rust 400, a chosen difference that Gate I asserts per server.
     ]) {
       const u = await signUp(server, `ui_${label.replace(/\W/g, '')}`);
       const updated = await request(server, {
@@ -773,7 +773,7 @@ async function customObjectId(servers) {
 // **Several conditions assert a recorded difference rather than agreement**, and each says so: the
 // `ACL` refusals parse-rust makes before an insert, the truthy-scalar choice, and the operation as
 // an `objectId`. `CHANGELOG.md` lists them as deliberate differences; an assertion here that expects the same
-// answer from both would be encoding a behavior the milestone chose not to reproduce.
+// answer from both would be encoding a behavior parse-rust chose not to reproduce.
 // ===========================================================================================
 
 const isRust = server => server.kind === 'parse-rust';
@@ -1376,6 +1376,17 @@ async function gateI14RoutesAndWriteOrder(servers) {
     // A body over `maxUploadSize` is body-parser's 413.
     const big = await call({ method: 'POST', path: `/classes/${cls}`, headers: master(), raw: JSON.stringify({ n: 'x'.repeat(21 * 1024 * 1024) }) });
     eq(`${who}: a body over the upload limit is refused`, `${big.status} ${big.body?.error}`, '413 request entity too large');
+
+    // A signup answers with the server-set fields upstream's does, defaults among them, and the
+    // token last.
+    const plain = await call({ method: 'POST', path: '/users', body: { username: `i14plain_${sfx}`, password: PASSWORD } });
+    eq(`${who}: a plain signup answers objectId, createdAt, sessionToken`, J(Object.keys(plain.body ?? {})), J(['objectId', 'createdAt', 'sessionToken']));
+    const field = `nick${sfx}`;
+    await call({ method: 'PUT', path: '/schemas/_User', headers: master(), body: { className: '_User', fields: { [field]: { type: 'String', defaultValue: 'anon' } } } });
+    const defaulted = await call({ method: 'POST', path: '/users', body: { username: `i14def_${sfx}`, password: PASSWORD } });
+    eq(`${who}: a signup echoes an applied default before the token`, J(Object.keys(defaulted.body ?? {})), J(['objectId', 'createdAt', field, 'sessionToken']));
+    eq(`${who}: with its value`, defaulted.body?.[field], 'anon');
+    await call({ method: 'PUT', path: '/schemas/_User', headers: master(), body: { className: '_User', fields: { [field]: { __op: 'Delete' } } } });
 
     // Login over GET, and a body key login never reads.
     const user = await signUp(server, 'i14');
