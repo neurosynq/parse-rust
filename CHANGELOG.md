@@ -68,8 +68,10 @@ The dependency updates and the protected-field projection change no response.
   `at_query`: such an error is raised by the database call upstream, wherever parse-rust finds it.
 - **`parse-rust-storage`: `QueryOptions` has a new field, `omit_fields`**, so a struct literal of
   it needs `..Default::default()`. An adapter may ignore it; see Changed.
-- **A mount path is checked.** It must start with `/` and must not contain `{`, `}`, `*`, `:`, `(`,
-  `)`, `[`, `]`, `+`, `!`, `\`, `?` or `#`. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
+- **A mount path is checked.** An empty path means the root; any other must start with `/`, must not
+  contain `{`, `}`, `*`, `:`, `(`,
+  `)`, `[`, `]`, `+`, `!` or `\`, which are route syntax, and must not contain `?` or `#`, which
+  cannot occur in a request path. `PARSE_SERVER_MOUNT_PATH` is refused at start, `serve`
   returns an `InvalidInput` error, and `router()` given such a path serves nothing, every request a
   404, and writes the refusal to standard error. `ServerConfig::check_mount_path` is the check, for
   an embedder that builds the router itself. Upstream's Express 5 router reads those characters as
@@ -115,11 +117,13 @@ The dependency updates and the protected-field projection change no response.
   refuse the read.
 
   Gate J has a new workload for it, `query.protected.large`: 1,000 rows, each with a 2 KB
-  protected string, read as one page by a client. Measured once, on an Apple M3 Max against MongoDB
-  7.0.25 in Docker on the same machine, 30 samples per cell after 5 warmup, at the 0 ms latency
-  rung: parse-rust's median was 6.0 ms, of which 2.7 ms in the database (45%); parse-server's was
-  43.8 ms, of which 23.8 ms in the database (54%). These are distributions from one run with no
-  noise floor established, not a verdict.
+  protected string, read as one page by a client. Measured once, at commit `41fe696`, on an Apple
+  M3 Max against MongoDB 7.0.25 in Docker on the same machine, 30 samples per cell after 5 warmup,
+  at the 0 ms latency rung: parse-rust's median was 6.0 ms and its p90 6.5 ms, with 44% of the
+  median in the database; parse-server's median was 43.8 ms and its p90 48.4 ms, with 54% in the
+  database. Review later narrowed the projection to plain declared names, which this
+  workload's `secret` field is, so the measured read is the one that ships. These are
+  distributions from one run with no noise floor established, not a verdict.
 
 ### Fixed
 
@@ -142,32 +146,42 @@ The dependency updates and the protected-field projection change no response.
   object`. It is now parsed once.
 - **`explain` builds the query before the text index**, as an ordinary find does and as upstream
   does, so a malformed query is refused before any index is created. Present in 0.3.0.
-- **The binary ends promptly on SIGTERM.** `docker stop` waited out its timeout and then killed the
-  process, because a container's first process has no default action for the signal. Present in
-  0.3.0.
-- **An unparsable `PORT` is refused** rather than replaced by 27800. Present in 0.3.0.
+- **The binary stops gracefully on SIGTERM.** It stops accepting connections and lets the requests
+  in flight finish, for at most 8 s, then exits. Before, `docker stop` waited out its timeout and
+  then killed the process mid-request, because a container's first process has no default action
+  for the signal. `serve_with_shutdown` offers the same to an embedder. Present in 0.3.0.
+- **An unparsable `PORT` is refused** rather than replaced by 27800; an empty one is unset, as
+  upstream reads it. Present in 0.3.0.
+- **An unreachable database is reported as that.** Startup failed with `1: Database error` after
+  the driver's 30 s server-selection timeout, naming neither the host nor the cause. It now pings
+  the database first and fails with `cannot reach MongoDB:` and the driver's account of each address
+  it tried, without the URI's credentials. On a request, the client still gets upstream's fixed
+  `Database error`, and the driver's cause is written to standard error, as upstream logs it.
+  Present in 0.3.0.
 
 ### Deliberate differences
 
 - **A mount path containing route syntax is refused at start**, where parse-server serves it with
   Express's reading of that syntax. See Breaking.
-- **A nested `/batch` sub-request whose path has a trailing slash is refused before anything
-  runs.** Upstream's nested-batch check compares the path exactly, so `/parse/batch/` passes it
-  there and then crashes in the router, a 500. Refusing it is what the check intends.
+- **A nested `/batch` sub-request is refused before anything runs**, whether or not its path has a
+  trailing slash.
 
 ### Known limitations
 
 - **Paths match case-sensitively.** Express matches them case-insensitively, so `/Classes/Foo` is a
   read upstream and a 404 here.
 - **`_method: "HEAD"` is a 404**, where Express serves it through the `GET` route.
-- **An unrouted path with an invalid session token is a 404**, where upstream resolves the token
-  before routing and answers 209.
+- **A path under the mount that matches no route answers 404 even with an invalid session
+  token**, where upstream resolves the token before routing and answers 400 with code 209
+  `Invalid session token`.
+- **A batch sub-request path loses a trailing slash**, `/classes/X/` becoming `/classes/X`, where
+  upstream's path join keeps it.
 - **A top-level array body on a write answers 107**, where upstream validates its indices as field
   names and answers 105.
 - **`/health/foo` is not the health route**, where Express's `api.use('/health')` serves anything
   below it.
-- **`$relativeTime` is not implemented**, and a malformed `$containedBy` answers 102 where upstream
-  answers 107.
+- **`$relativeTime` and `$containedBy` are not implemented.** `$containedBy` is refused by name with
+  102, where upstream evaluates it and answers 107 for a malformed operand.
 - **The `$all` refusal renders a Date or Bytes value as `[object Object]`**, where upstream renders
   the converted value, a time-zone-dependent date string or the decoded bytes.
 - **`/classes/X%2F` answers 119**, where upstream decodes the parameter and reads the class `X/`.

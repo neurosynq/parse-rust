@@ -133,8 +133,8 @@ pub fn router(state: AppState) -> Router {
     // Known differences from Express's routing, none reproduced yet: Express matches paths
     // case-insensitively, so `/Classes/Foo` is a read upstream and a 404 here; it serves a `HEAD`,
     // including one asked for by `_method`, through the `GET` route; and it resolves an invalid
-    // session token before routing, so an unrouted path with a bad token is 209 upstream and 404
-    // here.
+    // session token before routing, so an unrouted path with a bad token is a 400 with code 209
+    // upstream and a 404 here.
     let api = Router::new()
         .route("/serverInfo", any(routes::http::server_info))
         // `/health` is credential-free upstream and is the endpoint every bring-up script polls.
@@ -331,6 +331,20 @@ pub async fn serve(
     std::net::SocketAddr,
     impl std::future::Future<Output = std::io::Result<()>>,
 )> {
+    serve_with_shutdown(state, addr, std::future::pending()).await
+}
+
+/// [`serve`], stopping gracefully when `shutdown` completes: no new connections are accepted, and
+/// the returned future resolves once the requests already in flight have been answered. Bound the
+/// wait yourself if it must end by a deadline, as the binary does.
+pub async fn serve_with_shutdown(
+    state: AppState,
+    addr: std::net::SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<(
+    std::net::SocketAddr,
+    impl std::future::Future<Output = std::io::Result<()>>,
+)> {
     state
         .config()
         .check_mount_path()
@@ -338,9 +352,13 @@ pub async fn serve(
     state
         .ensure_indexes()
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.message))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
-    Ok((bound, async move { axum::serve(listener, app).await }))
+    Ok((bound, async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+    }))
 }

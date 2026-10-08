@@ -103,9 +103,8 @@ pub async fn handle(
             }
             _ => "GET".to_string(),
         };
-        // Compared exactly, as upstream compares it, so `/parse/batch/` passes this check there and
-        // crashes in the router, a 500. Here the sub-request router refuses it instead. A known,
-        // recorded difference; the refusal is the safer of the two.
+        // Compared exactly, as upstream compares it. `routable_path` has already dropped a
+        // trailing slash, so a sub-request to `/parse/batch/` is refused here as a nested batch.
         if normalized == "POST" && routable == BATCH_PATH {
             return Err(ParseError::invalid_json(
                 "nested batch requests are not allowed",
@@ -314,9 +313,10 @@ fn routable_path(path: &str, prefix: &str) -> Result<String, ParseError> {
             "cannot route batch path {path}"
         )));
     };
-    // `path.posix.join('/', x)`: a leading slash is guaranteed and a trailing one is dropped
-    // unless the whole path is `/`. The join also normalizes, so `.` segments go and `..` removes
-    // the segment before it, never climbing above the root.
+    // `path.posix.join('/', x)`: a leading slash is guaranteed, and the join normalizes, so empty
+    // and `.` segments go and `..` removes the segment before it, never climbing above the root.
+    // **One known difference:** Node's join keeps a trailing slash, `/classes/X/`, and this drops
+    // it, `/classes/X`. Not reproduced yet.
     let mut segments: Vec<&str> = Vec::new();
     for segment in rest.split('/') {
         match segment {

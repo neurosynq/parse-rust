@@ -926,9 +926,9 @@ pub async fn explain<S: StorageAdapter>(
 /// unprotects a field on the rows that point at the caller, which only the row can say.
 ///
 /// **Only fields the schema declares, and never the four keys the row handling relies on.**
-/// Protected names are not validated when they arrive by `PARSE_SERVER_PROTECTED_FIELDS` or a
-/// hand-edited `_SCHEMA`, upstream included, so the set can hold an internal column, a dotted path
-/// or a `$` name. Projected, those emptied the permission columns, dropped `_id`, removed a nested
+/// Protected names are not checked against the schema when they arrive by
+/// `PARSE_SERVER_PROTECTED_FIELDS` or a hand-edited `_SCHEMA`, so the set can hold an internal
+/// column, a dotted path or a `$` name. Projected, those emptied the permission columns, dropped `_id`, removed a nested
 /// field the strip would have kept, or made MongoDB refuse the read. A declared field is a plain
 /// top-level column, and only a plain field name is projected, since a hand-edited `_SCHEMA` can
 /// declare `_rperm` or a dotted name too. Projecting such a field away removes exactly what the

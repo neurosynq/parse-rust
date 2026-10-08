@@ -207,7 +207,10 @@ async fn run() -> std::io::Result<()> {
     // what every test uses, so parallel test batteries cannot collide with each other.
     // An unparsable `PORT` is refused rather than replaced by the default: a typo must not quietly
     // put the server on a port nobody configured.
-    let port: u16 = match env("PORT") {
+    // An empty `PORT` is unset, as upstream reads an empty variable; an unparsable one is refused
+    // rather than replaced by the default, because a typo must not quietly put the server on a
+    // port nobody configured.
+    let port: u16 = match env("PORT").filter(|p| !p.is_empty()) {
         Some(p) => p
             .parse()
             .map_err(|_| std::io::Error::other(format!("PORT must be a port number, got {p:?}")))?,
@@ -229,15 +232,35 @@ async fn run() -> std::io::Result<()> {
     // is deliberate: every embedder needs them, and a step only the binary performs is a step an
     // embedded deployment silently skips.
     let state = AppState::new(config, storage);
-    let (bound, server) = parse_rust_server::serve(state, addr).await?;
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stopping = stop.clone();
+    let (bound, server) =
+        parse_rust_server::serve_with_shutdown(
+            state,
+            addr,
+            async move { stopping.notified().await },
+        )
+        .await?;
     // Machine-readable on its own line, so a harness can bind port 0 and discover the result.
     println!("parse-rust listening on http://{bound}");
-    // SIGTERM is how `docker stop` and most supervisors ask a process to end. Without a handler the
-    // default action does end it, but a process running as PID 1 in a container has no default
-    // action and was killed only after the stop timeout. Ending on the signal makes the stop prompt.
+    // SIGTERM is how `docker stop` and most supervisors ask a process to end, and a container's
+    // first process has no default action for it, so without a handler it ran until killed. On
+    // the signal the server stops accepting connections and lets the requests already in flight
+    // finish, a batch included, for at most `DRAIN`: inside Docker's default 10 s stop window, so
+    // the drain ends on its own terms rather than by the kill that follows.
+    const DRAIN: std::time::Duration = std::time::Duration::from_secs(8);
+    tokio::pin!(server);
     tokio::select! {
-        result = server => result,
-        _ = shutdown_signal() => Ok(()),
+        result = &mut server => return result,
+        _ = shutdown_signal() => {}
+    }
+    stop.notify_one();
+    match tokio::time::timeout(DRAIN, server).await {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!("parse-rust: requests still running after {DRAIN:?}; stopping anyway");
+            Ok(())
+        }
     }
 }
 

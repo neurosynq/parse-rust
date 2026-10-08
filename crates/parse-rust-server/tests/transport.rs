@@ -260,8 +260,8 @@ async fn a_deeply_nested_regex_does_not_take_the_server_down() {
         body,
     )
     .await;
-    // JavaScript accepts the pattern; MongoDB's regex engine does not nest that deep, and refuses it
-    // inside the read, which is the sanitized storage failure upstream would answer as well.
+    // JavaScript accepts the pattern; MongoDB refuses it inside the read, as longer than its regex
+    // pattern limit, which is the sanitized storage failure upstream would answer as well.
     assert_eq!(
         (status, out),
         (

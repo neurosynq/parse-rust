@@ -34,8 +34,10 @@ pub fn is_valid(pattern: &str) -> bool {
         i: 0,
         names: HashMap::new(),
         refs: Vec::new(),
-        path: vec![(0, 0)],
-        next_disjunction: 1,
+        open: vec![Frame {
+            start: None,
+            alternative: 0,
+        }],
         captures: 0,
     };
     if p.run().is_none() {
@@ -59,15 +61,25 @@ struct Parser<'a> {
     s: &'a [char],
     next_gt: &'a [usize],
     i: usize,
-    /// Each group name, with the alternatives each group of that name sits in, outermost first.
-    names: HashMap<String, Vec<Vec<(usize, usize)>>>,
+    /// Each group name, with the position of the last group that took it. One position per name,
+    /// never a copy of the nesting: storing each group's full path made memory grow with depth
+    /// times groups, gigabytes from a pattern of a few hundred kilobytes.
+    names: HashMap<String, usize>,
     /// Every `\k`: the span of the name it was followed by, if it was followed by one.
     refs: Vec<Option<(usize, usize)>>,
-    /// The disjunction and alternative currently being parsed, outermost first. One entry per
-    /// open group plus the pattern itself, so it is also the stack of open groups.
-    path: Vec<(usize, usize)>,
-    next_disjunction: usize,
+    /// The pattern itself, then each open group, outermost first.
+    open: Vec<Frame>,
     captures: usize,
+}
+
+/// A disjunction being parsed: the pattern's own, or an open group's.
+struct Frame {
+    /// Where the group opened; `None` for the pattern itself, which contains everything.
+    start: Option<usize>,
+    /// Where its current alternative began. Increases with depth along the stack, because an inner
+    /// group opens after its enclosing alternative began, and that alternative cannot change while
+    /// the inner one is open.
+    alternative: usize,
 }
 
 /// What may follow a group once it closes, kept with the group while it is open.
@@ -94,25 +106,27 @@ impl Parser<'_> {
         while let Some(c) = self.peek() {
             match c {
                 '|' => {
+                    let top = self.open.last_mut()?;
+                    top.alternative = self.i;
                     self.i += 1;
-                    let top = self.path.last_mut()?;
-                    top.1 += 1;
                 }
                 ')' => {
                     // An unmatched `)`.
                     let group = open.pop()?;
-                    self.path.pop();
+                    self.open.pop();
                     self.i += 1;
                     if group.quantifiable {
                         self.quantifier()?;
                     }
                 }
                 '(' => {
+                    let at = self.i;
                     let quantifiable = self.group_open()?;
                     open.push(Open { quantifiable });
-                    let id = self.next_disjunction;
-                    self.next_disjunction += 1;
-                    self.path.push((id, 0));
+                    self.open.push(Frame {
+                        start: Some(at),
+                        alternative: at,
+                    });
                 }
                 _ => {
                     if self.term()? {
@@ -258,14 +272,21 @@ impl Parser<'_> {
                 Some(false)
             }
             (Some('<'), _) => {
+                // The group's own `(`, two characters back.
+                let at = self.i - 2;
                 self.i += 1;
                 let start = self.i;
                 let end = self.next_gt_from(start)?;
                 let name: String = self.s[start..end].iter().collect();
-                if !is_identifier(&name) || self.duplicates(&name) {
+                if !is_identifier(&name) {
                     return None;
                 }
-                self.names.entry(name).or_default().push(self.path.clone());
+                if let Some(&previous) = self.names.get(&name) {
+                    if !self.in_another_alternative(previous) {
+                        return None;
+                    }
+                }
+                self.names.insert(name, at);
                 self.i = end + 1;
                 self.capture()
             }
@@ -308,15 +329,18 @@ impl Parser<'_> {
     }
 
     /// Two groups of one name may coexist only in different alternatives of some disjunction.
-    fn duplicates(&self, name: &str) -> bool {
-        self.names.get(name).is_some_and(|paths| {
-            paths.iter().any(|path| {
-                !path
-                    .iter()
-                    .zip(self.path.iter())
-                    .any(|((d1, a1), (d2, a2))| d1 == d2 && a1 != a2)
-            })
-        })
+    ///
+    /// Checking the newest group against only the previous group of its name is enough: were it
+    /// in the same alternative as an earlier one, the groups between would have collided first.
+    /// The previous group, at `previous`, is in another alternative exactly when some open group
+    /// that contains it has begun a later alternative since. The open groups that contain it are a
+    /// prefix of the stack, and alternative starts increase along it, so the deepest of them
+    /// decides, found by binary search.
+    fn in_another_alternative(&self, previous: usize) -> bool {
+        let containing = self
+            .open
+            .partition_point(|f| f.start.is_none_or(|start| start < previous));
+        containing > 0 && self.open[containing - 1].alternative > previous
     }
 
     fn class(&mut self) -> Option<()> {
@@ -581,6 +605,43 @@ mod tests {
             .join()
             .expect("no overflow");
         assert!(checked);
+    }
+
+    /// Many named groups deep inside nesting, and many groups sharing one name across alternatives:
+    /// the shapes that stored a path per group and compared each group with every earlier one.
+    #[test]
+    fn named_groups_deep_in_nesting_cost_neither_memory_nor_time() {
+        let distinct: String = (0..30_000).map(|i| format!("(?<a{i}>)")).collect();
+        let shared: String = (0..30_000)
+            .map(|i| {
+                if i == 0 {
+                    "(?<a>)".to_string()
+                } else {
+                    "|(?<a>)".to_string()
+                }
+            })
+            .collect();
+        // The reviewed shapes: deep nesting around tens of thousands of named groups, and
+        // same-name siblings across alternatives, shallow and deep.
+        let cases = [
+            (100_000, distinct.clone()),
+            (600_000, distinct),
+            (3_000, shared.clone()),
+            (100_000, shared),
+        ];
+        for (depth, body) in cases {
+            let p = format!("{}{body}{}", "(?:".repeat(depth), ")".repeat(depth));
+            let started = std::time::Instant::now();
+            assert!(is_valid(&p));
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+        }
+        // The rule itself, at depth: siblings in one alternative collide, alternatives do not.
+        let wrap = |inner: &str| format!("{}{inner}{}", "(?:".repeat(1000), ")".repeat(1000));
+        assert!(!is_valid(&wrap("(?<a>)(?<a>)")));
+        assert!(is_valid(&wrap("(?<a>)|(?<a>)")));
+        assert!(!is_valid(&wrap("(?:(?<a>)|(?<a>))(?<a>)")));
+        assert!(is_valid(&wrap("(?<a>)|(?:(?<a>)|(?<a>))")));
     }
 
     /// Long patterns of the shapes that were quadratic answer in time linear in their length.

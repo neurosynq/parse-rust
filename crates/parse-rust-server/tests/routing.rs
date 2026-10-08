@@ -242,3 +242,25 @@ async fn a_mount_containing_a_double_slash_is_served() {
     );
     assert_eq!(raw(&host, "GET", "/api/v1/health", b"").await.0, 404);
 }
+
+/// An unreachable database is reported as that at startup, with the address and the driver's
+/// reason, and without the URI's credentials. It used to be `1: Database error` after a 30 s wait.
+/// Needs no MongoDB: nothing listens on port 1.
+#[tokio::test]
+async fn serve_names_an_unreachable_database_and_why() {
+    let uri = "mongodb://someone:hunter2@127.0.0.1:1/?serverSelectionTimeoutMS=300";
+    let storage = parse_rust_mongo::MongoAdapter::connect(uri, "unreachable")
+        .await
+        .expect("connect does not contact the server");
+    let config = parse_rust_server::ServerConfig::new("a", "m");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let Err(e) =
+        parse_rust_server::serve(parse_rust_server::AppState::new(config, storage), addr).await
+    else {
+        panic!("served without a database");
+    };
+    let message = e.to_string();
+    assert!(message.starts_with("cannot reach MongoDB: "), "{message}");
+    assert!(message.contains("127.0.0.1:1"), "{message}");
+    assert!(!message.contains("hunter2"), "{message}");
+}

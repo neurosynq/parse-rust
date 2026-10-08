@@ -35,7 +35,9 @@ behind it.
 0.3.1 moves the dependencies to their current majors, including `axum` 0.8 and `bson` 3, which
 changes the Rust API for an embedder despite the patch number; `CHANGELOG.md` says how to migrate.
 It also stops reading protected fields from the database when every row would lose them anyway,
-and brings path matching and `/batch` routing in line with parse-server's.
+and brings path matching and `/batch` routing closer to parse-server's: trailing slashes, an extra
+leading slash and a batch's routing prefix now behave as there, while matching stays
+case-sensitive.
 
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
@@ -145,7 +147,7 @@ That builds parse-rust from the checkout, starts a MongoDB beside it, and serves
 demo, not a deployment: the keys are public and the database has no authentication.
 `tools/demo/check.sh` checks it from a fresh clone.
 
-To run it yourself, it requires a stable Rust toolchain and a MongoDB you can write to. The test
+To run it yourself, it requires Rust 1.89 or later and a MongoDB you can write to. The test
 suite runs against MongoDB 7 and 9; a single node is fine, no replica set needed.
 
 Install the server:
@@ -203,9 +205,9 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_MASTER_KEY` | none | **required** |
 | `PARSE_SERVER_MASTER_KEY_IPS` | `127.0.0.1,::1` | comma-separated IP addresses or CIDR ranges allowed to use the master key |
 | `PARSE_SERVER_DATABASE_URI` | `mongodb://127.0.0.1:27017/parse` | |
-| `PORT` | `27800` | `0` binds an ephemeral port and prints it |
+| `PORT` | `27800` | `0` binds an ephemeral port and prints it; empty means the default, and a value that is not a port is refused at start |
 | `PARSE_SERVER_HOST` | `127.0.0.1` | upstream defaults to `0.0.0.0`; set that in a container |
-| `PARSE_SERVER_MOUNT_PATH` | `/parse` | |
+| `PARSE_SERVER_MOUNT_PATH` | `/parse` | where the API is served; empty or `/` serves it at the root. A path containing route syntax (`{ } * : ( ) [ ] + ! \`) or `?` or `#` is refused at start |
 | `PARSE_SERVER_JAVASCRIPT_KEY` | unset | if set, non-master requests must present a client key |
 | `PARSE_SERVER_REST_API_KEY` | unset | same |
 | `PARSE_SERVER_SESSION_LENGTH` | `31536000` | seconds; one year, as upstream |

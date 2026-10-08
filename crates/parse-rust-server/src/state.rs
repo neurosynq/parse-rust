@@ -70,6 +70,12 @@ impl AppState {
     /// `_User` indexes are unconditional here, which is what their flags default to.
     pub async fn ensure_indexes(&self) -> Result<(), ParseError> {
         use parse_rust_storage::StorageAdapter;
+        // First, so a database that cannot be reached is reported as that, with the driver's
+        // reason, rather than as the first index build's `Database error`.
+        self.storage
+            .ping()
+            .await
+            .map_err(|why| ParseError::internal(format!("cannot reach MongoDB: {why}")))?;
         self.storage
             .ensure_index("_User", &["username"], None, true, false)
             .await?;
