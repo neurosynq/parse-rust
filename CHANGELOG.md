@@ -30,9 +30,9 @@ dependency updates and the protected-field projection change no response.
   `Router`, and `Authority` and the handlers are axum 0.8 types, so any project that serves,
   nests or layers the router needs axum 0.8, whether or not it adds routes of its own. To migrate:
   name axum through the new re-export, `parse_rust_server::axum`, which is always the version the
-  router was built with, or depend on `axum = "0.8"` yourself; write path parameters in your own routes as `{name}` rather than
-  `:name`, since a `:name` segment panics when the router is built; and remove `#[async_trait]`
-  from your own extractor impls.
+  router was built with, or depend on `axum = "0.8"` yourself; write path parameters in your own
+  routes as `{name}` rather than `:name`, since a `:name` segment panics when the router is built;
+  and remove `#[async_trait]` from your own extractor impls.
 - **`router()` carries its own fallback.** An unrouted path is answered inside it, and at a root
   mount the API is the router's fallback service. So nest it with `nest` or `nest_service`, never
   `merge` it into a router that has a fallback of its own, which axum refuses by panicking; and
