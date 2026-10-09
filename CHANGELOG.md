@@ -167,8 +167,9 @@ dependency updates and the protected-field projection change no response.
   in flight finish, including those whose clients have already disconnected, for at most 8 s, then
   exits: 0 when every request finished, 1 when the drain ran out of time, and 1 at once on a second
   SIGTERM or Ctrl-C. Before, `docker stop` waited out its timeout and then killed the process
-  mid-request, because a container's first process has no default action for the signal. `serve_with_shutdown` offers the same to an embedder, and `AppState::drained`
-  waits for detached request work when an embedder serves the router itself. Present in 0.3.0.
+  mid-request, because a container's first process has no default action for the signal.
+  `serve_with_shutdown` offers the same to an embedder, and `AppState::drained` waits for detached
+  request work when an embedder serves the router itself. Present in 0.3.0.
 - **An unparsable `PORT` is refused** rather than replaced by 27800. Present in 0.3.0.
 - **An unreachable database is reported as that.** Startup failed with `1: Database error` after
   the driver's 30 s server-selection timeout, naming neither the host nor the cause. It now pings

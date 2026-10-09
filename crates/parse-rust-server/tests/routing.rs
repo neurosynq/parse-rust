@@ -339,4 +339,9 @@ async fn a_graceful_stop_finishes_a_request_whose_client_left() {
         .expect("joined")
         .expect("served");
     assert_eq!(count().await, rows);
+    client
+        .database(&database)
+        .drop()
+        .await
+        .expect("drop the test database");
 }
