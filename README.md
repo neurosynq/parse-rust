@@ -32,6 +32,13 @@ reference. It adds the read surface those files need first (geo queries, `$text`
 and `comment`), a benchmark harness, and a one-command demo. Everything else is ahead of that, not
 behind it.
 
+0.4.0 moves the dependencies to their current majors, including `axum` 0.8 and `bson` 3, which
+changes the Rust API for an embedder, hence a minor release; `CHANGELOG.md` says how to migrate.
+It also stops reading protected fields from the database when every row would lose them anyway,
+and brings path matching and `/batch` routing closer to parse-server's: trailing slashes, an extra
+leading slash and a batch's routing prefix now behave as there, while matching stays
+case-sensitive.
+
 **Not production software.** Single node, MongoDB only, no security guarantee, and most of Parse's
 surface is absent. Do not point it at data you care about.
 
@@ -100,7 +107,7 @@ not on the code existing, which is why the first item is the instrument rather t
 5. **Push, aggregate, hooks, pages, security checks.**
 6. **GraphQL**, last: the largest surface and the smallest share of real usage.
 
-0.1.0, 0.2.0, 0.2.1 and 0.3.0 are done; `CHANGELOG.md` says what each one actually landed.
+0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.4.0 are done; `CHANGELOG.md` says what each one actually landed.
 
 PostgreSQL is a first-class planned backend rather than an afterthought. The storage trait is
 shaped by two backends today even though only one is implemented, on the principle that a trait
@@ -122,7 +129,7 @@ can observe changes. Internal structure is free. The external surface is not.
 
 That contract is why the tests look the way they do. Everything that touches upstream behavior is
 checked against upstream rather than against someone's reading of it: the ECMAScript number
-formatter against Node, bcrypt in both directions against the module parse-server loads, the
+formatter against Node, bcrypt in both directions against both modules parse-server can load, the
 Parse/BSON transform against upstream's own `MongoTransform`, the `_SCHEMA` type strings against
 what parse-server actually writes into MongoDB, and the acceptance gates against a running
 parse-server.
@@ -140,13 +147,13 @@ That builds parse-rust from the checkout, starts a MongoDB beside it, and serves
 demo, not a deployment: the keys are public and the database has no authentication.
 `tools/demo/check.sh` checks it from a fresh clone.
 
-To run it yourself, it requires a stable Rust toolchain and a MongoDB you can write to. The test
-suite runs against MongoDB 7 and 9; a single node is fine, no replica set needed.
+To run it yourself, it requires Rust 1.89 or later and a MongoDB you can write to. The test
+suite runs against MongoDB 8 and 9; a single node is fine, no replica set needed.
 
 Install the server:
 
 ```
-cargo install parse-rust-cli      # installs a binary named `parse-rust`
+cargo install parse-rust-cli      # installs a binary named `parse-rust`; needs Rust 1.89 or later
 ```
 
 Or embed it, which is the primary way this is meant to be used, since native Rust triggers and
@@ -198,9 +205,9 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_MASTER_KEY` | none | **required** |
 | `PARSE_SERVER_MASTER_KEY_IPS` | `127.0.0.1,::1` | comma-separated IP addresses or CIDR ranges allowed to use the master key |
 | `PARSE_SERVER_DATABASE_URI` | `mongodb://127.0.0.1:27017/parse` | |
-| `PORT` | `27800` | `0` binds an ephemeral port and prints it |
+| `PORT` | `27800` | `0` binds an ephemeral port and prints it; empty means the default, and a value that is not a port is refused at start |
 | `PARSE_SERVER_HOST` | `127.0.0.1` | upstream defaults to `0.0.0.0`; set that in a container |
-| `PARSE_SERVER_MOUNT_PATH` | `/parse` | |
+| `PARSE_SERVER_MOUNT_PATH` | `/parse` | where the API is served; `/` serves it at the root, and empty means the default. A path containing route syntax (`{ } * : ( ) [ ] + ! \`) or `?` or `#` is refused at start |
 | `PARSE_SERVER_JAVASCRIPT_KEY` | unset | if set, non-master requests must present a client key |
 | `PARSE_SERVER_REST_API_KEY` | unset | same |
 | `PARSE_SERVER_SESSION_LENGTH` | `31536000` | seconds; one year, as upstream |
@@ -213,7 +220,7 @@ has behavior behind it; the names are upstream's, so they carry over.
 | `PARSE_SERVER_REQUEST_COMPLEXITY_BATCH_REQUEST_LIMIT` | `-1` | unlimited; master and maintenance bypass it |
 | `PARSE_SERVER_DATABASE_CREATE_INDEX_ROLE_NAME` | `true` | the unique index on `_Role.name` |
 | `PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION` | `false` | whether a non-master caller may create a class |
-| `PARSE_SERVER_ALLOW_ORIGIN` | `*` | comma-separated; an explicitly empty value allows no origin |
+| `PARSE_SERVER_ALLOW_ORIGIN` | `*` | comma-separated |
 | `PARSE_SERVER_ALLOW_HEADERS` | unset | comma-separated, added to upstream's default list |
 | `PARSE_SERVER_DEFAULT_LIMIT` | `100` | rows a find returns when it names no `limit` |
 | `PARSE_SERVER_MAX_LIMIT` | unset | caps the rows a find returns |
@@ -227,12 +234,14 @@ any one and every non-master request must present a matching key.
 The master key is accepted only when the connection's peer address matches
 `PARSE_SERVER_MASTER_KEY_IPS`. Forwarding headers do not change that address. A container or a
 deployment behind a load balancer therefore has to list the address or CIDR range the server
-actually sees, not the original client's address. The environment value is not whitespace-trimmed,
-and an empty value is a startup error rather than "allow none", matching upstream.
+actually sees, not the original client's address. The environment value is not whitespace-trimmed.
+An empty variable keeps the loopback default, and an empty entry inside the list, as in `a,,b`, is a
+startup error rather than "allow none", matching upstream.
 
-An unparsable value is a startup failure rather than a fallback to the default. Several of these
-are security defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly
-produce sessions that never expire.
+An empty variable is unset and takes the default, as upstream's CLI reads it. An unparsable value
+is a startup failure rather than a fallback to the default. Several of these are security
+defaults, and a typo in `PARSE_SERVER_EXPIRE_INACTIVE_SESSIONS` must not quietly produce sessions
+that never expire.
 
 ```
 curl -s http://127.0.0.1:27800/parse/health
@@ -381,7 +390,7 @@ acceptance gates are:
   patched suite must pass against parse-server.
 - **Gate H** checks that `reconfigureServer` refuses, by name, any option parse-rust cannot honour,
   so a spec cannot pass by having its configuration silently ignored.
-- **Gate J** benchmarks seven workloads against parse-server at three injected database latencies,
+- **Gate J** benchmarks ten workloads against parse-server at three injected database latencies,
   after checking both servers give the same answer, and microbenchmarks the JSON and BSON
   transforms. It publishes distributions only, with no faster or slower verdict yet.
 - **Gate K** brings the demo up twice from a fresh clone.

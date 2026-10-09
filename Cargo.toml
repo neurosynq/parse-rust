@@ -13,12 +13,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-# Raised from 1.75 to match what the dependency graph actually requires: mongodb 3.8 and its
-# transitive dependencies do not build on anything older. A declared floor nobody can build at is
-# worse than no floor.
-rust-version = "1.88"
+# Raised from 1.75 to match what the dependency graph actually requires, first for mongodb 3.8 and
+# its transitive dependencies and then, at 1.89, for `uuid` 1.27. A declared floor nobody can build
+# at is worse than no floor.
+rust-version = "1.89"
 license = "Apache-2.0"
 # Each crate directory carries `LICENSE` and `NOTICE` as symlinks to the ones at the workspace
 # root, because `cargo package` copies only files inside the package directory and a published
@@ -65,20 +65,21 @@ serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 thiserror = "2"
-rand = "0.8"
+rand = "0.10"
 ryu = "1"
-bcrypt = "0.15"
-bson = "2"
-mongodb = "3"
+bcrypt = "0.19"
+bson = { version = "3", features = ["serde_json-1"] }
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
 futures = "0.3"
-parse-rust-storage = { path = "crates/parse-rust-storage", version = "0.3.0" }
-parse-rust-schema = { path = "crates/parse-rust-schema", version = "0.3.0" }
-parse-rust-rest = { path = "crates/parse-rust-rest", version = "0.3.0" }
-parse-rust-mongo = { path = "crates/parse-rust-mongo", version = "0.3.0" }
-parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.3.0" }
-axum = "0.7"
+parse-rust-storage = { path = "crates/parse-rust-storage", version = "0.4.0" }
+parse-rust-schema = { path = "crates/parse-rust-schema", version = "0.4.0" }
+parse-rust-rest = { path = "crates/parse-rust-rest", version = "0.4.0" }
+parse-rust-mongo = { path = "crates/parse-rust-mongo", version = "0.4.0" }
+parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.4.0" }
+axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tower = "0.5"
+tokio-util = { version = "0.7", features = ["rt"] }
 http = "1"
-parse-rust-core = { path = "crates/parse-rust-core", version = "0.3.0" }
-parse-rust-server = { path = "crates/parse-rust-server", version = "0.3.0" }
+parse-rust-core = { path = "crates/parse-rust-core", version = "0.4.0" }
+parse-rust-server = { path = "crates/parse-rust-server", version = "0.4.0" }

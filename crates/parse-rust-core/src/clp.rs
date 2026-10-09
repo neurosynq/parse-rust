@@ -333,7 +333,7 @@ impl ClassLevelPermissions {
     /// an absent ACL already means.
     ///
     /// **That last comparison is `JSON.stringify` equality upstream, so it is key-order
-    /// sensitive**, and [`is_the_public_acl`] reproduces the ordering rather than comparing
+    /// sensitive**, and `is_the_public_acl` reproduces the ordering rather than comparing
     /// structurally. A block whose keys arrived in the other order is *not* the public ACL as far
     /// as upstream is concerned, and it gets stamped.
     ///

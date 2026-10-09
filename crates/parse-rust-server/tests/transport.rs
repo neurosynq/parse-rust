@@ -92,6 +92,26 @@ async fn a_body_over_twenty_megabytes_is_413() {
     assert_eq!(out["error"], json!("request entity too large"));
 }
 
+/// A body under the limit reaches its route whatever its numbers look like once parsed.
+///
+/// The body is parsed once, before the route. Serializing it again for the route lengthened it,
+/// `1e5` becoming `100000.0`, so this body, under 10 MB as sent and over 20 MB as rewritten, was
+/// refused as not JSON at all.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_body_under_the_limit_is_not_measured_after_parsing() {
+    let server = common::boot().await;
+    let mut body = br#"{"requests":[],"pad":["#.to_vec();
+    let count = 2_400_000;
+    for i in 0..count {
+        body.extend_from_slice(if i + 1 == count { b"1e5" } else { b"1e5," });
+    }
+    body.extend_from_slice(b"]}");
+    assert!(body.len() < 10 * 1024 * 1024);
+    let (status, out) = raw(&server.host, "POST", "/batch", "application/json", body).await;
+    assert_eq!((status, out), (200, json!([])));
+}
+
 /// `express.json` leaves a multipart body unparsed, so the route sees `{}`.
 #[tokio::test]
 #[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
@@ -198,4 +218,64 @@ async fn head_is_served_as_get() {
     let server = common::boot().await;
     let r = common::request(&server.host, "HEAD", "/serverInfo", &As::master(), None).await;
     assert_eq!(r.status, 200, "{}", r.raw);
+}
+
+/// `/health` is read before the body parser, and `//health` is `/health` once one leading slash is
+/// ignored, so neither refuses a malformed body.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn health_ignores_a_malformed_body_with_a_double_slash_too() {
+    let server = common::boot().await;
+    for path in ["/health", "//health"] {
+        let (status, out) = raw(
+            &server.host,
+            "POST",
+            path,
+            "application/json",
+            b"{not json".to_vec(),
+        )
+        .await;
+        assert_eq!(status, 200, "{path}: {out}");
+    }
+}
+
+/// A regex atom nested far deeper than any call stack allows is checked without one: the read
+/// answers, and the server is still there for the next request.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_deeply_nested_regex_does_not_take_the_server_down() {
+    let server = common::boot().await;
+    let depth = 100_000;
+    let deep = format!("^\\Q{}{}\\E", "(?:".repeat(depth), ")".repeat(depth));
+    let body = serde_json::to_vec(&json!({
+        "_method": "GET",
+        "where": { "tags": { "$all": [{ "$regex": deep }] } },
+    }))
+    .expect("json");
+    let (status, out) = raw(
+        &server.host,
+        "POST",
+        "/classes/Deep",
+        "application/json",
+        body,
+    )
+    .await;
+    // JavaScript accepts the pattern; MongoDB refuses it inside the read, as longer than its regex
+    // pattern limit, which is the sanitized storage failure upstream would answer as well.
+    assert_eq!(
+        (status, out),
+        (
+            500,
+            json!({"code": 1, "error": "An internal server error occurred"})
+        )
+    );
+    let (status, _) = raw(
+        &server.host,
+        "GET",
+        "/health",
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200);
 }

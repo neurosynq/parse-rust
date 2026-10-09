@@ -26,7 +26,8 @@
 //! - **`POST /upgradeToRevocableSession`**, and client-driven `_Session` create and update.
 
 use indexmap::IndexMap;
-use rand::{CryptoRng, RngCore};
+use rand::rngs::SysRng;
+use rand::TryCryptoRng;
 
 use parse_rust_core::{new_object_id, ErrorCode, ParseDate, ParseError, ParseMap, ParseValue};
 use parse_rust_schema::default_schema;
@@ -49,22 +50,31 @@ const SESSION_CLASS: &str = "_Session";
 
 /// Fill from a cryptographically secure generator.
 ///
-/// The `CryptoRng` bound is the point. A session token is a bearer credential, so a generator
+/// The `TryCryptoRng` bound is the point. A session token is a bearer credential, so a generator
 /// swapped for a faster non-cryptographic one has to fail to compile rather than pass the tests.
 /// Note that `random_string` in `parse-rust-core` is not usable here even though it draws from
-/// the same generator: its alphabet is the 62-character `objectId` set, and a session token's
+/// the same source: its alphabet is the 62-character `objectId` set, and a session token's
 /// character set is observable to a client.
-fn fill_secure<R: RngCore + CryptoRng>(rng: &mut R, buf: &mut [u8]) {
-    rng.fill_bytes(buf);
+fn fill_secure<R: TryCryptoRng>(rng: &mut R, buf: &mut [u8]) -> Result<(), ParseError>
+where
+    R::Error: std::fmt::Display,
+{
+    rng.try_fill_bytes(buf).map_err(|e| {
+        ParseError::internal(format!("the system random number generator failed: {e}"))
+    })
 }
 
 /// A new session token: `r:` followed by 32 lowercase hex characters, 34 in total.
 ///
 /// `'r:' + cryptoUtils.newToken()`, where `newToken` is `randomHexString(32)`
 /// (`RestWrite.js:1203`, `cryptoUtils.js:41`).
-pub fn new_session_token() -> String {
+///
+/// Drawn from the operating system's generator directly, and fallible: `rand`'s thread-local
+/// generator panics when a periodic reseed fails. Upstream's `crypto.randomBytes` reads a
+/// userspace generator that the operating system seeds; either is a cryptographic source.
+pub fn new_session_token() -> Result<String, ParseError> {
     let mut bytes = [0u8; TOKEN_BYTES];
-    fill_secure(&mut rand::thread_rng(), &mut bytes);
+    fill_secure(&mut SysRng, &mut bytes)?;
 
     let mut token = String::with_capacity(SESSION_TOKEN_PREFIX.len() + TOKEN_BYTES * 2);
     token.push_str(SESSION_TOKEN_PREFIX);
@@ -74,7 +84,7 @@ pub fn new_session_token() -> String {
         token.push(char::from(HEX[(b >> 4) as usize]));
         token.push(char::from(HEX[(b & 0x0f) as usize]));
     }
-    token
+    Ok(token)
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -312,9 +322,9 @@ pub async fn create_session<S: StorageAdapter>(
 ) -> Result<CreatedSession, ParseError> {
     let schema = session_schema();
     let now = ParseDate::now();
-    let token = new_session_token();
+    let token = new_session_token()?;
     let expires_at = config.generate_expires_at(now);
-    let object_id = new_object_id();
+    let object_id = new_object_id()?;
 
     let user = ParseValue::Pointer {
         class_name: "_User".to_string(),
@@ -600,7 +610,7 @@ mod tests {
 
     #[test]
     fn a_token_is_r_plus_thirty_two_lowercase_hex() {
-        let t = new_session_token();
+        let t = new_session_token().expect("random");
         assert_eq!(t.len(), 34, "r: plus 32 hex characters: {t}");
         let hex = t.strip_prefix("r:").expect("the r: prefix is load-bearing");
         assert_eq!(hex.len(), 32);
@@ -617,7 +627,7 @@ mod tests {
     fn tokens_do_not_use_the_object_id_alphabet() {
         let mut seen: HashSet<char> = HashSet::new();
         for _ in 0..500 {
-            seen.extend(new_session_token()[2..].chars());
+            seen.extend(new_session_token().expect("random")[2..].chars());
         }
         assert_eq!(seen.len(), 16, "a hex token uses exactly 16 characters");
         assert!(seen
@@ -627,7 +637,9 @@ mod tests {
 
     #[test]
     fn tokens_do_not_repeat() {
-        let tokens: HashSet<String> = (0..1000).map(|_| new_session_token()).collect();
+        let tokens: HashSet<String> = (0..1000)
+            .map(|_| new_session_token().expect("random"))
+            .collect();
         assert_eq!(tokens.len(), 1000);
     }
 

@@ -1,0 +1,3 @@
+[
+  "find BenchProtectedLarge {_rperm:{$in:[null,string,string]}} projection={\"secret\":0} sort={\"n\":1} limit=1000"
+]

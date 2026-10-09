@@ -244,6 +244,10 @@ pub async fn dispatch(
     // a multipart one into `{}`, answered an unparsable one with 400, a top-level scalar with 400
     // and an oversized one with 413, so a write reaching here with no body is one whose request
     // carried something the JSON extractor still refused, and that stays a refusal.
+    //
+    // Known difference: a top-level **array** body reaches here as no object and answers 107, where
+    // upstream validates the array's indices as field names and answers 105. Not reproduced yet; do
+    // not read the 107 as upstream's.
     let body = || -> Result<&Json, RouteError> {
         body.as_ref().ok_or_else(|| {
             RouteError::Parse(ParseError::invalid_json("body must be a JSON object"))

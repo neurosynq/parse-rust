@@ -354,10 +354,13 @@ async fn update_inner(
     // **A password change revokes every session and, for a non-master caller, mints a replacement**
     // (`RestWrite.js:1284-1303`). Both halves matter and they are not symmetric: revoking is what
     // makes a password change mean anything, and the new token is what stops the caller logging
-    // themselves out by changing their own password. Master gets the revocation and no new token,
-    // because upstream gates `generateNewSession` on the caller not being master.
+    // themselves out by changing their own password. Master and maintenance get the revocation and
+    // no new token, because upstream sets `generateNewSession` only for a caller that is neither
+    // (`RestWrite.js:880-885`). The revocation is `revokeSessionOnPasswordReset` at its default,
+    // true; parse-rust does not expose the option.
     //
-    // Runs after the write, as upstream's `handleFollowup` does. A failure here leaves the password
+    // Runs after the write, as upstream's `handleFollowup` does, revocation first and then the new
+    // session (`RestWrite.js:1283-1301`). A failure here leaves the password
     // changed and the old sessions alive, which is the safe direction to fail in only because the
     // caller can retry; it is not silent, because the error reaches the client.
     if changes_password {

@@ -138,6 +138,12 @@ pub struct ParseErrorInfo {
     /// attaches the `.catch` that rewrites storage failures (`DatabaseController.js:1583-1596`).
     /// [`ParseError::before_query`] sets it, and the read path leaves such an error as it is.
     pub before_query: bool,
+    /// Found while building the query, but raised upstream only once the query is sent: the driver
+    /// serializes the filter inside the read, after the read path's `.catch` is attached. A regex
+    /// pattern with a NUL byte is the case: bson 3 refuses to construct it, where the driver
+    /// refused to encode it. [`ParseError::at_query`] sets it, and [`ParseError::before_query`]
+    /// leaves such an error unmarked, so the read path sanitizes it as a storage failure.
+    pub at_query: bool,
     /// A read reached a class its request's schema snapshot lacks, and `_SCHEMA` has it: another
     /// server created the class after the snapshot was taken. Never sent to a client. The server
     /// rebuilds its schema cache and runs the read again, as upstream's `getOneSchema` reloads on
@@ -202,7 +208,16 @@ impl ParseError {
     /// Mark an error as raised before the database was asked. See [`ParseErrorInfo::before_query`].
     #[must_use]
     pub fn before_query(mut self) -> Self {
-        self.info.before_query = true;
+        self.info.before_query = !self.info.at_query;
+        self
+    }
+
+    /// Mark an error as raised by the database call, wherever it was found. See
+    /// [`ParseErrorInfo::at_query`].
+    #[must_use]
+    pub fn at_query(mut self) -> Self {
+        self.info.at_query = true;
+        self.info.before_query = false;
         self
     }
 

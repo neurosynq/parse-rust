@@ -99,6 +99,21 @@ impl MongoAdapter {
         })
     }
 
+    /// Ask the server to answer, and say why it cannot.
+    ///
+    /// `connect` does not contact the server, so the first operation is where an unreachable or
+    /// refusing database shows up, and through `mongo_err` it shows up as upstream's fixed
+    /// `Database error`, which names neither the host nor the cause. Startup calls this first to
+    /// fail with the driver's own account instead: the addresses it tried and what each answered.
+    /// The driver's text names hosts, never the credentials in the URI.
+    pub async fn ping(&self) -> Result<(), String> {
+        self.db
+            .run_command(doc! { "ping": 1 })
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// A counter that moves whenever this adapter has written `_SCHEMA`.
     ///
     /// The schema cache reads it before a load and stores it with the result; a mismatch on the
@@ -401,8 +416,18 @@ fn sort_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
 }
 
 /// The projection for a read, or `None` for every field.
+///
+/// Without `keys`, `omit_fields` becomes an exclusion projection: those fields are never read
+/// from the database. The read path strips them from every row afterwards regardless.
 fn projection_doc(schema: &ClassSchema, options: &QueryOptions) -> Option<Document> {
-    let keys = options.keys.as_ref()?;
+    let Some(keys) = options.keys.as_ref() else {
+        let exclude = options.omit_fields.as_ref().filter(|e| !e.is_empty())?;
+        let mut projection = Document::new();
+        for k in exclude {
+            projection.insert(storage_key(schema, k), 0);
+        }
+        return Some(projection);
+    };
     let mut projection = Document::new();
     for k in keys {
         // A selected `$score` is the search's relevance, returned as `score`
@@ -460,6 +485,9 @@ fn mongo_err(e: mongodb::error::Error) -> ParseError {
         };
     }
     if is_transient(&e) {
+        // The client's answer is upstream's fixed text; the cause goes to the log, as upstream's
+        // `handleError` logs the driver error before rethrowing (`MongoStorageAdapter.js:291-293`).
+        eprintln!("parse-rust: database error: {e}");
         return ParseError::new(ErrorCode::InternalServerError, "Database error");
     }
     // Everything else is upstream's bare rethrow: a driver error that is not a `Parse.Error`, so
@@ -1174,9 +1202,20 @@ impl StorageAdapter for MongoAdapter {
             return Ok(Vec::new());
         }
         // Built before anything is awaited, as upstream's synchronous `transformWhere` is
-        // (`MongoStorageAdapter.js:728-729`), so an invalid point is raised before the read path's
+        // (`MongoStorageAdapter.js:730`), so an invalid point is raised before the read path's
         // sanitizing `.catch` exists. See `ParseErrorInfo::before_query`.
-        let filter = transform_where(schema, query).map_err(ParseError::before_query)?;
+        //
+        // An error upstream's driver raises when it sends the query (`ParseErrorInfo::at_query`)
+        // comes after the text index is built, so the index is built first here too: its own
+        // refusal, a missing field, is what answers, and a successful build is left in place.
+        let filter = match transform_where(schema, query) {
+            Ok(filter) => filter,
+            Err(e) if e.info.at_query => {
+                self.create_text_indexes_if_needed(schema, query).await?;
+                return Err(e);
+            }
+            Err(e) => return Err(e.before_query()),
+        };
         self.create_text_indexes_if_needed(schema, query).await?;
         // The database refuses a negative skip when the cursor runs, after the query is built and
         // the text index exists. The driver's builder cannot carry one, so it is refused here, at
@@ -1226,9 +1265,18 @@ impl StorageAdapter for MongoAdapter {
         // The same find the driver would run, as a command, inside `explain`. Upstream asks the
         // Node driver's cursor for `.explain(verbosity)` (`MongoCollection.js:176`), which sends
         // exactly this, through the same `MongoCollection.find` an ordinary query takes: so the
-        // text index is created first and a missing geo index is built and retried, here as there.
+        // query is built first, synchronously, then the text index is created, and a missing geo
+        // index is built and retried, here as there. An error the driver raises only when it sends
+        // the query waits for the index, as in `find`.
+        let filter = match transform_where(schema, query) {
+            Ok(filter) => filter,
+            Err(e) if e.info.at_query => {
+                self.create_text_indexes_if_needed(schema, query).await?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         self.create_text_indexes_if_needed(schema, query).await?;
-        let filter = transform_where(schema, query)?;
         let mut find = doc! {
             "find": schema.class_name.as_str(),
             "filter": filter.clone(),

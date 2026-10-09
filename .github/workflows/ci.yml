@@ -25,6 +25,34 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # `rust-version` is a promise to `cargo install` users, so it is built at, not assumed. uuid 1.27
+  # is what raised it to 1.89; a dependency that needs more fails here first.
+  msrv:
+    name: builds on the declared rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install the declared toolchain
+        run: |
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$MSRV" --profile minimal
+          echo "MSRV=$MSRV" >> "$GITHUB_ENV"
+
+      - name: build
+        run: cargo +"$MSRV" build --workspace --locked
+
+  # A Rust API break must cost a minor version: checked against the last release on crates.io,
+  # so a patch that breaks an embedder fails here rather than on their `cargo update`. Crates with
+  # `publish = false` are skipped.
+  semver:
+    name: semver against the last release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
   rust:
     name: rust (MongoDB ${{ matrix.mongodb }})
     runs-on: ubuntu-latest
@@ -34,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mongodb: ["7", "9"]
+        mongodb: ["8", "9"]
     # The adapter tests, the schema-format oracle and the acceptance gates all need a real
     # MongoDB. Mocking it would test that the mock behaves like the mock.
     services:
@@ -56,6 +84,12 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `test-harness` and `bench-instrumentation` are off in every release build, so the step
+      # above never compiles the code behind them. Both runs are needed: code under
+      # `cfg(not(feature = ...))` is linted only by the first.
+      - name: clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       - name: test
         run: cargo test --workspace
 
@@ -75,6 +109,11 @@ jobs:
 
       - name: js_number differential (needs node only)
         run: cargo test -p parse-rust-core --test js_number_differential -- --ignored
+
+      # The JavaScript regex grammar check and the `RegExp.prototype.source` rendering, each
+      # judged by node over generated patterns.
+      - name: js regex differentials (needs node only)
+        run: cargo test -p parse-rust-mongo --lib -- --ignored random_patterns_match_node regex_source_matches_node
 
       # Boots parse-rust on an ephemeral port and replays a spec file's assertions over HTTP.
       # Every assertion in these runners holds against real parse-server too, so a failure here

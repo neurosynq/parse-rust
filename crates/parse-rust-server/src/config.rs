@@ -395,6 +395,37 @@ impl ServerConfig {
         self
     }
 
+    /// Refuse a mount path the router cannot serve as a literal prefix.
+    ///
+    /// The path becomes a route prefix, and both routers read syntax in it, differently. axum 0.8
+    /// reads `{name}` and `{*name}` as parameters and panics on a segment opening with `:`.
+    /// Upstream's Express 5 router reads `:name` anywhere in a segment as a parameter, so `/a:b`
+    /// matches `/a` followed by anything, reads `{...}` as an optional group, and refuses `(`, `)`,
+    /// `[`, `]`, `+` and `!` at boot. So every one of those characters is refused here: none of them
+    /// can be served the way upstream serves it, and a mount that silently means something else
+    /// is worse than one refused at start. An empty path and `/` both mean the root.
+    pub fn check_mount_path(&self) -> Result<(), String> {
+        let path = self.mount_path.as_str();
+        if path.is_empty() {
+            return Ok(());
+        }
+        let refuse = |why: &str| Err(format!("invalid mount path {path:?}: {why}"));
+        if !path.starts_with('/') {
+            return refuse("it must start with `/`");
+        }
+        // A request path never carries either: `?` opens the query and `#` the fragment, so a
+        // mount containing one could match nothing.
+        if path.contains(['?', '#']) {
+            return refuse("`?` and `#` cannot occur in a request path");
+        }
+        // A backslash too: upstream's router reads it as an escape, so the path is not literal there.
+        const SYNTAX: [char; 11] = ['{', '}', '*', ':', '(', ')', '[', ']', '+', '!', '\\'];
+        if let Some(c) = path.chars().find(|c| SYNTAX.contains(c)) {
+            return refuse(&format!("`{c}` is route syntax, not literal text"));
+        }
+        Ok(())
+    }
+
     /// True when any client key is configured. Upstream's rule is all-or-nothing: if *any* of
     /// these is set, a non-master request must present one that matches
     /// (`middlewares.js:255-265`). If none is configured, none is required.
@@ -409,6 +440,41 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_path_must_be_a_literal_prefix() {
+        let check = |p: &str| ServerConfig::new("a", "m").mount_path(p).check_mount_path();
+        for ok in [
+            "",
+            "/",
+            "/parse",
+            "/parse/",
+            "/api/v1",
+            "/api//v1",
+            "/a-b_c.d~e",
+        ] {
+            assert!(check(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "parse",
+            "/:app",
+            "/parse/:app",
+            "/{app}",
+            "/{*rest}",
+            "/a*",
+            "/a}",
+            "/parse?x",
+            "/parse#x",
+            "/a:b",
+            "/a(b)",
+            "/a[b]",
+            "/a+",
+            "/a!",
+            "/a\\b",
+        ] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
+    }
 
     fn fields(config: &ProtectedFieldsConfig, class: &str, entity: &str) -> Vec<String> {
         config

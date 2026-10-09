@@ -10,7 +10,7 @@
 # fails with the cell named.
 #
 # The closing table is raw p50s labelled baseline-unclassified. It carries no ratios and no
-# verdicts, because none are justified before 0.4.0's A/A noise floor exists.
+# verdicts, because none are justified before 0.5.0's A/A noise floor exists.
 #
 # Usage:
 #   tools/bench/micro.sh

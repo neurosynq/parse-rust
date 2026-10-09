@@ -15,6 +15,8 @@ name: ${PRBENCH_PREFIX:-prbench}
 
 services:
   mongo:
+    # MongoDB 7.0.25, although the project now tests against 8 and 9: the recorded 0.3.0 and 0.4.0
+    # baselines were measured on it, and moving the stack is a new baseline rather than an update.
     image: mongo:7.0.25@sha256:82db6c6c8103eee46ca820c190742b7c280d02d6f993903a603cec9d56be374b
     container_name: ${PRBENCH_PREFIX:-prbench}-mongo
     ports:

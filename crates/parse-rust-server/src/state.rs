@@ -20,6 +20,10 @@ pub struct AppState {
     config: Arc<ServerConfig>,
     storage: Arc<MongoAdapter>,
     schemas: Arc<SchemaCache>,
+    /// Every request's work, which runs detached from its connection. A graceful shutdown waits
+    /// for these as well as for open connections, because a request whose client has gone still
+    /// has writes to finish.
+    tasks: tokio_util::task::TaskTracker,
 }
 
 impl AppState {
@@ -28,6 +32,7 @@ impl AppState {
             schemas: Arc::new(SchemaCache::new(config.schema_cache_ttl)),
             config: Arc::new(config),
             storage: Arc::new(storage),
+            tasks: tokio_util::task::TaskTracker::new(),
         }
     }
 
@@ -53,6 +58,21 @@ impl AppState {
         Arc::clone(&self.config)
     }
 
+    /// The tracker every request's detached work is spawned on.
+    pub(crate) fn tasks(&self) -> &tokio_util::task::TaskTracker {
+        &self.tasks
+    }
+
+    /// Resolve once every request's work has finished, including requests whose clients have
+    /// disconnected. For an embedder that serves the router itself and wants a graceful stop.
+    ///
+    /// Call it only once your own server has stopped accepting connections. Called earlier, it can
+    /// resolve between one request's work finishing and the next one's starting.
+    pub async fn drained(&self) {
+        self.tasks.close();
+        self.tasks.wait().await;
+    }
+
     pub fn storage(&self) -> &MongoAdapter {
         &self.storage
     }
@@ -70,6 +90,12 @@ impl AppState {
     /// `_User` indexes are unconditional here, which is what their flags default to.
     pub async fn ensure_indexes(&self) -> Result<(), ParseError> {
         use parse_rust_storage::StorageAdapter;
+        // First, so a database that cannot be reached is reported as that, with the driver's
+        // reason, rather than as the first index build's `Database error`.
+        self.storage
+            .ping()
+            .await
+            .map_err(|why| ParseError::internal(format!("cannot reach MongoDB: {why}")))?;
         self.storage
             .ensure_index("_User", &["username"], None, true, false)
             .await?;

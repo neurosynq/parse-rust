@@ -25,7 +25,12 @@ async fn run() -> std::io::Result<()> {
     // Placeholder wiring. Upstream has roughly 292 options and a real option surface is not built
     // yet; reading a handful of environment variables is enough to serve the routes that exist,
     // and pretending otherwise would be worse than saying so.
-    let env = |k: &str| std::env::var(k).ok();
+    //
+    // **An empty variable is unset**, for every option, because upstream's CLI reads one only
+    // when it is truthy (`cli/utils/commander.js:64`, `if (env[key])`), so `FOO=` in a compose
+    // file means the default there. Reading it as a value would put the API at the root for an
+    // empty `PARSE_SERVER_MOUNT_PATH` where upstream serves `/parse`.
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
 
     // **The identity has no defaults, deliberately.** Upstream's documentation uses `myAppId` and
     // `myMasterKey` as examples, and defaulting to them here would mean a server started without
@@ -34,7 +39,7 @@ async fn run() -> std::io::Result<()> {
     // to start is a loud, fixable mistake; one that starts with a guessable master key is a
     // silent, unfixable one.
     let required = |k: &str| -> std::io::Result<String> {
-        std::env::var(k).map_err(|_| {
+        env(k).ok_or_else(|| {
             std::io::Error::other(format!(
                 "{k} is required. parse-rust has no default application id or master key: \
                  the master key bypasses every access control, so a default would be a \
@@ -53,6 +58,12 @@ async fn run() -> std::io::Result<()> {
     }
     if let Some(m) = env("PARSE_SERVER_MOUNT_PATH") {
         config.mount_path = m;
+        config.check_mount_path().map_err(|why| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("PARSE_SERVER_MOUNT_PATH: {why}"),
+            )
+        })?;
     }
 
     // Every option below carries upstream's env var name and upstream's default, read at the pin.
@@ -167,8 +178,8 @@ async fn run() -> std::io::Result<()> {
     // **The empty array cannot be expressed here and that is upstream's limitation too**: there is
     // no way to pass an empty array through an environment variable, so `masterKeyIps: []`, which
     // disables the key entirely, is reachable only through `ServerConfig`. Setting the variable to
-    // an empty string is an **error**, not a silent deny-all, because upstream's `validateIps`
-    // refuses the empty entry `arrayParser` produces from it and refuses to boot.
+    // an empty string is unset, so it keeps the loopback default, as upstream's CLI skips it; an
+    // empty entry inside a list, such as `127.0.0.1,`, is refused at start.
     if let Some(v) = env("PARSE_SERVER_MASTER_KEY_IPS") {
         config.master_key_ips = ip_allowlist(&v, "PARSE_SERVER_MASTER_KEY_IPS")?;
     }
@@ -199,7 +210,15 @@ async fn run() -> std::io::Result<()> {
     // machine, and 1337 is exactly where that one is. The default sits in the 27xxx block this
     // repository has registered for differential runs. `PORT=0` binds an ephemeral port and is
     // what every test uses, so parallel test batteries cannot collide with each other.
-    let port: u16 = env("PORT").and_then(|p| p.parse().ok()).unwrap_or(27800);
+    // An unparsable `PORT` is refused rather than replaced by the default, because a typo must not
+    // quietly put the server on a port nobody configured. An empty one is unset, as every variable
+    // is.
+    let port: u16 = match env("PORT") {
+        Some(p) => p
+            .parse()
+            .map_err(|_| std::io::Error::other(format!("PORT must be a port number, got {p:?}")))?,
+        None => 27800,
+    };
 
     // `PARSE_SERVER_HOST` is upstream's option name, but the default is deliberately different:
     // upstream defaults to `0.0.0.0` (`Options/Definitions.js:326-328`) and this defaults to
@@ -216,21 +235,110 @@ async fn run() -> std::io::Result<()> {
     // is deliberate: every embedder needs them, and a step only the binary performs is a step an
     // embedded deployment silently skips.
     let state = AppState::new(config, storage);
-    let (bound, server) = parse_rust_server::serve(state, addr).await?;
+    // Registered before the server starts, so a signal that arrives while it is starting is kept.
+    let mut signals = Signals::new();
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stopping = stop.clone();
+    let (bound, server) =
+        parse_rust_server::serve_with_shutdown(
+            state,
+            addr,
+            async move { stopping.notified().await },
+        )
+        .await?;
     // Machine-readable on its own line, so a harness can bind port 0 and discover the result.
     println!("parse-rust listening on http://{bound}");
-    server.await
+    // SIGTERM is how `docker stop` and most supervisors ask a process to end, and a container's
+    // first process has no default action for it, so without a handler it ran until killed. On
+    // the signal the server stops accepting connections and lets the requests already in flight
+    // finish, a batch included, for at most `DRAIN`: inside Docker's default 10 s stop window, so
+    // the drain ends on its own terms rather than by the kill that follows.
+    const DRAIN: std::time::Duration = std::time::Duration::from_secs(8);
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => return result,
+        _ = signals.next() => {}
+    }
+    stop.notify_one();
+    // A second signal means stop now. Either way short of a clean drain is an error exit, so a
+    // supervisor can tell a stop that finished every request from one that did not.
+    tokio::select! {
+        drained = tokio::time::timeout(DRAIN, server) => match drained {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::other(format!(
+                "requests still running after {DRAIN:?}; stopping anyway"
+            ))),
+        },
+        _ = signals.next() => Err(std::io::Error::other(
+            "a second signal; stopping without waiting for requests",
+        )),
+    }
+}
+
+/// SIGTERM and Ctrl-C, registered once and kept for the life of the process.
+///
+/// One registration for both waits, the stop and the forced stop: registering afresh for the second
+/// wait left a gap in which a signal sent right after the first was lost, so the drain ran its full
+/// time instead of stopping.
+struct Signals {
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+}
+
+impl Signals {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Self {
+                term: signal(SignalKind::terminate()).ok(),
+                interrupt: signal(SignalKind::interrupt()).ok(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    /// The next SIGTERM or Ctrl-C.
+    async fn next(&mut self) {
+        #[cfg(unix)]
+        {
+            match (&mut self.term, &mut self.interrupt) {
+                (Some(term), Some(interrupt)) => {
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = interrupt.recv() => {}
+                    }
+                }
+                (Some(term), None) => {
+                    term.recv().await;
+                }
+                (None, Some(interrupt)) => {
+                    interrupt.recv().await;
+                }
+                (None, None) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 /// `parsers.arrayParser`, which is a plain `split(',')` and nothing else
 /// (`Options/parsers.js:42-50`).
 ///
-/// **No trimming and no dropping of empty entries, and the second part is load-bearing.**
-/// `PARSE_SERVER_ALLOW_ORIGIN=""` must parse to one empty origin, not to no origins. Both spellings
-/// are closed now, since `resolve_origin` stopped treating an empty list as unconfigured, but they
-/// are closed for different reasons and only one of them is upstream's: upstream's `?? ['*']` fires
-/// on an absent value, and a configured empty entry is what it actually carries. An empty string
-/// matches no browser origin, which is the intent, and it survives only if it survives here.
+/// **No trimming and no dropping of empty entries**, as upstream's split keeps them: an empty entry
+/// such as the one in `https://a.example,` matches no browser origin. A variable that is empty as a
+/// whole never reaches this, because an empty variable is unset, so `PARSE_SERVER_ALLOW_ORIGIN=`
+/// is upstream's default `*`, as upstream's CLI reads it.
 fn list(value: &str) -> Vec<String> {
     value.split(',').map(str::to_string).collect()
 }

@@ -11,7 +11,7 @@
 //!   `_SessionToken`, `_InstallationId`, `_ContentType` and friends from the body, and **deletes
 //!   them**, which is why a saved Parse object never grows an `_ApplicationId` field. It does so
 //!   only for a request whose headers do not already name the app, and it reads exactly that set:
-//!   see [`Mode`].
+//!   see `Mode`.
 //! - `ClassesRouter` merges `req.body` with the decoded query string, so a `where` sent in the
 //!   body reaches the same code as one sent in the URL.
 //!
@@ -216,15 +216,20 @@ fn unroutable_method() -> http::Method {
 /// Upper bound on a buffered body. Without one, a request could exhaust memory.
 pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
 
-/// The health endpoint exactly: the mount plus `/health`, with or without a trailing slash, as
-/// Express's `api.use('/health', ...)` matches it. A suffix test also matched `/classes/health`.
+/// A write's JSON object body, parsed once here and read by the route's
+/// [`JsonBody`](crate::routes::http::JsonBody) extractor.
+#[derive(Debug, Clone)]
+pub struct ParsedBody(pub Json);
+
+/// The health endpoint: the mount plus `/health`, as routing normalizes the path, so a trailing
+/// slash or one extra leading slash is still the health route. Express's `api.use('/health', ...)`
+/// also matches any path below it, `/health/foo`, which this does not: a known difference. A suffix
+/// test also matched `/classes/health`.
 fn is_health(parts: &http::request::Parts, state: &AppState) -> bool {
-    let mount = state.config().mount_path.trim_end_matches('/');
-    parts
-        .uri
-        .path()
-        .strip_prefix(mount)
-        .is_some_and(|rest| rest == "/health" || rest == "/health/")
+    matches!(
+        crate::below_mount(parts.uri.path(), &state.config().mount_path),
+        crate::BelowMount::At("/health")
+    )
 }
 
 /// `PARSE_RUST_TRACE`, read once rather than from the environment on every request.
@@ -343,6 +348,9 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
         // A name that is not a valid method token still replaces the method upstream, and then
         // matches no route: Express answers 404. Falling back to the transport `POST` ran the
         // request as a create instead.
+        //
+        // Known difference: `_method: "HEAD"` is served by the `GET` route upstream and is a 404
+        // here.
         match map.shift_remove("_method") {
             Some(Json::String(m)) => Some(
                 m.to_uppercase()
@@ -376,21 +384,13 @@ pub async fn extract(State(state): State<AppState>, request: Request, next: Next
         return res;
     }
 
-    // The body has just been shown to parse as JSON, so declaring it as such is a statement of
-    // fact. axum's `Json` extractor requires the header; Express's parser does not, and the SDK
-    // sends `text/plain`.
-    parts.headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-    );
-
-    let body = match serde_json::to_vec(&Json::Object(map)) {
-        Ok(v) => Body::from(v),
-        Err(_) => Body::from(bytes),
-    };
+    // The parsed body travels as an extension rather than being serialized again. Serializing
+    // can lengthen it, `1e5` becoming `100000.0`, so a body accepted under the limit above could
+    // exceed it on the way to the route and be refused there as not JSON at all.
+    parts.extensions.insert(ParsedBody(Json::Object(map)));
     let trace = tracing_enabled();
     let (m, u) = (parts.method.clone(), parts.uri.clone());
-    let res = next.run(Request::from_parts(parts, body)).await;
+    let res = next.run(Request::from_parts(parts, Body::empty())).await;
     if trace {
         eprintln!("[trace] {m} {u} -> {}", res.status());
     }

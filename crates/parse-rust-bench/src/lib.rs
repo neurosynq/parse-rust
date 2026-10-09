@@ -9,7 +9,7 @@
 //! and says so.
 //!
 //! Every 0.3.0 record is labelled `baseline-unclassified`. No `faster`, `slower` or `equivalent`
-//! verdict is written until 0.4.0's A/A noise floor exists to justify one.
+//! verdict is written until 0.5.0's A/A noise floor exists to justify one.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

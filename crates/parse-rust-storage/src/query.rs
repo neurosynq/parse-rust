@@ -398,6 +398,12 @@ pub struct QueryOptions {
     /// Upstream converts `excludeKeys` into `keys` before it reaches storage, so an adapter only
     /// ever sees the positive form.
     pub keys: Option<Vec<String>>,
+    /// Fields the read may leave out, because they are removed from every row afterwards anyway:
+    /// protected fields, declared by the schema, that every row of the read loses. Ignored when
+    /// `keys` is set. An adapter may ignore it entirely: it is an optimization, never the
+    /// protection itself, and the read path strips the same fields after the query. Not the
+    /// client's `excludeKeys`, which upstream folds into `keys` before storage sees it.
+    pub omit_fields: Option<Vec<String>>,
     /// Compare strings under upstream's case-insensitive collation rather than byte for byte.
     ///
     /// `{caseInsensitive: true}` (`MongoStorageAdapter.js:723`, `:801-803`), which resolves to
@@ -433,6 +439,7 @@ impl Default for QueryOptions {
             skip: None,
             order: Vec::new(),
             keys: None,
+            omit_fields: None,
             case_insensitive: false,
             hint: None,
             comment: None,

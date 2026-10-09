@@ -28,5 +28,5 @@ bench-instrumentation = ["parse-rust-server/bench-instrumentation"]
 [dependencies]
 parse-rust-server.workspace = true
 parse-rust-mongo.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
 serde_json.workspace = true

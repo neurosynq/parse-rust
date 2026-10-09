@@ -6,7 +6,7 @@
 Generated, never hand-edited: rerunning over the same inputs produces the same file. The report
 carries raw distributions only. Every record is checked for the `baseline-unclassified` verdict
 and the report refuses to render one that claims anything else, because no verdict is justified
-before 0.4.0's A/A noise floor exists.
+before 0.5.0's A/A noise floor exists.
 """
 
 import hashlib
@@ -120,7 +120,7 @@ def main():
     w("hand; rerun `tools/bench/gate-j.sh` instead.")
     w("")
     w("**Every number here is `baseline-unclassified`.** No `faster`, `slower` or `equivalent`")
-    w("verdict is published at 0.3.0, because the A/A noise floor that would justify one is 0.4.0")
+    w("verdict is published at 0.3.0, because the A/A noise floor that would justify one is 0.5.0")
     w("work. A difference between two columns below is an observation, not a claim.")
     w("")
     w("## Context")
