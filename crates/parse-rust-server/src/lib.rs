@@ -340,8 +340,8 @@ pub async fn serve(
 
 /// [`serve`], stopping gracefully when `shutdown` completes: no new connections are accepted, and
 /// the returned future resolves once the requests already in flight have finished, including those
-/// whose clients disconnected. Bound the
-/// wait yourself if it must end by a deadline, as the binary does.
+/// whose clients disconnected. Bound the wait yourself if it must end by a deadline, as the binary
+/// does.
 pub async fn serve_with_shutdown(
     state: AppState,
     addr: std::net::SocketAddr,

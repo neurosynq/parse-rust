@@ -65,6 +65,9 @@ impl AppState {
 
     /// Resolve once every request's work has finished, including requests whose clients have
     /// disconnected. For an embedder that serves the router itself and wants a graceful stop.
+    ///
+    /// Call it only once your own server has stopped accepting connections. Called earlier, it can
+    /// resolve between one request's work finishing and the next one's starting.
     pub async fn drained(&self) {
         self.tasks.close();
         self.tasks.wait().await;

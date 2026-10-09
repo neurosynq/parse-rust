@@ -235,6 +235,8 @@ async fn run() -> std::io::Result<()> {
     // is deliberate: every embedder needs them, and a step only the binary performs is a step an
     // embedded deployment silently skips.
     let state = AppState::new(config, storage);
+    // Registered before the server starts, so a signal that arrives while it is starting is kept.
+    let mut signals = Signals::new();
     let stop = std::sync::Arc::new(tokio::sync::Notify::new());
     let stopping = stop.clone();
     let (bound, server) =
@@ -255,7 +257,7 @@ async fn run() -> std::io::Result<()> {
     tokio::pin!(server);
     tokio::select! {
         result = &mut server => return result,
-        _ = shutdown_signal() => {}
+        _ = signals.next() => {}
     }
     stop.notify_one();
     // A second signal means stop now. Either way short of a clean drain is an error exit, so a
@@ -267,32 +269,66 @@ async fn run() -> std::io::Result<()> {
                 "requests still running after {DRAIN:?}; stopping anyway"
             ))),
         },
-        _ = shutdown_signal() => Err(std::io::Error::other(
+        _ = signals.next() => Err(std::io::Error::other(
             "a second signal; stopping without waiting for requests",
         )),
     }
 }
 
-/// SIGTERM or Ctrl-C.
-async fn shutdown_signal() {
+/// SIGTERM and Ctrl-C, registered once and kept for the life of the process.
+///
+/// One registration for both waits, the stop and the forced stop: registering afresh for the second
+/// wait left a gap in which a signal sent right after the first was lost, so the drain ran its full
+/// time instead of stopping.
+struct Signals {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = term.recv() => {}
-                    _ = tokio::signal::ctrl_c() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+}
+
+impl Signals {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Self {
+                term: signal(SignalKind::terminate()).ok(),
+                interrupt: signal(SignalKind::interrupt()).ok(),
             }
         }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+
+    /// The next SIGTERM or Ctrl-C.
+    async fn next(&mut self) {
+        #[cfg(unix)]
+        {
+            match (&mut self.term, &mut self.interrupt) {
+                (Some(term), Some(interrupt)) => {
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = interrupt.recv() => {}
+                    }
+                }
+                (Some(term), None) => {
+                    term.recv().await;
+                }
+                (None, Some(interrupt)) => {
+                    interrupt.recv().await;
+                }
+                (None, None) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

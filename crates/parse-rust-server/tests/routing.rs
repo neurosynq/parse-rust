@@ -264,3 +264,79 @@ async fn serve_names_an_unreachable_database_and_why() {
     assert!(message.contains("127.0.0.1:1"), "{message}");
     assert!(!message.contains("hunter2"), "{message}");
 }
+
+/// A graceful stop waits for a request whose client has already gone. The batch is sent, and once
+/// its first rows are in the client drops the connection and the stop is triggered; the server
+/// future must not resolve before every row is written. The process used to exit with the batch
+/// part done, because only open connections were waited for. A client that leaves before its
+/// request reaches a handler abandons it before anything is written, which is hyper's behavior and
+/// leaves nothing half done.
+#[tokio::test]
+#[ignore = "needs MongoDB (PARSE_RUST_TEST_MONGO, default 127.0.0.1:27017)"]
+async fn a_graceful_stop_finishes_a_request_whose_client_left() {
+    use tokio::io::AsyncWriteExt;
+    let database = format!("parse_rust_it_drain_{}", std::process::id());
+    let config = parse_rust_server::ServerConfig::new(common::APP_ID, common::MASTER_KEY)
+        .mount_path("/parse");
+    let storage = parse_rust_mongo::MongoAdapter::connect(&common::mongo_uri(), &database)
+        .await
+        .expect("MongoDB must be reachable at PARSE_RUST_TEST_MONGO");
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stopping = stop.clone();
+    let (bound, server) = parse_rust_server::serve_with_shutdown(
+        parse_rust_server::AppState::new(config, storage),
+        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        async move { stopping.notified().await },
+    )
+    .await
+    .expect("bind");
+    let server = tokio::spawn(server);
+
+    let rows = 2000;
+    let requests: Vec<serde_json::Value> = (0..rows)
+        .map(|n| json!({"method": "POST", "path": "/parse/classes/Drain", "body": {"n": n}}))
+        .collect();
+    let body = serde_json::to_vec(&json!({ "requests": requests })).expect("json");
+    let head = format!(
+        "POST /parse/batch HTTP/1.1\r\nHost: {bound}\r\nX-Parse-Application-Id: {}\r\n\
+         X-Parse-Master-Key: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        common::APP_ID,
+        common::MASTER_KEY,
+        body.len()
+    );
+    let mut socket = tokio::net::TcpStream::connect(bound)
+        .await
+        .expect("connect");
+    socket.write_all(head.as_bytes()).await.expect("write");
+    socket.write_all(&body).await.expect("write");
+
+    let client = mongodb::Client::with_uri_str(common::mongo_uri())
+        .await
+        .expect("MongoDB");
+    let collection = client
+        .database(&database)
+        .collection::<bson::Document>("Drain");
+    let count = || async {
+        collection
+            .count_documents(bson::doc! {})
+            .await
+            .expect("count")
+    };
+    let started = std::time::Instant::now();
+    while count().await == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the batch never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The work is under way: the client leaves, then the server is told to stop.
+    drop(socket);
+    stop.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("the stop finished")
+        .expect("joined")
+        .expect("served");
+    assert_eq!(count().await, rows);
+}
