@@ -79,6 +79,7 @@ parse-rust-auth = { path = "crates/parse-rust-auth", version = "0.4.0" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tower = "0.5"
+tokio-util = { version = "0.7", features = ["rt"] }
 http = "1"
 parse-rust-core = { path = "crates/parse-rust-core", version = "0.4.0" }
 parse-rust-server = { path = "crates/parse-rust-server", version = "0.4.0" }

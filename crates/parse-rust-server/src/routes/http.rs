@@ -33,14 +33,17 @@ use crate::state::AppState;
 /// the database after its cache invalidation had already been consumed, leaving this node serving
 /// the old permissions, and a batch could stop with an arbitrary subset of its sub-requests
 /// applied. A spawned task is not cancelled by dropping its handle.
-async fn detached<F>(work: F) -> Response
+///
+/// Spawned on the server's task tracker, so a graceful shutdown waits for it even after its client
+/// has gone; a plain spawned task was dropped when the process exited, part way through its writes.
+async fn detached<F>(state: &AppState, work: F) -> Response
 where
     F: std::future::Future<Output = Response> + Send + 'static,
 {
     // The benchmark build's per-request database tally lives in a task-local; carry it across.
     #[cfg(feature = "bench-instrumentation")]
     let work = parse_rust_mongo::bench::carry(work);
-    match tokio::spawn(work).await {
+    match state.tasks().spawn(work).await {
         Ok(response) => response,
         // The task panicked, which no request path is allowed to do; answer as for any internal
         // failure rather than propagate it.
@@ -53,8 +56,11 @@ where
 
 /// Resolve the context and run one route, detached from the client's connection.
 async fn run(state: &AppState, authority: &Authority, incoming: Incoming) -> Response {
-    let (state, authority) = (state.clone(), authority.clone());
-    detached(async move { run_attached(&state, &authority, incoming).await }).await
+    let (owned, authority) = (state.clone(), authority.clone());
+    detached(state, async move {
+        run_attached(&owned, &authority, incoming).await
+    })
+    .await
 }
 
 /// Resolve the context and run one route.
@@ -654,7 +660,8 @@ pub async fn batch(
     // The session first, as upstream's middleware resolves it before the batch handler runs. The
     // classes the sub-requests name are loaded by `handle` once the batch has been validated, so a
     // batch refused for its size or shape costs no schema lookup.
-    detached(async move {
+    let tracker = state.clone();
+    detached(&tracker, async move {
         let mut rc = match state.request_context(&authority, Freshness::Cached).await {
             Ok(rc) => rc,
             Err(e) => return ParseErrorResponse(e).into_response(),

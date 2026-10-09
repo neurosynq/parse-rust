@@ -20,6 +20,10 @@ pub struct AppState {
     config: Arc<ServerConfig>,
     storage: Arc<MongoAdapter>,
     schemas: Arc<SchemaCache>,
+    /// Every request's work, which runs detached from its connection. A graceful shutdown waits
+    /// for these as well as for open connections, because a request whose client has gone still
+    /// has writes to finish.
+    tasks: tokio_util::task::TaskTracker,
 }
 
 impl AppState {
@@ -28,6 +32,7 @@ impl AppState {
             schemas: Arc::new(SchemaCache::new(config.schema_cache_ttl)),
             config: Arc::new(config),
             storage: Arc::new(storage),
+            tasks: tokio_util::task::TaskTracker::new(),
         }
     }
 
@@ -51,6 +56,18 @@ impl AppState {
     /// The shared config handle, for a router piece that outlives a borrow of this state.
     pub fn config_arc(&self) -> Arc<ServerConfig> {
         Arc::clone(&self.config)
+    }
+
+    /// The tracker every request's detached work is spawned on.
+    pub(crate) fn tasks(&self) -> &tokio_util::task::TaskTracker {
+        &self.tasks
+    }
+
+    /// Resolve once every request's work has finished, including requests whose clients have
+    /// disconnected. For an embedder that serves the router itself and wants a graceful stop.
+    pub async fn drained(&self) {
+        self.tasks.close();
+        self.tasks.wait().await;
     }
 
     pub fn storage(&self) -> &MongoAdapter {

@@ -28,6 +28,7 @@ parse-rust-storage.workspace = true
 parse-rust-mongo.workspace = true
 axum.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 http.workspace = true

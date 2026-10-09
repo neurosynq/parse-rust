@@ -339,7 +339,8 @@ pub async fn serve(
 }
 
 /// [`serve`], stopping gracefully when `shutdown` completes: no new connections are accepted, and
-/// the returned future resolves once the requests already in flight have been answered. Bound the
+/// the returned future resolves once the requests already in flight have finished, including those
+/// whose clients disconnected. Bound the
 /// wait yourself if it must end by a deadline, as the binary does.
 pub async fn serve_with_shutdown(
     state: AppState,
@@ -359,10 +360,14 @@ pub async fn serve_with_shutdown(
         .map_err(|e| std::io::Error::other(e.message))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
+    let tasks = state.clone();
     let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     Ok((bound, async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
-            .await
+            .await?;
+        // Connections are closed; requests whose clients disconnected may still be writing.
+        tasks.drained().await;
+        Ok(())
     }))
 }

@@ -258,12 +258,18 @@ async fn run() -> std::io::Result<()> {
         _ = shutdown_signal() => {}
     }
     stop.notify_one();
-    match tokio::time::timeout(DRAIN, server).await {
-        Ok(result) => result,
-        Err(_) => {
-            eprintln!("parse-rust: requests still running after {DRAIN:?}; stopping anyway");
-            Ok(())
-        }
+    // A second signal means stop now. Either way short of a clean drain is an error exit, so a
+    // supervisor can tell a stop that finished every request from one that did not.
+    tokio::select! {
+        drained = tokio::time::timeout(DRAIN, server) => match drained {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::other(format!(
+                "requests still running after {DRAIN:?}; stopping anyway"
+            ))),
+        },
+        _ = shutdown_signal() => Err(std::io::Error::other(
+            "a second signal; stopping without waiting for requests",
+        )),
     }
 }
 

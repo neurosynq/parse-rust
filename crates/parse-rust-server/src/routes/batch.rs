@@ -76,8 +76,9 @@ pub async fn handle(
     }
     // UPSTREAM-QUIRK: `batch.js:90-92`. Upstream recovers its mount by stripping `/batch` off
     // `req.originalUrl`, and throws a bare string when the URL does not end with it, so a request
-    // URL such as `/batch?x=1` is a bare 500 with nothing run, after the shape checks above. Running them instead would perform writes upstream never
-    // does. A fragment never reaches a server, so `/batch#f` arrives as `/batch` at both.
+    // URL such as `/batch?x=1` is a bare 500 with nothing run, after the shape checks above.
+    // Running it instead would perform writes upstream never does. A fragment never reaches a
+    // server, so `/batch#f` arrives as `/batch` at both.
     let Some(url_prefix) = original_url.strip_suffix(BATCH_PATH) else {
         return Err(ParseError::internal(
             "internal routing problem - expected url to end with batch",

@@ -63,7 +63,7 @@ jobs:
       # `cargo test --workspace` includes integration tests that boot the server against a real
       # database. Publishing from an untested commit is how a broken version becomes permanent.
       mongodb:
-        image: mongo:7
+        image: mongo:8
         ports:
           - 27017:27017
     steps:
